@@ -1,0 +1,1 @@
+"""Mayajaal backend domain package."""
