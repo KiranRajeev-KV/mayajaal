@@ -1,0 +1,43 @@
+# Backend quality and test commands. Run `just --list` to discover recipes.
+
+default: check
+
+# Apply Ruff's formatter and safe lint fixes.
+fix:
+    uv run ruff format .
+    uv run ruff check --fix .
+
+# Apply Ruff's formatter.
+format:
+    uv run ruff format .
+
+# Verify that formatting is already canonical.
+format-check:
+    uv run ruff format --check .
+
+# Run Ruff's linter.
+lint:
+    uv run ruff check .
+
+# Run strict static type checking.
+typecheck:
+    uv run basedpyright --project pyproject.toml
+
+# Verify dependency declarations against imports.
+deps:
+    uv run deptry .
+
+# Report only Vulture findings with 100% confidence.
+dead-code:
+    uv run vulture main.py mayajaal tests --min-confidence 100
+
+# Run the schema unit-test suite.
+test:
+    uv run python -m unittest discover -s tests -v
+
+# Generate Parquet tables from config.toml, or pass another config path.
+generate config="config.toml":
+    uv run python -m scripts.generate_dataset --config {{config}}
+
+# Run every non-mutating quality gate.
+check: format-check lint typecheck deps dead-code test
