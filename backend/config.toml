@@ -1,0 +1,17 @@
+# Non-secret configuration for manual synthetic-world generation.
+# Relative output paths are resolved from this file's directory.
+
+[synthetic_world]
+seed = 20260824
+normal_account_count = 100
+shared_household_count = 10
+accounts_per_shared_household = 3
+promo_ring_count = 2
+refund_ring_count = 2
+mixed_ring_count = 1
+accounts_per_ring = 5
+start_at = "2026-01-01T00:00:00+00:00"
+end_at = "2026-04-01T00:00:00+00:00"
+
+[output]
+directory = "artifacts/synthetic-world"
