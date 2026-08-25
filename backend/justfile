@@ -40,8 +40,12 @@ generate config="config.toml":
     uv run python -m scripts.generate_dataset --config {{config}}
 
 # Generate, resolve, and load the derived graph into local Neo4j.
-load-neo4j config="config.toml":
+neo4j-load config="config.toml":
     uv run python -m scripts.load_neo4j --config {{config}}
+
+# Delete the dedicated derived graph before loading a different dataset.
+reset-neo4j:
+    uv run python -m scripts.reset_neo4j
 
 # Run every non-mutating quality gate.
 check: format-check lint typecheck deps dead-code test

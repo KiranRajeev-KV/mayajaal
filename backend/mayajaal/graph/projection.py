@@ -79,6 +79,7 @@ def _relationship(
     target_type: GraphNodeType,
     target_id: str,
     event_id: UUID,
+    event_type: EventType,
     event_time: datetime,
 ) -> GraphRelationship:
     return GraphRelationship(
@@ -88,6 +89,7 @@ def _relationship(
         target_type=target_type,
         target_canonical_id=target_id,
         event_id=str(event_id),
+        event_type=event_type.value,
         event_time=event_time,
     )
 
@@ -110,7 +112,6 @@ def build_graph_projection(
                 properties=_properties(
                     canonical_id=str(account.id),
                     created_at=account.created_at,
-                    status=str(account.status),
                 ),
             )
             for account in sorted(world.accounts, key=lambda item: str(item.id))
@@ -171,7 +172,6 @@ def build_graph_projection(
                     discount_paise=order.discount_paise,
                     total_paise=order.total_paise,
                     item_count=order.item_count,
-                    status=str(order.status),
                 ),
             )
             for order in sorted(world.orders, key=lambda item: str(item.id))
@@ -200,8 +200,6 @@ def build_graph_projection(
                     canonical_id=str(refund.id),
                     amount_paise=refund.amount_paise,
                     requested_at=refund.requested_at,
-                    state=str(refund.state),
-                    resolved_at=refund.resolved_at,
                     reason_code=refund.reason_code,
                 ),
             )
@@ -221,6 +219,7 @@ def build_graph_projection(
                     GraphNodeType.DEVICE,
                     _canonical(event.device_id, ResolutionEntityType.DEVICE, resolved),
                     event.id,
+                    event.event_type,
                     event.occurred_at,
                 )
             )
@@ -235,6 +234,7 @@ def build_graph_projection(
                         event.ip_address_id, ResolutionEntityType.IP_ADDRESS, resolved
                     ),
                     event.id,
+                    event.event_type,
                     event.occurred_at,
                 )
             )
@@ -254,6 +254,7 @@ def build_graph_projection(
                         resolved,
                     ),
                     event.id,
+                    event.event_type,
                     event.occurred_at,
                 )
             )
@@ -272,6 +273,7 @@ def build_graph_projection(
                         GraphNodeType.ORDER,
                         order_id,
                         event.id,
+                        event.event_type,
                         event.occurred_at,
                     ),
                     _relationship(
@@ -283,6 +285,7 @@ def build_graph_projection(
                             event.address_id, ResolutionEntityType.ADDRESS, resolved
                         ),
                         event.id,
+                        event.event_type,
                         event.occurred_at,
                     ),
                 )
@@ -300,6 +303,7 @@ def build_graph_projection(
                     GraphNodeType.PROMOTION,
                     str(event.promotion_id),
                     event.id,
+                    event.event_type,
                     event.occurred_at,
                 )
             )
@@ -316,6 +320,7 @@ def build_graph_projection(
                     GraphNodeType.REFUND,
                     str(event.refund_id),
                     event.id,
+                    event.event_type,
                     event.occurred_at,
                 )
             )

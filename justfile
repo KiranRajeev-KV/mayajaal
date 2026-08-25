@@ -51,8 +51,12 @@ docker-logs service="":
 neo4j-up:
     docker compose up -d neo4j
 
-load-neo4j config="config.toml":
-    just --justfile {{backend_justfile}} load-neo4j {{config}}
+neo4j-load config="config.toml":
+    just --justfile {{backend_justfile}} neo4j-load {{config}}
+
+# Destructively clear the derived Neo4j graph before switching datasets.
+neo4j-reset:
+    just --justfile {{backend_justfile}} reset-neo4j
 
 check:
     just --justfile {{backend_justfile}} check

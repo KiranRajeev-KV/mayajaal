@@ -85,7 +85,9 @@ constraints and event-keyed relationship merges, so reloading an unchanged
 world is idempotent. Synthetic fraud labels are intentionally never projected.
 
 Every graph relationship comes from an immutable event and stores only its
-`event_id` and `event_time`. To obtain the graph as known at timestamp `T`, use
+`event_id`, `event_type`, and `event_time`. Mutable lifecycle values such as an
+account or order status and a refund completion state are deliberately excluded
+from graph nodes. To obtain the graph as known at timestamp `T`, use
 `relationships_known_at(T)`; it filters `event_time <= T` and therefore does
 not expose later activity through aggregate edge properties.
 
@@ -94,12 +96,14 @@ For a local database with the Graph Data Science plugin enabled:
 ```bash
 just docker-up              # start every Compose service
 # or: just neo4j-up         # start Neo4j only
-just load-neo4j
+just neo4j-load
 ```
 
 The root Justfile also exposes `docker-down`, `docker-start`, `docker-stop`,
 and `docker-logs` (optionally `service=neo4j`) for normal Compose lifecycle
-management.
+management. Before loading a changed seed, profile, or resolution policy, run
+`just neo4j-reset` to destructively clear the dedicated derived database and
+avoid combining experimental datasets.
 
 Neo4j is available at `http://localhost:7474` and Bolt at `bolt://localhost:7687`.
 The local Compose credentials are `neo4j` / `mayajaal`; override the loader with

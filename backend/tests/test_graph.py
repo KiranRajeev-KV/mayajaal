@@ -14,6 +14,7 @@ from mayajaal.graph import (
 )
 from mayajaal.graph.cypher import RELATIONSHIPS_KNOWN_AT
 from mayajaal.resolution import ResolutionEntityType, resolve_all
+from mayajaal.schemas import EventType
 from mayajaal.synthetic import GenerationProfile, generate_world
 
 
@@ -152,6 +153,58 @@ class GraphProjectionTests(unittest.TestCase):
             )
         )
 
+    def test_refund_cutoff_does_not_reveal_completion(self) -> None:
+        world, _, graph = projection()
+        requested = next(
+            event
+            for event in world.events
+            if event.event_type is EventType.REFUND_REQUESTED
+        )
+        resolved = next(
+            event
+            for event in world.events
+            if event.event_type is EventType.REFUND_RESOLVED
+            and event.refund_id == requested.refund_id
+        )
+        cutoff = requested.occurred_at + timedelta(minutes=1)
+        refund_edges = [
+            edge
+            for edge in graph.relationships
+            if edge.relationship_type is GraphRelationshipType.HAS_REFUND
+            and edge.target_canonical_id == str(requested.refund_id)
+            and edge.event_time <= cutoff
+        ]
+        self.assertEqual(
+            [edge.event_type for edge in refund_edges], ["refund_requested"]
+        )
+        self.assertGreater(resolved.occurred_at, cutoff)
+
+        refund_node = next(
+            node
+            for node in graph.nodes
+            if node.node_type is GraphNodeType.REFUND
+            and node.canonical_id == str(requested.refund_id)
+        )
+        self.assertNotIn("state", refund_node.properties)
+        self.assertNotIn("resolved_at", refund_node.properties)
+        self.assertTrue(
+            all(
+                "status" not in node.properties
+                for node in graph.nodes
+                if node.node_type in {GraphNodeType.ACCOUNT, GraphNodeType.ORDER}
+            )
+        )
+
+    def test_every_relationship_retains_its_source_event_type(self) -> None:
+        world, _, graph = projection()
+        event_types = {str(event.id): event.event_type.value for event in world.events}
+        self.assertTrue(
+            all(
+                relationship.event_type == event_types[relationship.event_id]
+                for relationship in graph.relationships
+            )
+        )
+
     def test_cutoff_filter_excludes_later_event_facts(self) -> None:
         _, _, graph = projection()
         cutoff = min(edge.event_time for edge in graph.relationships) + timedelta(
@@ -183,6 +236,9 @@ class GraphProjectionTests(unittest.TestCase):
         )
         self.assertTrue(
             any("{canonical_id: row.canonical_id}" in query for query in merge_queries)
+        )
+        self.assertTrue(
+            any("relationship.event_type" in query for query in merge_queries)
         )
 
 

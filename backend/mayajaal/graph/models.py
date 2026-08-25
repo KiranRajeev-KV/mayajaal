@@ -50,6 +50,7 @@ class GraphRelationship:
     target_type: GraphNodeType
     target_canonical_id: str
     event_id: str
+    event_type: str
     event_time: datetime
 
 

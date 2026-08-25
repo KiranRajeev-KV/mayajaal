@@ -8,6 +8,7 @@ from typing import Any, LiteralString, cast
 from neo4j import Driver, GraphDatabase, Query
 
 from .cypher import (
+    CLEAR_DERIVED_GRAPH,
     CONSTRAINTS,
     RELATIONSHIPS_KNOWN_AT,
     merge_nodes_query,
@@ -37,6 +38,7 @@ class TemporalGraphRelationship:
     source_canonical_id: str
     relationship_type: str
     event_id: str
+    event_type: str
     event_time: datetime
     target_type: str
     target_canonical_id: str
@@ -65,6 +67,11 @@ class Neo4jGraphRepository:
         with self.driver.session(database=self.database) as session:  # type: ignore[reportUnknownMemberType]
             for query in CONSTRAINTS:
                 session.run(Query(query)).consume()  # type: ignore[reportArgumentType]
+
+    def clear(self) -> None:
+        """Delete every node and relationship in the dedicated derived database."""
+        with self.driver.session(database=self.database) as session:  # type: ignore[reportUnknownMemberType]
+            session.run(CLEAR_DERIVED_GRAPH).consume()
 
     def load(self, projection: GraphProjection) -> GraphLoadReport:
         """Idempotently merge canonical nodes and event-backed relationships."""
@@ -134,6 +141,7 @@ class Neo4jGraphRepository:
                     source_canonical_id=record["source_canonical_id"],
                     relationship_type=record["relationship_type"],
                     event_id=record["event_id"],
+                    event_type=record["event_type"],
                     event_time=record["event_time"].to_native(),
                     target_type=record["target_type"],
                     target_canonical_id=record["target_canonical_id"],
@@ -147,5 +155,6 @@ def _relationship_row(relationship: GraphRelationship) -> dict[str, Any]:
         "source_canonical_id": relationship.source_canonical_id,
         "target_canonical_id": relationship.target_canonical_id,
         "event_id": relationship.event_id,
+        "event_type": relationship.event_type,
         "event_time": relationship.event_time,
     }

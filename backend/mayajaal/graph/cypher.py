@@ -29,8 +29,12 @@ def merge_relationships_query(
         f"MATCH (target:{target_type.value} {{canonical_id: row.target_canonical_id}}) "
         f"MERGE (source)-[relationship:{relationship_type.value} "
         "{event_id: row.event_id}]->(target) "
-        "SET relationship.event_time = row.event_time"
+        "SET relationship.event_type = row.event_type, "
+        "relationship.event_time = row.event_time"
     )
+
+
+CLEAR_DERIVED_GRAPH = "MATCH (node) DETACH DELETE node"
 
 
 RELATIONSHIPS_KNOWN_AT = """
@@ -41,6 +45,7 @@ RETURN labels(source)[0] AS source_type,
        source.canonical_id AS source_canonical_id,
        type(relationship) AS relationship_type,
        relationship.event_id AS event_id,
+       relationship.event_type AS event_type,
        relationship.event_time AS event_time,
        labels(target)[0] AS target_type,
        target.canonical_id AS target_canonical_id
