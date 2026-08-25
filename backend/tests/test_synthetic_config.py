@@ -12,6 +12,10 @@ class SyntheticConfigTests(unittest.TestCase):
         config = load_generation_config(config_path)
 
         self.assertEqual(config.synthetic_world.seed, 20260824)
+        self.assertEqual(config.synthetic_world.difficulty, "standard")
+        self.assertEqual(
+            config.synthetic_world.population.benign_network_group_count, 6
+        )
         self.assertEqual(config.output.directory, "artifacts/synthetic-world")
 
 

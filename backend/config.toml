@@ -10,8 +10,34 @@ promo_ring_count = 2
 refund_ring_count = 2
 mixed_ring_count = 1
 accounts_per_ring = 5
+difficulty = "standard"
 start_at = "2026-01-01T00:00:00+00:00"
 end_at = "2026-04-01T00:00:00+00:00"
+
+[synthetic_world.population]
+benign_network_group_count = 6
+accounts_per_benign_network_group = 5
+
+[synthetic_world.identity_lifecycle]
+additional_device_probability = 0.20
+additional_payment_probability = 0.16
+additional_address_probability = 0.10
+travel_ip_probability = 0.24
+
+[synthetic_world.commerce]
+normal_refund_probability = 0.055
+
+[synthetic_world.calendar]
+seasonal_window_center_fraction = 0.78
+seasonal_window_width_fraction = 0.18
+seasonal_activity_share = 0.22
+
+[synthetic_world.abuse]
+min_warmup_orders = 1
+max_warmup_orders = 3
+low_and_slow_probability = 0.45
+partial_identity_sharing_probability = 0.68
+ring_size_variation = 2
 
 [output]
 directory = "artifacts/synthetic-world"
