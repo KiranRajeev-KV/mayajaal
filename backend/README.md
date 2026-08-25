@@ -109,3 +109,42 @@ Neo4j is available at `http://localhost:7474` and Bolt at `bolt://localhost:7687
 The local Compose credentials are `neo4j` / `mayajaal`; override the loader with
 `MAYAJAAL_NEO4J_URI`, `MAYAJAAL_NEO4J_USERNAME`, and
 `MAYAJAAL_NEO4J_PASSWORD` when needed.
+
+## Leakage-safe graph features
+
+`mayajaal.features` is a model-independent feature layer over a
+storage-independent `GraphProjection`. `FeatureService.extract(account_id, T)`
+first forms a temporal snapshot containing only immutable event facts with
+`event_time <= T`; every aggregate is then calculated from that snapshot. The
+service does not accept the synthetic world or labels, so labels cannot enter
+feature computation. `extract_many(..., T)` builds that cutoff snapshot and its
+graph indexes once for the batch, then reuses them for each account vector.
+
+The stable feature schema is composed from small extractors:
+
+- account age: newly created accounts can be riskier when combined with other
+  signals, while the value itself is known from the creation fact;
+- identity reuse and connected-component size: unusually dense device, IP,
+  payment, and shipping-address sharing can reveal coordination, but legitimate
+  households remain ordinary shared identities rather than labels;
+- commerce history: order value, promotion reuse, and refund request/resolution
+  counts describe observed transaction behaviour only;
+- 24-hour identity/account velocity: bursts of new accounts or identity links
+  can expose rapid coordination;
+- latest observed device, payment, promotion, and shipping-country context:
+  categorical values are selected only from facts present by the cutoff.
+
+Future relationship facts, including a refund resolution after a request, are
+excluded before any family is calculated. Nodes are consulted only through
+event-backed links that exist in the cutoff snapshot, except an account's own
+creation time. This prevents future orders, identity links, promotions, refunds,
+and lifecycle completion from leaking into a vector.
+
+```bash
+just features-extract                       # writes account_features.parquet
+just features-extract another-profile.toml
+```
+
+The command defaults to the profile's `synthetic_world.end_at`; its Python
+entry point accepts a timezone-aware `--cutoff` for an earlier reconstruction
+and `--output` for the Parquet path.

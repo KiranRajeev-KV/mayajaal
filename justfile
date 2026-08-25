@@ -58,6 +58,9 @@ neo4j-load config="config.toml":
 neo4j-reset:
     just --justfile {{backend_justfile}} neo4j-reset
 
+
+features-extract config="config.toml":
+    just --justfile {{backend_justfile}} features-extract {{config}}
 check:
     just --justfile {{backend_justfile}} check
 
