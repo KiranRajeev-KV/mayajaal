@@ -38,10 +38,10 @@ def normalize_text(value: str) -> str:
 
 def normalize_email(value: str) -> str:
     """Normalize safe email presentation variance without provider-specific rewrites."""
-    compact = normalize_text(value).replace(" ", "")
+    compact = _WHITESPACE.sub("", unicodedata.normalize("NFKC", value)).strip()
     try:
         # Deliverability is intentionally disabled: resolution is not a network check.
-        return validate_email(compact, check_deliverability=False).normalized.casefold()
+        return validate_email(compact, check_deliverability=False).normalized
     except EmailNotValidError:
         # Preserve deterministic resolution for imperfect historical raw data.
         return compact
@@ -52,6 +52,8 @@ def normalize_phone(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).strip()
     try:
         parsed = phonenumbers.parse(normalized, None)
+        # `possible` is deliberate: Stage 2 formats dirty historical values and
+        # does not reject numbers solely because a regional prefix is unassigned.
         if phonenumbers.is_possible_number(parsed):
             return phonenumbers.format_number(
                 parsed, phonenumbers.PhoneNumberFormat.E164

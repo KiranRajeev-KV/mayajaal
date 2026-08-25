@@ -53,8 +53,14 @@ def address(number: int, **changes: str | None) -> Address:
 
 class ResolutionTests(unittest.TestCase):
     def test_email_and_phone_libraries_normalize_common_formatting(self) -> None:
-        self.assertEqual(normalize_email(" User@Example.Test "), "user@example.test")
+        self.assertEqual(normalize_email(" User@Example.Test "), "User@Example.Test")
         self.assertEqual(normalize_phone("+91 98765-43210"), "+919876543210")
+
+    def test_email_local_part_case_is_not_collapsed(self) -> None:
+        self.assertNotEqual(
+            normalize_email("User@example.test"),
+            normalize_email("user@example.test"),
+        )
 
     def test_known_address_formatting_variations_resolve_together(self) -> None:
         results = resolve_all(

@@ -54,6 +54,15 @@ paths = export_parquet(world, Path("artifacts/synthetic-world"))
 the corresponding separate Polars tables. The master seed drives a local NumPy
 generator and a local seeded Faker instance, with no global random-state use.
 
+## Stage 2: deterministic resolution
+
+`mayajaal.resolution.resolve_all` resolves entity identifiers deterministically.
+Email normalization uses `email-validator`'s `normalized` value without
+lowercasing the local part. Phone normalization uses libphonenumber's
+`is_possible_number` length-oriented check before formatting to E.164; this is
+intentional so formatting resolution can retain plausible historical values
+whose regional prefix is not currently valid.
+
 For manual generation, edit the non-secret [config.toml](config.toml) profile
 and run either command below:
 
