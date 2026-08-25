@@ -52,7 +52,7 @@ def normalize_phone(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).strip()
     try:
         parsed = phonenumbers.parse(normalized, None)
-        # `possible` is deliberate: Stage 2 formats dirty historical values and
+        # `possible` is deliberate: resolution formats dirty historical values and
         # does not reject numbers solely because a regional prefix is unassigned.
         if phonenumbers.is_possible_number(parsed):
             return phonenumbers.format_number(

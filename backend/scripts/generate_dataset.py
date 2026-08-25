@@ -1,4 +1,4 @@
-"""Generate Mayajaal's deterministic Stage 1 synthetic Parquet dataset."""
+"""Generate Mayajaal's deterministic synthetic Parquet dataset."""
 
 import argparse
 from pathlib import Path
