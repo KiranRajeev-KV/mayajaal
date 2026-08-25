@@ -38,9 +38,14 @@ group.
 
 ## Synthetic fraud world
 
-`mayajaal.synthetic` generates deterministic, validated temporal histories for
-normal customers, legitimate shared households, and promo, refund, and mixed
-abuse rings. Fraud ground truth appears only on `Event.synthetic_labels`.
+`mayajaal.synthetic` generates deterministic, validated temporal histories from
+hidden customer personas and contexts. Ordinary shoppers have different order
+cadences, payment preferences, promotion/refund propensities, device mixes, and
+identity lifecycle changes. Legitimate households share home addresses and IPs,
+while office/campus-like contexts share a network without necessarily sharing a
+device, address, or payment identity. Fraud ground truth appears only on the
+abuse-relevant `Event.synthetic_labels`; warm-up and ordinary campaign activity
+remain unlabelled.
 
 ```python
 from pathlib import Path
@@ -52,8 +57,28 @@ paths = export_parquet(world, Path("artifacts/synthetic-world"))
 ```
 
 `world` contains typed Pydantic entity/event tuples; `to_tables(world)` returns
-the corresponding separate Polars tables. The master seed drives a local NumPy
-generator and a local seeded Faker instance, with no global random-state use.
+the corresponding separate Polars tables. The master seed drives local,
+scope-derived NumPy generators and a local seeded Faker instance, with no global
+random-state use. The profile retains the original population/ring count fields
+and adds nested `population`, `identity_lifecycle`, `commerce`, `calendar`,
+and `abuse` settings. The calendar creates ordinary seasonal concentration; the
+`drift` difficulty preset moves activity later in the configured window. Its
+`difficulty` preset (`easy`, `standard`, `hard`, or `drift`) controls
+benign/fraud overlap and campaign timing; it never writes a label-shaped
+production property.
+
+Campaigns have independently seeded, variable ring sizes, partial identity
+sharing, warm-up orders, and either narrow burst windows or low-and-slow
+activity. They are hidden generation plans: only their abuse-relevant event
+labels become synthetic evaluation truth.
+
+Each `generate_dataset` run also writes `diagnostics.json`. It is an internal
+plausibility report—not a claim of calibration to a private merchant dataset—
+covering order/identity distributions, hourly and daily activity, class-support
+overlap, and account-projection degree, components, clustering, and
+assortativity. It raises visible warnings when a configured internal guardrail,
+such as a single diagnostic statistic perfectly separating labels, is violated.
+No SDMetrics dependency is required because no real reference data is available.
 
 ## Deterministic resolution
 
