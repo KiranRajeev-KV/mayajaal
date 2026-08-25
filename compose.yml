@@ -1,0 +1,18 @@
+services:
+  neo4j:
+    image: neo4j:5.26.0-community
+    environment:
+      NEO4J_AUTH: neo4j/mayajaal
+      NEO4J_PLUGINS: '["graph-data-science"]'
+      NEO4J_dbms_security_procedures_allowlist: gds.*
+      NEO4J_dbms_security_procedures_unrestricted: gds.*
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_plugins:/plugins
+
+volumes:
+  neo4j_data:
+  neo4j_plugins:

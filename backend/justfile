@@ -39,5 +39,9 @@ test:
 generate config="config.toml":
     uv run python -m scripts.generate_dataset --config {{config}}
 
+# Generate, resolve, and load the derived graph into local Neo4j.
+load-neo4j config="config.toml":
+    uv run python -m scripts.load_neo4j --config {{config}}
+
 # Run every non-mutating quality gate.
 check: format-check lint typecheck deps dead-code test
