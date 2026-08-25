@@ -11,7 +11,10 @@ from .world import SyntheticWorld
 
 def _table(records: Sequence[BaseModel]) -> pl.DataFrame:
     """Convert validated models into a portable, JSON-compatible Polars table."""
-    return pl.DataFrame([record.model_dump(mode="json") for record in records])
+    return pl.DataFrame(
+        [record.model_dump(mode="json") for record in records],
+        infer_schema_length=None,
+    )
 
 
 def to_tables(world: SyntheticWorld) -> dict[str, pl.DataFrame]:
