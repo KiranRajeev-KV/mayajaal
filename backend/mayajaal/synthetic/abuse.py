@@ -7,7 +7,7 @@ from numpy.random import Generator
 
 from mayajaal.schemas import AbuseType
 
-from .profile import AbuseProfile, DifficultyPreset
+from .profile import AbuseProfile, DifficultyBundle
 
 
 class AbuseStrategy(StrEnum):
@@ -46,15 +46,15 @@ def plan_campaign(
     strategy: AbuseStrategy,
     cluster_id: str,
     profile: AbuseProfile,
-    difficulty: DifficultyPreset,
+    difficulty: DifficultyBundle,
     rng: Generator,
 ) -> CampaignPlan:
     """Create one partial-sharing campaign without creating an obvious clique."""
-    chance = profile.partial_identity_sharing_probability
-    if difficulty is DifficultyPreset.EASY:
-        chance = min(chance + 0.22, 1.0)
-    elif difficulty in {DifficultyPreset.HARD, DifficultyPreset.DRIFT}:
-        chance = max(chance - 0.18, 0.15)
+    chance = min(
+        profile.partial_identity_sharing_probability
+        * difficulty.campaign_sharing_multiplier,
+        1.0,
+    )
     preferred: dict[AbuseStrategy, tuple[float, float, float, float]] = {
         AbuseStrategy.PROMO_FARM: (0.78, 0.48, 0.88, 0.28),
         AbuseStrategy.REFUND_ABUSE: (0.34, 0.42, 0.36, 0.82),
@@ -80,16 +80,25 @@ def plan_campaign(
         shared_ip=selected[1],
         shared_payment=selected[2],
         shared_address=selected[3],
-        low_and_slow=bool(rng.random() < profile.low_and_slow_probability),
-        warmup_orders=int(
-            rng.integers(profile.min_warmup_orders, profile.max_warmup_orders + 1)
+        low_and_slow=bool(
+            rng.random()
+            < min(
+                profile.low_and_slow_probability
+                * difficulty.campaign_low_and_slow_multiplier,
+                1.0,
+            )
+        ),
+        warmup_orders=max(
+            0,
+            round(
+                int(
+                    rng.integers(
+                        profile.min_warmup_orders, profile.max_warmup_orders + 1
+                    )
+                )
+                * difficulty.campaign_warmup_multiplier
+            ),
         ),
         activity_center_fraction=float(rng.uniform(0.18, 0.82)),
-        activity_spread_fraction=(
-            0.34
-            if difficulty is DifficultyPreset.DRIFT
-            else 0.18
-            if difficulty is DifficultyPreset.HARD
-            else 0.06
-        ),
+        activity_spread_fraction=(difficulty.burst_activity_spread_fraction),
     )

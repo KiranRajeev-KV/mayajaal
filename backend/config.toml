@@ -17,6 +17,13 @@ end_at = "2026-04-01T00:00:00+00:00"
 [synthetic_world.population]
 benign_network_group_count = 6
 accounts_per_benign_network_group = 5
+persona_weights = { occasional = 0.25, repeat = 0.25, promo_sensitive = 0.15, high_value = 0.10, commuter = 0.15, digital_first = 0.10 }
+
+[synthetic_world.benign_sharing]
+household_device_probability = 0.55
+household_payment_probability = 0.28
+office_device_probability = 0.03
+office_payment_probability = 0.01
 
 [synthetic_world.identity_lifecycle]
 additional_device_probability = 0.20
@@ -31,6 +38,7 @@ normal_refund_probability = 0.055
 seasonal_window_center_fraction = 0.78
 seasonal_window_width_fraction = 0.18
 seasonal_activity_share = 0.22
+drift_late_activity_power = 0.72
 
 [synthetic_world.abuse]
 min_warmup_orders = 1
@@ -38,6 +46,80 @@ max_warmup_orders = 3
 low_and_slow_probability = 0.45
 partial_identity_sharing_probability = 0.68
 ring_size_variation = 2
+
+[synthetic_world.prevalence]
+# Mayajaal benchmark rarity, not a merchant fraud-rate claim.
+preset = "development"
+target_labelled_account_rate = 0.03
+target_tolerance = 0.01
+strategy_weights = { promo = 0.40, refund = 0.30, mixed = 0.30 }
+
+[synthetic_world.diagnostics]
+min_variable_numeric_features = 5
+max_single_feature_perfect_separators = 0
+cutoff_fractions = [0.25, 0.50, 1.00]
+expected_active_numeric_features = [
+  "account_age_hours", "device_count", "ip_address_count",
+  "payment_identity_count", "address_count", "shared_device_account_count",
+  "shared_ip_account_count", "shared_payment_account_count",
+  "shared_address_account_count", "max_identity_reuse_count",
+  "identity_neighbour_count", "identity_component_account_count", "order_count",
+  "total_order_value_paise", "promotion_redemption_count",
+  "shared_promotion_account_count", "refund_requested_count",
+  "refund_resolved_count", "refund_requested_order_rate",
+]
+intentionally_sparse_numeric_features = [
+  "recent_shared_account_creation_count", "recent_shared_identity_event_count",
+]
+max_single_feature_auc = 0.95
+min_class_histogram_overlap = 0.05
+shap_top_feature_share_warning = 0.60
+
+[synthetic_world.validation]
+multi_seed_count = 5
+small_account_count = 2000
+full_account_count = 10000
+shap_sample_count = 1000
+
+[synthetic_world.difficulty_profiles.easy]
+persona_weight_temperature = 0.80
+benign_sharing_multiplier = 0.70
+identity_lifecycle_multiplier = 0.70
+campaign_sharing_multiplier = 1.30
+campaign_low_and_slow_multiplier = 0.56
+campaign_warmup_multiplier = 0.70
+seasonal_activity_multiplier = 0.75
+burst_activity_spread_fraction = 0.04
+
+[synthetic_world.difficulty_profiles.standard]
+persona_weight_temperature = 1.00
+benign_sharing_multiplier = 1.00
+identity_lifecycle_multiplier = 1.00
+campaign_sharing_multiplier = 1.00
+campaign_low_and_slow_multiplier = 1.00
+campaign_warmup_multiplier = 1.00
+seasonal_activity_multiplier = 1.00
+burst_activity_spread_fraction = 0.06
+
+[synthetic_world.difficulty_profiles.hard]
+persona_weight_temperature = 1.20
+benign_sharing_multiplier = 1.25
+identity_lifecycle_multiplier = 1.35
+campaign_sharing_multiplier = 0.72
+campaign_low_and_slow_multiplier = 1.33
+campaign_warmup_multiplier = 1.35
+seasonal_activity_multiplier = 1.10
+burst_activity_spread_fraction = 0.12
+
+[synthetic_world.difficulty_profiles.drift]
+persona_weight_temperature = 1.15
+benign_sharing_multiplier = 1.20
+identity_lifecycle_multiplier = 1.25
+campaign_sharing_multiplier = 0.78
+campaign_low_and_slow_multiplier = 1.22
+campaign_warmup_multiplier = 1.25
+seasonal_activity_multiplier = 1.15
+burst_activity_spread_fraction = 0.14
 
 [output]
 directory = "artifacts/synthetic-world"

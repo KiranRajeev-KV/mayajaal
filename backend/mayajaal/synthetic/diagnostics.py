@@ -1,8 +1,8 @@
-"""Internal plausibility diagnostics for a generated commerce world.
+"""Deterministic internal plausibility diagnostics for synthetic worlds.
 
-These diagnostics describe a simulator's own distributions and topology. They
-do not claim similarity to private merchant data and intentionally introduce no
-synthetic-data-quality dependency that requires a real reference dataset.
+The reports measure simulator diversity and benchmark shortcuts. They do not
+claim calibration to private merchant data. Label-aware sections are explicitly
+evaluation-only and never feed generation or feature extraction.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,13 +20,18 @@ import numpy as np
 from mayajaal.schemas import EventType
 
 if TYPE_CHECKING:
-    from .profile import GenerationProfile
+    from mayajaal.features import FeatureSchema, FeatureVector
+
+    from .profile import DiagnosticProfile, GenerationProfile
     from .world import SyntheticWorld
+
+
+IDENTITY_TYPES = ("device", "ip", "payment", "address")
 
 
 @dataclass(frozen=True)
 class ClassOverlap:
-    """The support overlap of one evaluation-only account statistic."""
+    """Evaluation-only support overlap for one account or feature statistic."""
 
     positive_min: float
     positive_max: float
@@ -35,8 +41,76 @@ class ClassOverlap:
 
 
 @dataclass(frozen=True)
+class NumericFeatureHealth:
+    """Cutoff-safe health of one numeric feature column."""
+
+    unique_count: int
+    variance: float
+    zero_fraction: float
+    median: float
+    p95: float
+    class_histogram_overlap: float | None
+    class_auc: float | None
+
+
+@dataclass(frozen=True)
+class CategoricalFeatureHealth:
+    """Cutoff-safe health of one categorical feature column."""
+
+    cardinality: int
+    missing_fraction: float
+    dominant_fraction: float
+    best_category_balanced_accuracy: float | None
+
+
+@dataclass(frozen=True)
+class FeatureHealthAtCutoff:
+    """Feature-health report at one named temporal reconstruction point."""
+
+    cutoff: datetime
+    sample_count: int
+    labelled_sample_count: int
+    numeric: dict[str, NumericFeatureHealth]
+    categorical: dict[str, CategoricalFeatureHealth]
+    redundant_numeric_pairs: tuple[tuple[str, str, float], ...]
+    inactive_expected_numeric_features: tuple[str, ...]
+    intentionally_sparse_numeric_features: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cutoff": self.cutoff.isoformat(),
+            "sample_count": self.sample_count,
+            "labelled_sample_count": self.labelled_sample_count,
+            "numeric": {name: asdict(value) for name, value in self.numeric.items()},
+            "categorical": {
+                name: asdict(value) for name, value in self.categorical.items()
+            },
+            "redundant_numeric_pairs": [
+                {"left": left, "right": right, "absolute_correlation": value}
+                for left, right, value in self.redundant_numeric_pairs
+            ],
+            "inactive_expected_numeric_features": list(
+                self.inactive_expected_numeric_features
+            ),
+            "intentionally_sparse_numeric_features": list(
+                self.intentionally_sparse_numeric_features
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class FeatureHealthDiagnostics:
+    """Early, middle, and late feature-health snapshots."""
+
+    by_cutoff: dict[str, FeatureHealthAtCutoff]
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: value.to_dict() for name, value in self.by_cutoff.items()}
+
+
+@dataclass(frozen=True)
 class SyntheticDiagnostics:
-    """Stable internal summary of one deterministic generated world."""
+    """Stable internal world summary, independent of a model."""
 
     account_count: int
     event_count: int
@@ -51,7 +125,6 @@ class SyntheticDiagnostics:
     class_overlap: dict[str, ClassOverlap]
 
     def to_dict(self) -> dict[str, object]:
-        """Return a JSON-compatible deterministic report."""
         return {
             "account_count": self.account_count,
             "event_count": self.event_count,
@@ -75,8 +148,27 @@ def _mean(values: list[float]) -> float:
     return float(np.mean(values)) if values else 0.0
 
 
+def _median(values: list[float]) -> float:
+    return float(np.median(values)) if values else 0.0
+
+
+def _p95(values: list[float]) -> float:
+    return float(np.percentile(values, 95)) if values else 0.0
+
+
+def _gini(values: list[float]) -> float:
+    if not values or not any(values):
+        return 0.0
+    ordered = np.sort(np.asarray(values, dtype=float))
+    count = len(ordered)
+    return float(
+        (2.0 * np.dot(np.arange(1, count + 1), ordered))
+        / (count * float(np.sum(ordered)))
+        - (count + 1.0) / count
+    )
+
+
 def _overlap(positive: list[float], negative: list[float]) -> ClassOverlap:
-    """Measure interval overlap without fitting a classifier."""
     if not positive or not negative:
         return ClassOverlap(0.0, 0.0, 0.0, 0.0, False)
     positive_min, positive_max = min(positive), max(positive)
@@ -107,84 +199,184 @@ def _components(neighbours: dict[str, set[str]]) -> list[int]:
     return sizes
 
 
-def _graph_statistics(identity_accounts: dict[str, set[str]]) -> dict[str, float]:
-    """Compute lightweight account-projection topology statistics."""
-    neighbours: defaultdict[str, set[str]] = defaultdict(set)
-    pairs: set[tuple[str, str]] = set()
-    for accounts in identity_accounts.values():
-        for account_id in accounts:
-            peers = accounts - {account_id}
-            neighbours[account_id].update(peers)
-            for peer in peers:
-                if account_id < peer:
-                    pairs.add((account_id, peer))
+def _projection_statistics(
+    neighbours: dict[str, set[str]], prefix: str
+) -> dict[str, float]:
+    """Return clearly named undirected projection metrics for one node scope."""
+    pairs = {
+        tuple(sorted((account_id, peer)))
+        for account_id, peers in neighbours.items()
+        for peer in peers
+        if account_id != peer
+    }
     if not neighbours:
         return {
-            "account_projection_edge_count": 0.0,
-            "component_count": 0.0,
-            "largest_component_account_count": 0.0,
-            "mean_account_projection_degree": 0.0,
-            "mean_local_clustering": 0.0,
-            "degree_assortativity": 0.0,
+            f"{prefix}_account_count": 0.0,
+            f"{prefix}_edge_count": 0.0,
+            f"{prefix}_component_count": 0.0,
+            f"{prefix}_largest_component_account_count": 0.0,
+            f"{prefix}_mean_degree": 0.0,
+            f"{prefix}_mean_local_clustering": 0.0,
+            f"{prefix}_degree_assortativity": 0.0,
         }
     degrees = {account_id: len(peers) for account_id, peers in neighbours.items()}
     clustering: list[float] = []
-    for _account_id, peers in neighbours.items():
+    for peers in neighbours.values():
         if len(peers) < 2:
             clustering.append(0.0)
             continue
         possible = len(peers) * (len(peers) - 1) / 2
         actual = sum(
             1
-            for peer in peers
-            for other in peers
-            if peer < other and other in neighbours[peer]
+            for left, right in combinations(sorted(peers), 2)
+            if right in neighbours[left]
         )
         clustering.append(actual / possible)
-    source_degrees = [degrees[left] for left, _ in pairs]
-    target_degrees = [degrees[right] for _, right in pairs]
+    endpoints = [
+        degree for left, right in pairs for degree in (degrees[left], degrees[right])
+    ]
+    opposite = [
+        degree for left, right in pairs for degree in (degrees[right], degrees[left])
+    ]
     assortativity = 0.0
-    if len(pairs) > 1 and len(set(source_degrees)) > 1 and len(set(target_degrees)) > 1:
-        assortativity = float(np.corrcoef(source_degrees, target_degrees)[0, 1])
-    components = _components(dict(neighbours))
+    if len(endpoints) > 1 and len(set(endpoints)) > 1:
+        assortativity = float(np.corrcoef(endpoints, opposite)[0, 1])
+    components = _components(neighbours)
     return {
-        "account_projection_edge_count": float(len(pairs)),
-        "component_count": float(len(components)),
-        "largest_component_account_count": float(max(components)),
-        "mean_account_projection_degree": _mean(list(map(float, degrees.values()))),
-        "mean_local_clustering": _mean(clustering),
-        "degree_assortativity": assortativity,
+        f"{prefix}_account_count": float(len(neighbours)),
+        f"{prefix}_edge_count": float(len(pairs)),
+        f"{prefix}_component_count": float(len(components)),
+        f"{prefix}_largest_component_account_count": float(max(components)),
+        f"{prefix}_mean_degree": _mean(list(map(float, degrees.values()))),
+        f"{prefix}_mean_local_clustering": _mean(clustering),
+        f"{prefix}_degree_assortativity": assortativity,
+    }
+
+
+def _graph_statistics(
+    account_ids: tuple[str, ...], identity_accounts: dict[str, set[str]]
+) -> dict[str, float]:
+    """Measure full, sharing-only, and typed bipartite graph structure.
+
+    Candidate pairs come only from a shared identity; no global all-pairs scan is
+    performed.
+    """
+    full_neighbours = {account_id: set() for account_id in account_ids}
+    pair_types: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+    same_type_shared_identities: defaultdict[tuple[str, str, str], int] = defaultdict(
+        int
+    )
+    typed_degrees: defaultdict[str, list[float]] = defaultdict(list)
+    typed_reused: defaultdict[str, int] = defaultdict(int)
+    for identity_key, accounts in identity_accounts.items():
+        identity_type, _ = identity_key.split(":", maxsplit=1)
+        typed_degrees[identity_type].append(float(len(accounts)))
+        if len(accounts) > 1:
+            typed_reused[identity_type] += 1
+        for left, right in combinations(sorted(accounts), 2):
+            full_neighbours[left].add(right)
+            full_neighbours[right].add(left)
+            pair_types[(left, right)].add(identity_type)
+            same_type_shared_identities[(identity_type, left, right)] += 1
+    sharing_neighbours = {
+        account_id: peers for account_id, peers in full_neighbours.items() if peers
+    }
+    result = _projection_statistics(full_neighbours, "full_account_projection")
+    result.update(
+        _projection_statistics(sharing_neighbours, "identity_sharing_subgraph")
+    )
+    result["full_account_projection_isolated_account_count"] = float(
+        sum(not peers for peers in full_neighbours.values())
+    )
+    result["identity_sharing_subgraph_largest_component_fraction"] = (
+        result["identity_sharing_subgraph_largest_component_account_count"]
+        / result["identity_sharing_subgraph_account_count"]
+        if result["identity_sharing_subgraph_account_count"]
+        else 0.0
+    )
+    result["typed_multi_identity_pair_count"] = float(
+        sum(len(types) >= 2 for types in pair_types.values())
+    )
+    result["typed_two_or_more_identity_pair_fraction"] = (
+        result["typed_multi_identity_pair_count"] / float(len(pair_types))
+        if pair_types
+        else 0.0
+    )
+    result["account_identity_four_cycle_count"] = float(
+        sum(
+            count * (count - 1) / 2
+            for count in same_type_shared_identities.values()
+            if count > 1
+        )
+    )
+    for identity_type in IDENTITY_TYPES:
+        degrees = typed_degrees[identity_type]
+        result[f"{identity_type}_identity_count"] = float(len(degrees))
+        result[f"{identity_type}_identity_mean_account_degree"] = _mean(degrees)
+        result[f"{identity_type}_identity_p95_account_degree"] = _p95(degrees)
+        result[f"{identity_type}_identity_degree_gini"] = _gini(degrees)
+        result[f"{identity_type}_reused_identity_fraction"] = (
+            float(typed_reused[identity_type]) / float(len(degrees)) if degrees else 0.0
+        )
+    return result
+
+
+def _typed_peer_jaccard(
+    account_ids: tuple[str, ...], identity_accounts: dict[str, set[str]]
+) -> dict[str, float]:
+    peers: dict[str, dict[str, set[str]]] = {
+        account_id: {identity_type: set() for identity_type in IDENTITY_TYPES}
+        for account_id in account_ids
+    }
+    for identity_key, accounts in identity_accounts.items():
+        identity_type, _ = identity_key.split(":", maxsplit=1)
+        for account_id in accounts:
+            peers[account_id][identity_type].update(accounts - {account_id})
+    result: dict[str, float] = {}
+    for left_type, right_type in combinations(IDENTITY_TYPES, 2):
+        values: list[float] = []
+        for account_id in account_ids:
+            left = peers[account_id][left_type]
+            right = peers[account_id][right_type]
+            if left or right:
+                values.append(float(len(left & right)) / float(len(left | right)))
+        result[f"peer_jaccard_{left_type}_{right_type}"] = _mean(values)
+    return result
+
+
+def _labelled_accounts(world: SyntheticWorld) -> set[str]:
+    return {
+        str(event.account_id)
+        for event in world.events
+        if event.synthetic_labels is not None
+        and event.synthetic_labels.is_coordinated_abuse
     }
 
 
 def diagnose_world(world: SyntheticWorld) -> SyntheticDiagnostics:
-    """Summarize distributions, timing, class overlap, and graph topology.
-
-    Synthetic labels are read only for the evaluation-only class-overlap
-    section. The generated entity and event values drive every other metric.
-    """
-    account_ids = tuple(str(account.id) for account in world.accounts)
+    """Summarize non-model world diversity and evaluation-only label overlap."""
+    account_ids = tuple(sorted(str(account.id) for account in world.accounts))
     order_counts: defaultdict[str, int] = defaultdict(int)
     refund_counts: defaultdict[str, int] = defaultdict(int)
     promo_counts: defaultdict[str, int] = defaultdict(int)
     identity_accounts: defaultdict[str, set[str]] = defaultdict(set)
-    labelled_accounts: set[str] = set()
-    labelled_events = 0
     event_hours: defaultdict[int, int] = defaultdict(int)
     event_days: defaultdict[datetime, int] = defaultdict(int)
+    account_times: defaultdict[str, list[datetime]] = defaultdict(list)
     order_account_by_id = {
         str(order.id): str(order.account_id) for order in world.orders
     }
+    order_values = [float(order.total_paise) for order in world.orders]
+    labelled_accounts = _labelled_accounts(world)
+    labelled_events = sum(event.synthetic_labels is not None for event in world.events)
 
     for event in world.events:
         account_id = str(event.account_id)
+        account_times[account_id].append(event.occurred_at)
         event_hours[event.occurred_at.hour] += 1
         event_days[
             event.occurred_at.replace(hour=0, minute=0, second=0, microsecond=0)
         ] += 1
-        if event.synthetic_labels is not None:
-            labelled_accounts.add(account_id)
-            labelled_events += 1
         if event.event_type is EventType.DEVICE_SEEN and event.device_id is not None:
             identity_accounts[f"device:{event.device_id}"].add(account_id)
         elif event.event_type is EventType.IP_SEEN and event.ip_address_id is not None:
@@ -200,7 +392,10 @@ def diagnose_world(world: SyntheticWorld) -> SyntheticDiagnostics:
                 identity_accounts[f"address:{event.address_id}"].add(account_id)
         elif event.event_type is EventType.PROMOTION_REDEEMED:
             promo_counts[account_id] += 1
-        elif event.event_type is EventType.REFUND_REQUESTED:
+        elif (
+            event.event_type is EventType.REFUND_REQUESTED
+            and event.order_id is not None
+        ):
             refund_counts[order_account_by_id[str(event.order_id)]] += 1
 
     peer_counts: defaultdict[str, set[str]] = defaultdict(set)
@@ -224,20 +419,35 @@ def diagnose_world(world: SyntheticWorld) -> SyntheticDiagnostics:
             float(len(peer_counts[account_id])) for account_id in account_ids
         ],
     }
-    overlaps: dict[str, ClassOverlap] = {}
-    for name, feature_values in values.items():
-        positive = [
-            feature_values[index]
-            for index, account_id in enumerate(account_ids)
-            if account_id in labelled_accounts
-        ]
-        negative = [
-            feature_values[index]
-            for index, account_id in enumerate(account_ids)
-            if account_id not in labelled_accounts
-        ]
-        overlaps[name] = _overlap(positive, negative)
-    graph = _graph_statistics(identity_accounts)
+    overlaps = {
+        name: _overlap(
+            [
+                feature_values[index]
+                for index, account_id in enumerate(account_ids)
+                if account_id in labelled_accounts
+            ],
+            [
+                feature_values[index]
+                for index, account_id in enumerate(account_ids)
+                if account_id not in labelled_accounts
+            ],
+        )
+        for name, feature_values in values.items()
+    }
+    event_gaps = [
+        (right - left).total_seconds() / 3600.0
+        for times in account_times.values()
+        for left, right in zip(sorted(times), sorted(times)[1:], strict=False)
+    ]
+    daily_counts = list(map(float, event_days.values()))
+    fano = float(np.var(daily_counts) / np.mean(daily_counts)) if daily_counts else 0.0
+    gap_mean = _mean(event_gaps)
+    gap_std = float(np.std(event_gaps)) if event_gaps else 0.0
+    burstiness = (
+        (gap_std - gap_mean) / (gap_std + gap_mean) if gap_std + gap_mean else 0.0
+    )
+    graph = _graph_statistics(account_ids, identity_accounts)
+    graph.update(_typed_peer_jaccard(account_ids, identity_accounts))
     identity_degrees = [float(len(accounts)) for accounts in identity_accounts.values()]
     return SyntheticDiagnostics(
         account_count=len(account_ids),
@@ -253,29 +463,199 @@ def diagnose_world(world: SyntheticWorld) -> SyntheticDiagnostics:
         ),
         distributions={
             "mean_orders_per_account": _mean(values["order_count"]),
+            "median_orders_per_account": _median(values["order_count"]),
             "mean_refunds_per_account": _mean(values["refund_requested_count"]),
             "mean_promo_redemptions_per_account": _mean(
                 values["promotion_redemption_count"]
             ),
             "mean_identity_count_per_account": _mean(values["identity_count"]),
+            "mean_identity_peer_count": _mean(values["identity_peer_count"]),
             "mean_identity_reuse_degree": _mean(identity_degrees),
             "max_identity_reuse_degree": float(max(identity_degrees, default=0.0)),
+            "order_value_median_paise": _median(order_values),
+            "order_value_p95_paise": _p95(order_values),
+            "order_value_gini": _gini(order_values),
+            "device_entity_count": float(len(world.devices)),
+            "ip_address_entity_count": float(len(world.ip_addresses)),
+            "payment_identity_entity_count": float(len(world.payment_identities)),
+            "address_entity_count": float(len(world.addresses)),
         },
         temporal={
             "active_day_count": float(len(event_days)),
             "busiest_day_event_count": float(max(event_days.values(), default=0)),
             "busiest_hour_event_count": float(max(event_hours.values(), default=0)),
             "active_hour_count": float(len(event_hours)),
+            "daily_event_fano_factor": fano,
+            "account_event_gap_median_hours": _median(event_gaps),
+            "account_event_gap_p95_hours": _p95(event_gaps),
+            "account_event_gap_burstiness": burstiness,
         },
         graph=graph,
         class_overlap=overlaps,
     )
 
 
+def _labels_at_cutoff(world: SyntheticWorld, cutoff: datetime) -> dict[str, bool]:
+    labels = {
+        str(account.id): False
+        for account in world.accounts
+        if account.created_at <= cutoff
+    }
+    for event in world.events:
+        if (
+            event.occurred_at <= cutoff
+            and str(event.account_id) in labels
+            and event.synthetic_labels is not None
+            and event.synthetic_labels.is_coordinated_abuse
+        ):
+            labels[str(event.account_id)] = True
+    return labels
+
+
+def _histogram_overlap(positive: list[float], negative: list[float]) -> float | None:
+    if not positive or not negative:
+        return None
+    low, high = min(*positive, *negative), max(*positive, *negative)
+    if low == high:
+        return 1.0
+    positive_hist, edges = np.histogram(positive, bins=10, range=(low, high))
+    negative_hist, _ = np.histogram(negative, bins=edges)
+    positive_probability = positive_hist / positive_hist.sum()
+    negative_probability = negative_hist / negative_hist.sum()
+    return float(np.minimum(positive_probability, negative_probability).sum())
+
+
+def _auc(values: list[float], labels: list[bool]) -> float | None:
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if not positives or not negatives:
+        return None
+    ordered = sorted(zip(values, labels, strict=True), key=lambda item: item[0])
+    positive_rank_sum = 0.0
+    index = 0
+    while index < len(ordered):
+        end = index + 1
+        while end < len(ordered) and ordered[end][0] == ordered[index][0]:
+            end += 1
+        average_rank = (index + 1 + end) / 2.0
+        positive_rank_sum += average_rank * sum(
+            label for _, label in ordered[index:end]
+        )
+        index = end
+    auc = (positive_rank_sum - positives * (positives + 1) / 2.0) / (
+        positives * negatives
+    )
+    return float(max(auc, 1.0 - auc))
+
+
+def _best_category_balanced_accuracy(
+    values: list[str], labels: list[bool]
+) -> float | None:
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if not positives or not negatives:
+        return None
+    best = 0.5
+    for category in sorted(set(values)):
+        true_positive = sum(
+            value == category and label
+            for value, label in zip(values, labels, strict=True)
+        )
+        false_positive = sum(
+            value == category and not label
+            for value, label in zip(values, labels, strict=True)
+        )
+        true_negative = negatives - false_positive
+        best = max(best, (true_positive / positives + true_negative / negatives) / 2.0)
+    return float(best)
+
+
+def diagnose_feature_health(
+    vectors: tuple[FeatureVector, ...],
+    schema: FeatureSchema,
+    world: SyntheticWorld,
+    cutoff: datetime,
+    profile: DiagnosticProfile,
+) -> FeatureHealthAtCutoff:
+    """Inspect the existing feature schema at one leakage-safe cutoff."""
+    ordered = tuple(sorted(vectors, key=lambda vector: vector.account_id))
+    labels_by_account = _labels_at_cutoff(world, cutoff)
+    labels = [labels_by_account[vector.account_id] for vector in ordered]
+    numeric: dict[str, NumericFeatureHealth] = {}
+    categorical: dict[str, CategoricalFeatureHealth] = {}
+    numeric_values: dict[str, list[float]] = {}
+    for name in schema.numeric_names:
+        values = [float(vector.values[name]) for vector in ordered]
+        numeric_values[name] = values
+        positive = [value for value, label in zip(values, labels, strict=True) if label]
+        negative = [
+            value for value, label in zip(values, labels, strict=True) if not label
+        ]
+        numeric[name] = NumericFeatureHealth(
+            unique_count=len(set(values)),
+            variance=float(np.var(values)) if values else 0.0,
+            zero_fraction=(
+                sum(value == 0.0 for value in values) / len(values) if values else 0.0
+            ),
+            median=_median(values),
+            p95=_p95(values),
+            class_histogram_overlap=_histogram_overlap(positive, negative),
+            class_auc=_auc(values, labels),
+        )
+    for name in schema.categorical_names:
+        values = [str(vector.values[name]) for vector in ordered]
+        counts = {value: values.count(value) for value in sorted(set(values))}
+        categorical[name] = CategoricalFeatureHealth(
+            cardinality=len(counts),
+            missing_fraction=(
+                values.count("__missing__") / len(values) if values else 0.0
+            ),
+            dominant_fraction=(max(counts.values()) / len(values) if values else 0.0),
+            best_category_balanced_accuracy=_best_category_balanced_accuracy(
+                values, labels
+            ),
+        )
+    redundant: list[tuple[str, str, float]] = []
+    for left, right in combinations(schema.numeric_names, 2):
+        left_values, right_values = numeric_values[left], numeric_values[right]
+        if len(set(left_values)) < 2 or len(set(right_values)) < 2:
+            continue
+        correlation = float(np.corrcoef(left_values, right_values)[0, 1])
+        if abs(correlation) >= 0.98:
+            redundant.append((left, right, abs(correlation)))
+    inactive = tuple(
+        name
+        for name in profile.expected_active_numeric_features
+        if name not in numeric or numeric[name].unique_count < 2
+    )
+    return FeatureHealthAtCutoff(
+        cutoff=cutoff,
+        sample_count=len(ordered),
+        labelled_sample_count=sum(labels),
+        numeric=numeric,
+        categorical=categorical,
+        redundant_numeric_pairs=tuple(sorted(redundant)),
+        inactive_expected_numeric_features=inactive,
+        intentionally_sparse_numeric_features=profile.intentionally_sparse_numeric_features,
+    )
+
+
+def cutoff_times(profile: GenerationProfile) -> dict[str, datetime]:
+    """Return configured early/middle/late reconstruction times."""
+    names = ("early", "middle", "late")
+    span = profile.end_at - profile.start_at
+    return {
+        name: profile.start_at + span * fraction
+        for name, fraction in zip(
+            names, profile.diagnostics.cutoff_fractions, strict=True
+        )
+    }
+
+
 def guardrail_failures(
     diagnostics: SyntheticDiagnostics, profile: GenerationProfile
 ) -> tuple[str, ...]:
-    """Return internal benchmark warnings without claiming external fidelity."""
+    """Return model-independent benchmark guardrail warnings."""
     failures: list[str] = []
     if (
         diagnostics.numeric_feature_variation_count
@@ -287,11 +667,49 @@ def guardrail_failures(
         > profile.diagnostics.max_single_feature_perfect_separators
     ):
         failures.append("single diagnostic feature perfectly separates labels")
+    target = profile.prevalence.resolved_target_rate()
+    if target is not None and diagnostics.account_count:
+        observed = diagnostics.labelled_account_count / diagnostics.account_count
+        if abs(observed - target) > profile.prevalence.target_tolerance:
+            failures.append(
+                "labelled account prevalence is outside configured tolerance"
+            )
     return tuple(failures)
 
 
+def feature_health_guardrail_failures(
+    health: FeatureHealthAtCutoff, profile: GenerationProfile, *, late: bool
+) -> tuple[str, ...]:
+    """Check expected-active late features and label-only shortcut diagnostics."""
+    failures: list[str] = []
+    if late and health.inactive_expected_numeric_features:
+        failures.append("expected-active numeric feature is constant at late cutoff")
+    for name, details in health.numeric.items():
+        if (
+            details.class_auc is not None
+            and details.class_auc > profile.diagnostics.max_single_feature_auc
+        ):
+            failures.append(
+                f"numeric feature exceeds single-feature AUC guardrail: {name}"
+            )
+        if (
+            details.class_histogram_overlap is not None
+            and details.class_histogram_overlap
+            < profile.diagnostics.min_class_histogram_overlap
+        ):
+            failures.append(f"numeric feature has low class histogram overlap: {name}")
+    for name, details in health.categorical.items():
+        if (
+            details.best_category_balanced_accuracy is not None
+            and details.best_category_balanced_accuracy
+            > profile.diagnostics.max_single_feature_auc
+        ):
+            failures.append(f"categorical feature exceeds separation guardrail: {name}")
+    return tuple(sorted(set(failures)))
+
+
 def write_diagnostics(diagnostics: SyntheticDiagnostics, path: Path) -> Path:
-    """Write a stable JSON report beside generated data."""
+    """Write a stable JSON world report beside generated data."""
     path.write_text(
         json.dumps(diagnostics.to_dict(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

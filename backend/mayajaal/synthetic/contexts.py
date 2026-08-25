@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from numpy.random import Generator
 
+from .profile import BenignSharingProfile
+
 
 class ContextKind(StrEnum):
     """Hidden social or network contexts, independent of abuse campaigns."""
@@ -24,14 +26,30 @@ class ContextSharingPlan:
     share_payment_probability: float
 
 
-def household_plan() -> ContextSharingPlan:
+def household_plan(
+    profile: BenignSharingProfile, multiplier: float
+) -> ContextSharingPlan:
     """Families commonly share home address/network, less often devices/cards."""
-    return ContextSharingPlan(ContextKind.HOUSEHOLD, True, True, 0.55, 0.28)
+    return ContextSharingPlan(
+        ContextKind.HOUSEHOLD,
+        True,
+        True,
+        min(profile.household_device_probability * multiplier, 1.0),
+        min(profile.household_payment_probability * multiplier, 1.0),
+    )
 
 
-def office_network_plan() -> ContextSharingPlan:
+def office_network_plan(
+    profile: BenignSharingProfile, multiplier: float
+) -> ContextSharingPlan:
     """Office/campus members share NAT IPs but retain personal identities."""
-    return ContextSharingPlan(ContextKind.OFFICE_NETWORK, False, True, 0.03, 0.01)
+    return ContextSharingPlan(
+        ContextKind.OFFICE_NETWORK,
+        False,
+        True,
+        min(profile.office_device_probability * multiplier, 1.0),
+        min(profile.office_payment_probability * multiplier, 1.0),
+    )
 
 
 def shares(probability: float, rng: Generator) -> bool:

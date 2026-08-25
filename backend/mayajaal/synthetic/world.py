@@ -128,18 +128,22 @@ class WorldGenerator:
         for number in range(self.profile.shared_household_count):
             self._create_benign_context(
                 f"household-{number}",
-                household_plan(),
+                household_plan(
+                    self.profile.benign_sharing,
+                    self.profile.active_difficulty.benign_sharing_multiplier,
+                ),
                 self.profile.accounts_per_shared_household,
             )
         for number in range(self.profile.population.benign_network_group_count):
             self._create_benign_context(
                 f"office-{number}",
-                office_network_plan(),
+                office_network_plan(
+                    self.profile.benign_sharing,
+                    self.profile.active_difficulty.benign_sharing_multiplier,
+                ),
                 self.profile.population.accounts_per_benign_network_group,
             )
-        self._create_rings(AbuseStrategy.PROMO_FARM, self.profile.promo_ring_count)
-        self._create_rings(AbuseStrategy.REFUND_ABUSE, self.profile.refund_ring_count)
-        self._create_rings(AbuseStrategy.MIXED, self.profile.mixed_ring_count)
+        self._create_configured_rings()
         self.events.sort(key=lambda event: (event.occurred_at, str(event.id)))
         return SyntheticWorld(
             accounts=tuple(self.accounts),
@@ -326,7 +330,7 @@ class WorldGenerator:
     def _create_independent_customer(self, number: int) -> None:
         scope = f"normal-{number}"
         rng = generator_for(self.profile.seed, scope)
-        persona = choose_persona(self.profile.population.persona_weights, rng)
+        persona = choose_persona(self.profile.effective_persona_weights, rng)
         created_at = self._timestamp(rng)
         account = self._create_account(scope, created_at)
         self._emit_history(
@@ -339,13 +343,13 @@ class WorldGenerator:
         """Create households and office/campus-like groups without labels."""
         context_rng = generator_for(self.profile.seed, f"context:{scope}")
         seed_persona = choose_persona(
-            self.profile.population.persona_weights, context_rng
+            self.profile.effective_persona_weights, context_rng
         )
         shared_refs = self._new_refs(f"shared-{scope}", seed_persona)
         for member_number in range(member_count):
             member_scope = f"{scope}-member-{member_number}"
             rng = generator_for(self.profile.seed, member_scope)
-            persona = choose_persona(self.profile.population.persona_weights, rng)
+            persona = choose_persona(self.profile.effective_persona_weights, rng)
             account = self._create_account(member_scope, self._timestamp(rng))
             refs = self._new_refs(
                 member_scope,
@@ -358,30 +362,77 @@ class WorldGenerator:
             )
             self._emit_history(account, refs, persona, member_scope, None)
 
-    def _create_rings(self, strategy: AbuseStrategy, count: int) -> None:
-        for ring_number in range(count):
+    def _create_configured_rings(self) -> None:
+        """Create legacy configured rings or target-rate benchmark campaigns."""
+        counts = {
+            AbuseStrategy.PROMO_FARM: self.profile.promo_ring_count,
+            AbuseStrategy.REFUND_ABUSE: self.profile.refund_ring_count,
+            AbuseStrategy.MIXED: self.profile.mixed_ring_count,
+        }
+        target_rate = self.profile.prevalence.resolved_target_rate()
+        if target_rate is None:
+            for strategy, count in counts.items():
+                self._create_rings(strategy, (None,) * count)
+            return
+
+        ordinary_accounts = len(self.accounts)
+        target_accounts = max(
+            2,
+            round(ordinary_accounts * target_rate / (1.0 - target_rate)),
+        )
+        active_strategies = tuple(
+            strategy for strategy, count in counts.items() if count > 0
+        )
+        if not active_strategies:
+            return
+        ring_count = min(len(active_strategies), max(1, target_accounts // 2))
+        ordered_strategies = sorted(
+            active_strategies,
+            key=lambda strategy: (
+                -self.profile.prevalence.strategy_weights[strategy.value],
+                strategy.value,
+            ),
+        )
+        members = tuple(
+            target_accounts // ring_count + (index < target_accounts % ring_count)
+            for index in range(ring_count)
+        )
+        for index, member_count in enumerate(members):
+            self._create_rings(
+                ordered_strategies[index % len(ordered_strategies)],
+                (member_count,),
+            )
+
+    def _create_rings(
+        self, strategy: AbuseStrategy, member_counts: tuple[int | None, ...]
+    ) -> None:
+        for ring_number, explicit_member_count in enumerate(member_counts):
             scope = f"{strategy.value}-ring-{ring_number:03d}"
             rng = generator_for(self.profile.seed, scope)
             campaign = plan_campaign(
                 strategy,
                 scope,
                 self.profile.abuse,
-                self.profile.difficulty,
+                self.profile.active_difficulty,
                 rng,
             )
-            seed_persona = choose_persona(self.profile.population.persona_weights, rng)
+            seed_persona = choose_persona(self.profile.effective_persona_weights, rng)
             shared_refs = self._new_refs(f"shared-{scope}", seed_persona)
             variation = self.profile.abuse.ring_size_variation
-            member_count = max(
-                2,
-                self.profile.accounts_per_ring
-                + int(rng.integers(-variation, variation + 1)),
+            member_count = (
+                explicit_member_count
+                if explicit_member_count is not None
+                else max(
+                    2,
+                    self.profile.accounts_per_ring
+                    + int(rng.integers(-variation, variation + 1)),
+                )
             )
             for member_number in range(member_count):
                 member_scope = f"{scope}-member-{member_number}"
                 member_rng = generator_for(self.profile.seed, member_scope)
                 persona = choose_persona(
-                    self.profile.population.persona_weights, member_rng
+                    self.profile.effective_persona_weights, member_rng
                 )
                 account = self._create_account(
                     member_scope, self._campaign_timestamp(campaign, member_rng)
@@ -516,7 +567,11 @@ class WorldGenerator:
         else:
             fractions = rng.random(count)
             calendar = self.profile.calendar
-            seasonal = rng.random(count) < calendar.seasonal_activity_share
+            seasonal = rng.random(count) < min(
+                calendar.seasonal_activity_share
+                * self.profile.active_difficulty.seasonal_activity_multiplier,
+                1.0,
+            )
             seasonal_fraction = calendar.seasonal_window_center_fraction + rng.normal(
                 0.0, calendar.seasonal_window_width_fraction / 3.0, count
             )
@@ -552,23 +607,43 @@ class WorldGenerator:
         return IdentityRefs(
             device_id=(
                 self._create_device(f"{scope}-device", persona)
-                if rng.random() < lifecycle.additional_device_probability
+                if rng.random()
+                < min(
+                    lifecycle.additional_device_probability
+                    * self.profile.active_difficulty.identity_lifecycle_multiplier,
+                    1.0,
+                )
                 else current.device_id
             ),
             ip_address_id=(
                 self._create_ip(f"{scope}-travel-ip", proxy=bool(rng.random() < 0.06))
                 if rng.random()
-                < lifecycle.travel_ip_probability * persona.travel_multiplier
+                < min(
+                    lifecycle.travel_ip_probability
+                    * persona.travel_multiplier
+                    * self.profile.active_difficulty.identity_lifecycle_multiplier,
+                    1.0,
+                )
                 else current.ip_address_id
             ),
             address_id=(
                 self._create_address(f"{scope}-address")
-                if rng.random() < lifecycle.additional_address_probability
+                if rng.random()
+                < min(
+                    lifecycle.additional_address_probability
+                    * self.profile.active_difficulty.identity_lifecycle_multiplier,
+                    1.0,
+                )
                 else current.address_id
             ),
             payment_identity_id=(
                 self._create_payment(f"{scope}-payment", persona)
-                if rng.random() < lifecycle.additional_payment_probability
+                if rng.random()
+                < min(
+                    lifecycle.additional_payment_probability
+                    * self.profile.active_difficulty.identity_lifecycle_multiplier,
+                    1.0,
+                )
                 else current.payment_identity_id
             ),
         )
