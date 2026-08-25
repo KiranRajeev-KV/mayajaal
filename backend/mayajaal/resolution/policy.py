@@ -23,6 +23,27 @@ from .normalizers import (
 )
 
 ADDRESS_FUZZY_THRESHOLD = 92.0
+MAX_ADDRESS_FUZZY_CANDIDATES = 64
+_GENERIC_ADDRESS_ANCHORS = frozenset({"apt", "fl", "near", "number", "rd", "st"})
+
+
+def _address_anchors(address: NormalizedAddress) -> tuple[str, ...]:
+    """Return deterministic discriminative tokens for bounded fuzzy lookup.
+
+    Unit and street-number tokens retain recall for common presentation changes,
+    while long street/locality words avoid comparing every address in a broad
+    city/postal partition.
+    """
+    return tuple(
+        sorted(
+            {
+                token
+                for token in address.comparison_text.split()
+                if token.isdecimal()
+                or (len(token) >= 4 and token not in _GENERIC_ADDRESS_ANCHORS)
+            }
+        )
+    )
 
 
 def _exact_resolution(
@@ -78,9 +99,11 @@ def resolve_addresses(addresses: Sequence[Address]) -> list[ResolutionResult]:
 
     for bucket_key in sorted(buckets):
         roots: list[NormalizedAddress] = []
+        roots_by_id: dict[str, NormalizedAddress] = {}
         roots_by_exact: dict[
             tuple[str, str, str, str, str, str], NormalizedAddress
         ] = {}
+        anchor_roots: defaultdict[str, list[NormalizedAddress]] = defaultdict(list)
         for address in buckets[bucket_key]:
             exact_root = roots_by_exact.get(address.exact_key)
             if exact_root is not None:
@@ -99,7 +122,25 @@ def resolve_addresses(addresses: Sequence[Address]) -> list[ResolutionResult]:
                 )
                 continue
 
-            choices = {str(root.entity_id): root.comparison_text for root in roots}
+            anchored_candidates = [
+                (anchor, anchor_roots[anchor])
+                for anchor in _address_anchors(address)
+                if anchor_roots[anchor]
+            ]
+            candidate_anchor, candidate_roots = (
+                min(
+                    anchored_candidates,
+                    key=lambda item: (len(item[1]), item[0]),
+                )
+                if anchored_candidates
+                else (None, [])
+            )
+            choices = {
+                str(root.entity_id): root.comparison_text
+                for root in sorted(
+                    candidate_roots, key=lambda root: str(root.entity_id)
+                )[:MAX_ADDRESS_FUZZY_CANDIDATES]
+            }
             matches = process.extract(
                 address.comparison_text,
                 choices,
@@ -109,9 +150,7 @@ def resolve_addresses(addresses: Sequence[Address]) -> list[ResolutionResult]:
             )
             if matches:
                 _, score, root_id = matches[0]
-                canonical = next(
-                    root for root in roots if str(root.entity_id) == root_id
-                )
+                canonical = roots_by_id[root_id]
                 results.append(
                     ResolutionResult(
                         entity_type=ResolutionEntityType.ADDRESS,
@@ -121,14 +160,18 @@ def resolve_addresses(addresses: Sequence[Address]) -> list[ResolutionResult]:
                         score=float(score),
                         evidence=(
                             f"RapidFuzz ratio={score:.1f} >= {ADDRESS_FUZZY_THRESHOLD:.1f}; "
-                            f"candidate bucket={bucket_key}"
+                            f"candidate bucket={bucket_key}; "
+                            f"anchor={candidate_anchor}; candidates={len(choices)}"
                         ),
                     )
                 )
                 continue
 
             roots.append(address)
+            roots_by_id[str(address.entity_id)] = address
             roots_by_exact[address.exact_key] = address
+            for anchor in _address_anchors(address):
+                anchor_roots[anchor].append(address)
             results.append(
                 ResolutionResult(
                     entity_type=ResolutionEntityType.ADDRESS,
