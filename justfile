@@ -64,6 +64,9 @@ features-extract config="config.toml":
 baseline-train config="config.toml":
     just --justfile {{backend_justfile}} baseline-train {{config}}
 
+synthetic-validate config="config.toml" args="":
+    just --justfile {{backend_justfile}} synthetic-validate {{config}} {{args}}
+
 check:
     just --justfile {{backend_justfile}} check
 
