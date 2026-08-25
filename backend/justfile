@@ -44,7 +44,7 @@ neo4j-load config="config.toml":
     uv run python -m scripts.load_neo4j --config {{config}}
 
 # Delete the dedicated derived graph before loading a different dataset.
-reset-neo4j:
+neo4j-reset:
     uv run python -m scripts.reset_neo4j
 
 # Run every non-mutating quality gate.

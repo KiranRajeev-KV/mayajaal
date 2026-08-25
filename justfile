@@ -56,7 +56,7 @@ neo4j-load config="config.toml":
 
 # Destructively clear the derived Neo4j graph before switching datasets.
 neo4j-reset:
-    just --justfile {{backend_justfile}} reset-neo4j
+    just --justfile {{backend_justfile}} neo4j-reset
 
 check:
     just --justfile {{backend_justfile}} check
