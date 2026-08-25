@@ -19,7 +19,11 @@ from mayajaal.synthetic import (
     guardrail_failures,
     to_tables,
 )
-from mayajaal.synthetic.profile import AbuseProfile, PopulationProfile
+from mayajaal.synthetic.profile import (
+    AbuseProfile,
+    PopulationProfile,
+    PrevalenceProfile,
+)
 
 
 def profile(seed: int) -> GenerationProfile:
@@ -263,7 +267,14 @@ class SyntheticWorldTests(unittest.TestCase):
         first = diagnose_world(generate_world(diagnostic_profile))
         second = diagnose_world(generate_world(diagnostic_profile))
         self.assertEqual(first, second)
-        self.assertGreater(first.graph["largest_component_account_count"], 1.0)
+        self.assertGreater(
+            first.graph["identity_sharing_subgraph_largest_component_account_count"],
+            1.0,
+        )
+        self.assertEqual(
+            first.graph["full_account_projection_account_count"],
+            float(first.account_count),
+        )
         self.assertGreater(first.temporal["active_day_count"], 20.0)
         self.assertFalse(first.perfect_single_feature_separators)
         self.assertFalse(guardrail_failures(first, diagnostic_profile))
@@ -279,6 +290,69 @@ class SyntheticWorldTests(unittest.TestCase):
                 and promotion_codes[str(event.promotion_id)] == "FLASH50"
                 for event in world.events
             )
+        )
+
+    def test_full_projection_includes_isolated_accounts(self) -> None:
+        isolated_profile = GenerationProfile(
+            seed=603,
+            normal_account_count=6,
+            shared_household_count=0,
+            promo_ring_count=0,
+            refund_ring_count=0,
+            mixed_ring_count=0,
+            population=PopulationProfile(benign_network_group_count=0),
+            start_at=datetime(2026, 1, 1, tzinfo=UTC),
+            end_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        diagnostics = diagnose_world(generate_world(isolated_profile))
+        self.assertEqual(
+            diagnostics.graph["full_account_projection_isolated_account_count"], 6.0
+        )
+        self.assertEqual(
+            diagnostics.graph["full_account_projection_component_count"], 6.0
+        )
+        self.assertEqual(
+            diagnostics.graph["identity_sharing_subgraph_account_count"], 0.0
+        )
+
+    def test_difficulty_and_prevalence_are_orthogonal(self) -> None:
+        profile_with_rare_abuse = GenerationProfile(
+            seed=817,
+            difficulty="hard",
+            prevalence=PrevalenceProfile(preset="rare_abuse"),
+        )
+        self.assertEqual(
+            profile_with_rare_abuse.prevalence.resolved_target_rate(), 0.0075
+        )
+        self.assertGreater(
+            profile_with_rare_abuse.active_difficulty.benign_sharing_multiplier,
+            1.0,
+        )
+        self.assertEqual(
+            profile_with_rare_abuse.active_difficulty.campaign_sharing_multiplier,
+            0.72,
+        )
+
+    def test_target_prevalence_stays_within_configured_tolerance(self) -> None:
+        target_profile = GenerationProfile(
+            seed=337,
+            normal_account_count=100,
+            shared_household_count=0,
+            promo_ring_count=2,
+            refund_ring_count=1,
+            mixed_ring_count=1,
+            population=PopulationProfile(benign_network_group_count=0),
+            prevalence=PrevalenceProfile(
+                target_labelled_account_rate=0.10,
+                target_tolerance=0.01,
+            ),
+            start_at=datetime(2026, 1, 1, tzinfo=UTC),
+            end_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        diagnostics = diagnose_world(generate_world(target_profile))
+        self.assertNotIn(
+            "labelled account prevalence is outside configured tolerance",
+            guardrail_failures(diagnostics, target_profile),
         )
 
     def test_campaign_schedule_supports_bursty_and_low_and_slow_activity(

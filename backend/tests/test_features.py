@@ -8,7 +8,13 @@ from mayajaal.features import FeatureService
 from mayajaal.graph import GraphProjection, build_graph_projection
 from mayajaal.resolution import resolve_all
 from mayajaal.schemas import EventType
-from mayajaal.synthetic import GenerationProfile, SyntheticWorld, generate_world
+from mayajaal.synthetic import (
+    GenerationProfile,
+    SyntheticWorld,
+    cutoff_times,
+    diagnose_feature_health,
+    generate_world,
+)
 from mayajaal.synthetic.profile import PopulationProfile
 
 
@@ -151,3 +157,35 @@ class FeatureServiceTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(service.schema.names), len(set(service.schema.names)))
         self.assertIn("latest_payment_method", service.schema.categorical_names)
+
+    def test_feature_health_is_deterministic_at_early_middle_and_late_cutoffs(
+        self,
+    ) -> None:
+        world, service = prepared()
+        reports = {}
+        for name, cutoff in cutoff_times(profile()).items():
+            vectors = service.extract_many(
+                (
+                    str(account.id)
+                    for account in world.accounts
+                    if account.created_at <= cutoff
+                ),
+                cutoff,
+            )
+            first = diagnose_feature_health(
+                vectors, service.schema, world, cutoff, profile().diagnostics
+            )
+            second = diagnose_feature_health(
+                vectors, service.schema, world, cutoff, profile().diagnostics
+            )
+            self.assertEqual(first, second)
+            reports[name] = first
+        self.assertEqual(set(reports), {"early", "middle", "late"})
+        self.assertFalse(reports["late"].inactive_expected_numeric_features)
+        self.assertEqual(
+            reports["late"].intentionally_sparse_numeric_features,
+            (
+                "recent_shared_account_creation_count",
+                "recent_shared_identity_event_count",
+            ),
+        )

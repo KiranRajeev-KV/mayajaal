@@ -61,11 +61,22 @@ the corresponding separate Polars tables. The master seed drives local,
 scope-derived NumPy generators and a local seeded Faker instance, with no global
 random-state use. The profile retains the original population/ring count fields
 and adds nested `population`, `identity_lifecycle`, `commerce`, `calendar`,
-and `abuse` settings. The calendar creates ordinary seasonal concentration; the
-`drift` difficulty preset moves activity later in the configured window. Its
-`difficulty` preset (`easy`, `standard`, `hard`, or `drift`) controls
-benign/fraud overlap and campaign timing; it never writes a label-shaped
-production property.
+`abuse`, `prevalence`, `difficulty_profiles`, `diagnostics`, and `validation`
+settings. The checked-in TOML makes every active behavioural, benchmark, and
+diagnostic setting explicit and Pydantic validates it at load time. The calendar
+creates ordinary seasonal concentration; the `drift` difficulty preset moves
+activity later in the configured window.
+
+`difficulty` and `prevalence` are intentionally orthogonal. Difficulty (`easy`,
+`standard`, `hard`, or `drift`) selects a fully configured bundle controlling
+persona concentration, benign sharing, identity lifecycle churn, campaign
+sharing, warm-up, burstiness, and seasonality. Prevalence selects the target
+labelled-account rarity independently. `development` may use a target such as
+3%; `rare_abuse` defaults to 0.75% when no explicit target is supplied. These
+are Mayajaal benchmark configurations, not claims about a merchant's fraud
+rate. The Python profile API may set `target_labelled_account_rate=None` for
+backwards-compatible count-driven scenarios; TOML uses the explicit target shown
+in [config.toml](config.toml).
 
 Campaigns have independently seeded, variable ring sizes, partial identity
 sharing, warm-up orders, and either narrow burst windows or low-and-slow
@@ -74,11 +85,31 @@ labels become synthetic evaluation truth.
 
 Each `generate_dataset` run also writes `diagnostics.json`. It is an internal
 plausibility report—not a claim of calibration to a private merchant dataset—
-covering order/identity distributions, hourly and daily activity, class-support
-overlap, and account-projection degree, components, clustering, and
-assortativity. It raises visible warnings when a configured internal guardrail,
-such as a single diagnostic statistic perfectly separating labels, is violated.
-No SDMetrics dependency is required because no real reference data is available.
+covering entity/order distributions, temporal gaps and burstiness, typed identity
+reuse degrees, peer-set Jaccard overlap, typed multi-identity pairs, 4-cycles,
+and graph topology. It reports both the full account projection, where isolated
+accounts count as zero-degree components, and the identity-sharing subgraph,
+which intentionally excludes them. No SDMetrics dependency is required because
+no real reference data is available.
+
+`just synthetic-validate` writes a multi-seed report with early, middle, and
+late cutoff-aware feature-health snapshots. It inspects variance, zero rates,
+categorical dominance, near-redundant numeric pairs, class histogram overlap,
+and one-feature separation for the existing feature schema. Only expected-active
+numeric features must vary at the late cutoff; the configured velocity features
+are documented as intentionally sparse/context-specific. Synthetic labels are
+used only in explicitly evaluation-only overlap/separation fields. Run the full
+benchmark pipeline, including CatBoost and SHAP artifacts, with:
+
+```bash
+just synthetic-validate args="--full"
+```
+
+SHAP's top-feature share produces a review warning only. It is never an input to
+generation or a target for tuning the generator. The full validation trains on
+all configured accounts but uses the deterministic configured
+`validation.shap_sample_count` sample for the offline SHAP report and PNG, so a
+10k run remains practical.
 
 ## Deterministic resolution
 
@@ -88,6 +119,12 @@ lowercasing the local part. Phone normalization uses libphonenumber's
 `is_possible_number` length-oriented check before formatting to E.164; this is
 intentional so formatting resolution can retain plausible historical values
 whose regional prefix is not currently valid.
+
+Address fuzzy matching remains locality-bounded and now chooses the smallest
+deterministic candidate group indexed by discriminative street/unit anchors,
+capped at 64 candidates before RapidFuzz scoring. It therefore avoids a broad
+city/postcode bucket turning into a global all-pairs comparison at benchmark
+scale.
 
 For manual generation, edit the non-secret [config.toml](config.toml) profile
 and run either command below:
