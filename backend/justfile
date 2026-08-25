@@ -47,9 +47,13 @@ neo4j-load config="config.toml":
 neo4j-reset:
     uv run python -m scripts.reset_neo4j
 
-
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
     uv run python -m scripts.extract_features --config {{config}}
+
+# Train and persist the deterministic CatBoost baseline plus SHAP summary.
+baseline-train config="config.toml":
+    uv run python -m scripts.train_baseline --config {{config}}
+
 # Run every non-mutating quality gate.
 check: format-check lint typecheck deps dead-code test

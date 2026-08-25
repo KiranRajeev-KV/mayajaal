@@ -29,11 +29,12 @@ just test         # run unit tests
 just check        # run every non-mutating quality gate
 ```
 
-`faker`, `numpy`, and `polars` are intentionally retained for the planned
-synthetic-data generator. CUDA-enabled `torch`, `torchaudio`, and `torchvision`
-are intentionally retained for planned ML work. These are the only targeted
-deptry unused-dependency exceptions. Production tooling lives in the `dev`
-dependency group.
+`faker`, `numpy`, and `polars` are intentionally retained for the synthetic
+world and feature-export paths. CUDA-enabled `torch`, `torchaudio`, and
+`torchvision` are retained for future representation-learning work. These are
+the only targeted deptry unused-dependency exceptions. CatBoost and SHAP are
+direct baseline dependencies. Production tooling lives in the `dev` dependency
+group.
 
 ## Synthetic fraud world
 
@@ -148,3 +149,20 @@ just features-extract another-profile.toml
 The command defaults to the profile's `synthetic_world.end_at`; its Python
 entry point accepts a timezone-aware `--cutoff` for an earlier reconstruction
 and `--output` for the Parquet path.
+
+## CatBoost baseline and SHAP explanations
+
+`mayajaal.baseline` consumes `FeatureVector` values but has no feature logic.
+It trains a single-threaded, seeded CatBoost classifier with `bootstrap_type=No`
+and `auto_class_weights="Balanced"`. Synthetic labels are used only after
+extraction to make offline targets. The training output includes the `.cbm`
+model, ordered feature metadata, and a SHAP mean-absolute-contribution bar plot.
+
+```bash
+just baseline-train                         # writes CatBoost + metadata + SHAP plot
+just baseline-train another-profile.toml
+```
+
+The command defaults to the profile's `synthetic_world.end_at`; its Python
+entry point accepts a timezone-aware `--cutoff` for an earlier reconstruction
+and `--output-dir` for the artifact directory.
