@@ -3,7 +3,13 @@
 import argparse
 from pathlib import Path
 
-from mayajaal.synthetic import export_parquet, generate_world
+from mayajaal.synthetic import (
+    diagnose_world,
+    export_parquet,
+    generate_world,
+    guardrail_failures,
+    write_diagnostics,
+)
 from mayajaal.synthetic.config import load_generation_config
 
 
@@ -35,9 +41,17 @@ def main() -> int:
 
     world = generate_world(config.synthetic_world)
     paths = export_parquet(world, output_directory)
+    diagnostics = diagnose_world(world)
+    diagnostics_path = write_diagnostics(
+        diagnostics, output_directory / "diagnostics.json"
+    )
+    guardrails = guardrail_failures(diagnostics, config.synthetic_world)
     print(f"Generated {len(world.events)} events for {len(world.accounts)} accounts.")
     for name, path in paths.items():
         print(f"{name}: {path}")
+    print(f"diagnostics: {diagnostics_path}")
+    if guardrails:
+        print(f"diagnostic warnings: {', '.join(guardrails)}")
     return 0
 
 
