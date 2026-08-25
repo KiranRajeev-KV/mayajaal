@@ -9,6 +9,7 @@ from mayajaal.graph import GraphProjection, build_graph_projection
 from mayajaal.resolution import resolve_all
 from mayajaal.schemas import EventType
 from mayajaal.synthetic import GenerationProfile, SyntheticWorld, generate_world
+from mayajaal.synthetic.profile import PopulationProfile
 
 
 def profile() -> GenerationProfile:
@@ -22,6 +23,7 @@ def profile() -> GenerationProfile:
         refund_ring_count=1,
         mixed_ring_count=1,
         accounts_per_ring=3,
+        population=PopulationProfile(benign_network_group_count=0),
         start_at=datetime(2026, 1, 1, tzinfo=UTC),
         end_at=datetime(2026, 2, 1, tzinfo=UTC),
     )
@@ -56,7 +58,7 @@ class FeatureServiceTests(unittest.TestCase):
             vector
             for vector in vectors
             if vector.account_id not in fraud_accounts
-            and vector.values["shared_device_account_count"] == 2.0
+            and vector.values["shared_ip_account_count"] == 2.0
         ]
         self.assertEqual(len(household_vectors), 3)
         self.assertTrue(
