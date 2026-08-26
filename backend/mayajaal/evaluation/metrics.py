@@ -1,6 +1,6 @@
 """Reusable metric, threshold, table, and plot routines for score records."""
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -8,6 +8,8 @@ from typing import Any
 import polars as pl
 
 from .models import (
+    BenchmarkStatus,
+    BenchmarkValidity,
     EvaluationConfig,
     EvaluationSplit,
     PredictionRecord,
@@ -27,15 +29,19 @@ def select_threshold(
         raise ValueError("threshold selection accepts validation records only")
     labels, scores = _labels_scores(records)
     positive_count = sum(labels)
-    if not labels or positive_count == 0 or positive_count == len(labels):
+    negative_count = len(labels) - positive_count
+    warnings = _support_warnings(
+        EvaluationSplit.VALIDATION, positive_count, negative_count, config
+    )
+    if warnings:
         return ThresholdSelection(
-            threshold=0.5,
+            threshold=None,
             rule=config.threshold_rule,
             validation_sample_count=len(records),
             validation_positive_count=positive_count,
-            warnings=(
-                "validation: threshold defaulted to 0.5 because validation lacks both classes",
-            ),
+            validation_negative_count=negative_count,
+            is_valid=False,
+            warnings=warnings,
         )
     if config.threshold_rule is not ThresholdRule.MAXIMIZE_F1:
         raise ValueError(f"unsupported threshold rule: {config.threshold_rule}")
@@ -51,12 +57,14 @@ def select_threshold(
         rule=config.threshold_rule,
         validation_sample_count=len(records),
         validation_positive_count=positive_count,
+        validation_negative_count=negative_count,
+        is_valid=True,
     )
 
 
 def evaluate_predictions(
     records: Sequence[PredictionRecord],
-    threshold: float,
+    threshold: float | None,
     config: EvaluationConfig,
 ) -> SplitMetrics:
     """Evaluate one already-scored split at a validation-frozen threshold."""
@@ -68,17 +76,7 @@ def evaluate_predictions(
     labels, scores = _labels_scores(records)
     positive_count = sum(labels)
     negative_count = len(labels) - positive_count
-    warnings: list[str] = []
-    if positive_count < config.minimum_positive_samples:
-        warnings.append(
-            f"{split.value}: positive support {positive_count} is below "
-            f"configured minimum {config.minimum_positive_samples}"
-        )
-    if negative_count < config.minimum_negative_samples:
-        warnings.append(
-            f"{split.value}: negative support {negative_count} is below "
-            f"configured minimum {config.minimum_negative_samples}"
-        )
+    warnings = list(_support_warnings(split, positive_count, negative_count, config))
     if positive_count == 0:
         average_precision = None
         warnings.append(
@@ -91,24 +89,35 @@ def evaluate_predictions(
         warnings.append(f"{split.value}: ROC-AUC is undefined without both classes")
     else:
         roc_auc = _roc_auc(labels, scores)
-    counts = _threshold_counts(labels, scores, threshold)
-    precision, recall, f1 = _classification_metrics(counts)
+    counts = (
+        _threshold_counts(labels, scores, threshold) if threshold is not None else None
+    )
+    if counts is None:
+        precision = recall = f1 = None
+        warnings.append(
+            f"{split.value}: threshold metrics are unavailable because validation threshold selection was invalid"
+        )
+    else:
+        precision, recall, f1 = _classification_metrics(counts)
     fp_cost, prevented = _fixed_assumption_values(counts, config)
     return SplitMetrics(
         split=split,
         sample_count=len(labels),
         positive_count=positive_count,
         negative_count=negative_count,
+        support_is_sufficient=not _support_warnings(
+            split, positive_count, negative_count, config
+        ),
         prevalence=float(positive_count / len(labels)) if labels else None,
         average_precision=average_precision,
         roc_auc=roc_auc,
         precision=precision,
         recall=recall,
         f1=f1,
-        true_positive=counts[0],
-        false_positive=counts[1],
-        false_negative=counts[2],
-        true_negative=counts[3],
+        true_positive=counts[0] if counts is not None else None,
+        false_positive=counts[1] if counts is not None else None,
+        false_negative=counts[2] if counts is not None else None,
+        true_negative=counts[3] if counts is not None else None,
         warnings=tuple(warnings),
         estimated_false_positive_review_cost_paise=fp_cost,
         estimated_prevented_fraud_exposure_paise=prevented,
@@ -155,29 +164,40 @@ def save_curve_plots(
     pr_path = output_directory / "pr_curve.png"
     roc_path = output_directory / "roc_curve.png"
     figure, axes = plt.subplots()
+    pr_curve_count = 0
     for name, records in sorted(records_by_variant.items()):
         labels, scores = _labels_scores(records)
         if not labels or not any(labels):
             continue
         precision, recall = _precision_recall_points(labels, scores)
         axes.plot(recall, precision, label=name)
+        pr_curve_count += 1
     axes.set(xlabel="Recall", ylabel="Precision", title="Held-out precision-recall")
-    axes.legend()
+    if pr_curve_count:
+        axes.legend()
+    else:
+        axes.text(0.5, 0.5, "No valid held-out PR curves", ha="center", va="center")
     figure.savefig(pr_path, bbox_inches="tight")
     plt.close(figure)
 
     figure, axes = plt.subplots()
+    roc_curve_count = 0
     for name, records in sorted(records_by_variant.items()):
         labels, scores = _labels_scores(records)
         if not labels or not any(labels) or all(labels):
             continue
         false_positive_rate, true_positive_rate = _roc_points(labels, scores)
         axes.plot(false_positive_rate, true_positive_rate, label=name)
-    axes.plot((0.0, 1.0), (0.0, 1.0), linestyle="--", color="black", label="chance")
+        roc_curve_count += 1
+    if roc_curve_count:
+        axes.plot((0.0, 1.0), (0.0, 1.0), linestyle="--", color="black", label="chance")
     axes.set(
         xlabel="False positive rate", ylabel="True positive rate", title="Held-out ROC"
     )
-    axes.legend()
+    if roc_curve_count:
+        axes.legend()
+    else:
+        axes.text(0.5, 0.5, "No valid held-out ROC curves", ha="center", va="center")
     figure.savefig(roc_path, bbox_inches="tight")
     plt.close(figure)
     return pr_path, roc_path
@@ -297,10 +317,56 @@ def _classification_metrics(
     return precision, recall, f1
 
 
+def held_out_validity(
+    thresholds: Mapping[str, ThresholdSelection],
+    metrics: Mapping[str, Mapping[EvaluationSplit, SplitMetrics]],
+) -> BenchmarkValidity:
+    """Return one strict status for a multi-model held-out benchmark.
+
+    Support depends only on the shared manifest labels, but each adapter is
+    checked so another model can reuse this reporting contract safely.
+    """
+    reasons: list[str] = []
+    for name in sorted(thresholds):
+        if not thresholds[name].is_valid:
+            reasons.append(
+                f"{name}: validation support is insufficient for threshold selection"
+            )
+        test_metrics = metrics[name][EvaluationSplit.TEST]
+        if not test_metrics.support_is_sufficient:
+            reasons.append(
+                f"{name}: test support is insufficient for held-out reporting"
+            )
+    return BenchmarkValidity(
+        status=BenchmarkStatus.INVALID if reasons else BenchmarkStatus.VALID,
+        reasons=tuple(reasons),
+    )
+
+
+def _support_warnings(
+    split: EvaluationSplit,
+    positive_count: int,
+    negative_count: int,
+    config: EvaluationConfig,
+) -> tuple[str, ...]:
+    warnings: list[str] = []
+    if positive_count < config.minimum_positive_samples:
+        warnings.append(
+            f"{split.value}: positive support {positive_count} is below "
+            f"configured minimum {config.minimum_positive_samples}"
+        )
+    if negative_count < config.minimum_negative_samples:
+        warnings.append(
+            f"{split.value}: negative support {negative_count} is below "
+            f"configured minimum {config.minimum_negative_samples}"
+        )
+    return tuple(warnings)
+
+
 def _fixed_assumption_values(
-    counts: tuple[int, int, int, int], config: EvaluationConfig
+    counts: tuple[int, int, int, int] | None, config: EvaluationConfig
 ) -> tuple[int | None, int | None]:
-    if config.false_positive_review_cost_paise is None:
+    if counts is None or config.false_positive_review_cost_paise is None:
         return None, None
     return (
         counts[1] * config.false_positive_review_cost_paise,

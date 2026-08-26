@@ -17,6 +17,13 @@ class EvaluationSplit(StrEnum):
     TEST = "test"
 
 
+class BenchmarkStatus(StrEnum):
+    """Whether a held-out report has adequate configured class support."""
+
+    VALID = "VALID"
+    INVALID = "INVALID"
+
+
 class ThresholdRule(StrEnum):
     """Validation-only rule used to freeze an operating threshold."""
 
@@ -76,10 +83,12 @@ class PredictionRecord:
 class ThresholdSelection:
     """A threshold selected entirely from validation prediction records."""
 
-    threshold: float
+    threshold: float | None
     rule: ThresholdRule
     validation_sample_count: int
     validation_positive_count: int
+    validation_negative_count: int
+    is_valid: bool
     warnings: tuple[str, ...] = ()
 
 
@@ -92,6 +101,23 @@ class SplitManifest:
     test_cutoff: AwareDatetime
     samples: tuple[EvaluationSample, ...]
     purged_campaign_group_ids: tuple[str, ...] = ()
+    purged_campaign_groups: tuple["CampaignPurge", ...] = ()
+
+
+@dataclass(frozen=True)
+class CampaignPurge:
+    """A hidden-truth campaign excluded only to preserve evaluation isolation."""
+
+    campaign_group_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class BenchmarkValidity:
+    """Audit-friendly validity state for a held-out benchmark report."""
+
+    status: BenchmarkStatus
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -102,16 +128,17 @@ class SplitMetrics:
     sample_count: int
     positive_count: int
     negative_count: int
+    support_is_sufficient: bool
     prevalence: float | None
     average_precision: float | None
     roc_auc: float | None
     precision: float | None
     recall: float | None
     f1: float | None
-    true_positive: int
-    false_positive: int
-    false_negative: int
-    true_negative: int
+    true_positive: int | None
+    false_positive: int | None
+    false_negative: int | None
+    true_negative: int | None
     warnings: tuple[str, ...] = ()
     estimated_false_positive_review_cost_paise: int | None = None
     estimated_prevented_fraud_exposure_paise: int | None = None

@@ -24,6 +24,7 @@ from mayajaal.features import (
 
 from .metrics import (
     evaluate_predictions,
+    held_out_validity,
     prediction_frame,
     save_curve_plots,
     select_threshold,
@@ -70,7 +71,7 @@ GRAPH_IDENTITY_FEATURE_NAMES = (
 def vectors_for_manifest(
     service: FeatureService, manifest: SplitManifest
 ) -> dict[str, FeatureVector]:
-    """Extract each review vector once, batching the three shared cutoffs."""
+    """Extract one cutoff-safe vector per review sample, batched by time."""
     by_decision_time: defaultdict[datetime, list[str]] = defaultdict(list)
     for sample in manifest.samples:
         by_decision_time[sample.decision_time].append(sample.account_id)
@@ -78,10 +79,15 @@ def vectors_for_manifest(
     for decision_time, account_ids in sorted(
         by_decision_time.items(), key=lambda item: item[0]
     ):
+        extracted = {
+            vector.account_id: vector
+            for vector in service.extract_many(sorted(account_ids), decision_time)
+        }
         vectors.update(
             {
-                vector.account_id: vector
-                for vector in service.extract_many(account_ids, decision_time)
+                sample.sample_id: extracted[sample.account_id]
+                for sample in manifest.samples
+                if sample.decision_time == decision_time
             }
         )
     return vectors
@@ -135,7 +141,7 @@ def evaluate_catboost(
                 split=sample.split,
                 y_true=sample.y_true,
                 score=predict_fraud_probability(
-                    model, transform(vectors[sample.account_id])
+                    model, transform(vectors[sample.sample_id])
                 ),
                 model_variant=name,
             )
@@ -194,7 +200,7 @@ def save_catboost_evaluation_models(
         name: save_baseline(
             model,
             tuple(
-                _transform_for_variant(name, vectors[sample.account_id])
+                _transform_for_variant(name, vectors[sample.sample_id])
                 for sample in train_samples
             ),
             output_directory / name,
@@ -239,10 +245,10 @@ def write_evaluation_artifacts(
         json.dumps(
             {
                 "protocol": {
-                    "name": "one account, one end-of-window review decision",
+                    "name": "fixed decision-time incident-abuse evaluation",
                     "primary_ranking_metric": "Average Precision (AP)",
-                    "leakage_policy": "features and labels use only immutable facts at or before each decision_time; all accounts are assigned from account creation, then cross-partition campaign groups are purged",
-                    "threshold_policy": "selected on validation only and frozen for test",
+                    "leakage_policy": "features use immutable facts at or before each decision_time; labels mark newly observable abuse in that interval; campaigns spanning intervals are purged and known campaigns are excluded from later windows",
+                    "threshold_policy": "selected on validation only and frozen for test only with sufficient validation class support",
                     "seed": seed,
                     "config": config.model_dump(mode="json"),
                     "cutoffs": {
@@ -251,6 +257,7 @@ def write_evaluation_artifacts(
                         "test": manifest.test_cutoff.isoformat(),
                     },
                 },
+                "benchmark": asdict(held_out_validity(thresholds, metrics)),
                 "variants": {
                     name: {
                         "threshold": asdict(thresholds[name]),
@@ -297,7 +304,7 @@ def _examples_by_split(
     for sample in samples:
         grouped[sample.split].append(
             LabeledFeatureVector(
-                vector=transform(vectors[sample.account_id]), is_fraud=sample.y_true
+                vector=transform(vectors[sample.sample_id]), is_fraud=sample.y_true
             )
         )
     return {split: tuple(grouped[split]) for split in EvaluationSplit}
@@ -367,6 +374,9 @@ def _manifest_json(manifest: SplitManifest) -> dict[str, object]:
         "validation_cutoff": manifest.validation_cutoff.isoformat(),
         "test_cutoff": manifest.test_cutoff.isoformat(),
         "purged_campaign_group_ids": list(manifest.purged_campaign_group_ids),
+        "purged_campaign_groups": [
+            asdict(item) for item in manifest.purged_campaign_groups
+        ],
         "samples": [
             {
                 "sample_id": sample.sample_id,

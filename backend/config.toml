@@ -93,8 +93,9 @@ full_account_count = 10000
 shap_sample_count = 1000
 
 [evaluation]
-# Chronological account-review benchmark settings. These control evaluation,
-# not synthetic behaviour or merchant operating policy.
+# Fixed chronological incident-review benchmark settings. All accounts already
+# created at each decision time are eligible; thresholds below are hard support
+# gates for valid benchmark reporting, not synthetic behaviour or merchant policy.
 train_end_fraction = 0.25
 validation_end_fraction = 0.50
 minimum_positive_samples = 10

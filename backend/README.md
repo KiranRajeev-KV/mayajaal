@@ -264,33 +264,40 @@ and `--output-dir` for the artifact directory.
 
 ## Chronological held-out evaluation
 
-`mayajaal.evaluation` is model-independent: it defines deterministic account
+`mayajaal.evaluation` is model-independent: it defines deterministic fixed-time
 review samples, a chronological `train → validation → test` manifest, stable
 prediction records, threshold selection, metrics, and plots without importing a
-specific model. The current CatBoost adapter trains two models on exactly that
+specific model. The current CatBoost adapter trains three models on exactly that
 same manifest: `full`, `no_graph_identity` (all local identity and relational
 graph features removed), and `no_relational_graph` (local identity/lifecycle
 counts retained while peer, reuse, component, shared-promotion, and shared
 velocity features are removed). Future model adapters, including a graph model,
 only need to produce the same prediction-record contract.
 
-Each account appears once and is provisionally assigned from the same observable
-anchor: its account-creation time. Hidden campaign membership is used only to
-purge a campaign spanning multiple partitions; it never changes a split or
-decision time. Purged IDs are written to `split_manifest.json`. Each retained
-account is scored at the end of its assigned calendar window, so its feature
-vector and synthetic label include facts at or before the recorded decision
-time only. Training is strictly earlier than validation, which is strictly
-earlier than the held-out test. The threshold is selected by the configured
-validation-only rule and then frozen before test metrics are calculated.
+The three fixed decision times are `T_train → T_validation → T_test`. Every
+account already created at a decision time is reviewed, so an account can be
+negative at an earlier review and positive when abuse first becomes observable
+later. Labels are incident targets: abuse newly observed in that calendar
+interval, not account creation cohorts. A campaign whose labelled events span
+multiple target intervals is purged in full, with a deterministic reason in
+`split_manifest.json`; a campaign that becomes known in one interval is omitted
+from later intervals. Hidden campaign membership is evaluation-only and never
+enters features or model inputs. This prevents known coordinated abuse from
+being re-counted in validation or test while retaining legitimate repeat
+customers. Features use facts at or before their decision time. Training is
+strictly earlier than validation, which is strictly earlier than held-out test.
+The threshold is selected only from validation and frozen only when validation
+has the configured positive and negative support.
 
 The primary ranking metric is **Average Precision (AP)**, not a trapezoidal
 area labelled ambiguously as “PR-AUC”. Reports also contain precision, recall,
 F1, ROC-AUC, the TP/FP/FN/TN confusion counts, prevalence, support warnings,
 and optional fixed-assumption paise exposure figures. Support thresholds in
-`[evaluation]` flag small split classes; they are diagnostics rather than a
-statistical guarantee. Optional cost figures are evaluation reporting only and
-are not a policy engine.
+`[evaluation]` are hard benchmark-validity gates, not a statistical guarantee:
+insufficient validation support leaves the threshold unselected, and
+insufficient test support marks the held-out result `INVALID` while preserving
+ranking metrics diagnostically. Optional cost figures are evaluation reporting
+only and are not a policy engine.
 
 ```bash
 just held-out-evaluate
@@ -304,7 +311,7 @@ The output directory (by default
 `roc_curve.png`, and a model/metadata/SHAP directory for each ablation variant.
 `[evaluation]` in [config.toml](config.toml) controls the fixed chronological
 cutoffs, support-warning thresholds, threshold rule, and optional fixed
-assumptions. Both model variants calculate their offline SHAP summaries from
+assumptions. All three model variants calculate their offline SHAP summaries from
 the deterministic, bounded `synthetic_world.validation.shap_sample_count`
 training sample (1,000 by default). Do not use the held-out test report to tune
 model settings, features, thresholds, or generator behaviour.

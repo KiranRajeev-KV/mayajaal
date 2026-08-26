@@ -7,6 +7,7 @@ from mayajaal.evaluation import (
     EvaluationSplit,
     build_split_manifest,
     evaluate_catboost,
+    held_out_validity,
     save_catboost_evaluation_models,
     write_evaluation_artifacts,
 )
@@ -87,13 +88,17 @@ def main() -> int:
         output_directory / "models",
         shap_sample_count=profile.validation.shap_sample_count,
     )
+    validity = held_out_validity(thresholds, reports)
+    print(f"held-out benchmark: {validity.status.value}")
+    for reason in validity.reasons:
+        print(f"  {reason}")
     print(f"evaluation: {artifacts['evaluation']}")
     print(f"predictions: {artifacts['predictions']}")
     for name, report in sorted(reports.items()):
         test = report[EvaluationSplit.TEST]
         print(
             f"{name} test: AP={test.average_precision!r}, ROC-AUC={test.roc_auc!r}, "
-            f"F1={test.f1!r}, threshold={thresholds[name].threshold:.6f}"
+            f"F1={test.f1!r}, threshold={thresholds[name].threshold!r}"
         )
         print(f"{name} model: {model_artifacts[name].model_path}")
     return 0
