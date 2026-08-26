@@ -70,6 +70,8 @@ class FeatureHealthAtCutoff:
     cutoff: datetime
     sample_count: int
     labelled_sample_count: int
+    unlabelled_sample_count: int
+    class_support_warnings: tuple[str, ...]
     numeric: dict[str, NumericFeatureHealth]
     categorical: dict[str, CategoricalFeatureHealth]
     redundant_numeric_pairs: tuple[tuple[str, str, float], ...]
@@ -81,6 +83,8 @@ class FeatureHealthAtCutoff:
             "cutoff": self.cutoff.isoformat(),
             "sample_count": self.sample_count,
             "labelled_sample_count": self.labelled_sample_count,
+            "unlabelled_sample_count": self.unlabelled_sample_count,
+            "class_support_warnings": list(self.class_support_warnings),
             "numeric": {name: asdict(value) for name, value in self.numeric.items()},
             "categorical": {
                 name: asdict(value) for name, value in self.categorical.items()
@@ -182,21 +186,25 @@ def _overlap(positive: list[float], negative: list[float]) -> ClassOverlap:
     )
 
 
-def _components(neighbours: dict[str, set[str]]) -> list[int]:
+def _component_nodes(neighbours: dict[str, set[str]]) -> list[set[str]]:
     remaining = set(neighbours)
-    sizes: list[int] = []
+    components: list[set[str]] = []
     while remaining:
         start = remaining.pop()
         pending: deque[str] = deque([start])
-        size = 0
+        component: set[str] = set()
         while pending:
             account_id = pending.popleft()
-            size += 1
+            component.add(account_id)
             discovered = neighbours[account_id] & remaining
             remaining.difference_update(discovered)
             pending.extend(discovered)
-        sizes.append(size)
-    return sizes
+        components.append(component)
+    return components
+
+
+def _components(neighbours: dict[str, set[str]]) -> list[int]:
+    return [len(component) for component in _component_nodes(neighbours)]
 
 
 def _projection_statistics(
@@ -253,19 +261,21 @@ def _projection_statistics(
     }
 
 
-def _graph_statistics(
-    account_ids: tuple[str, ...], identity_accounts: dict[str, set[str]]
+def graph_statistics(
+    account_ids: tuple[str, ...],
+    identity_accounts: dict[str, set[str]],
+    labelled_accounts: set[str],
 ) -> dict[str, float]:
     """Measure full, sharing-only, and typed bipartite graph structure.
 
     Candidate pairs come only from a shared identity; no global all-pairs scan is
     performed.
     """
-    full_neighbours = {account_id: set() for account_id in account_ids}
+    full_neighbours: dict[str, set[str]] = {
+        account_id: set() for account_id in account_ids
+    }
     pair_types: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
-    same_type_shared_identities: defaultdict[tuple[str, str, str], int] = defaultdict(
-        int
-    )
+    pair_identity_count: defaultdict[tuple[str, str], int] = defaultdict(int)
     typed_degrees: defaultdict[str, list[float]] = defaultdict(list)
     typed_reused: defaultdict[str, int] = defaultdict(int)
     for identity_key, accounts in identity_accounts.items():
@@ -277,7 +287,7 @@ def _graph_statistics(
             full_neighbours[left].add(right)
             full_neighbours[right].add(left)
             pair_types[(left, right)].add(identity_type)
-            same_type_shared_identities[(identity_type, left, right)] += 1
+            pair_identity_count[(left, right)] += 1
     sharing_neighbours = {
         account_id: peers for account_id, peers in full_neighbours.items() if peers
     }
@@ -302,12 +312,30 @@ def _graph_statistics(
         if pair_types
         else 0.0
     )
+    # A butterfly / bipartite four-cycle is K2,2: choose two accounts and two
+    # identity nodes that both accounts touch, regardless of identity type.
     result["account_identity_four_cycle_count"] = float(
         sum(
             count * (count - 1) / 2
-            for count in same_type_shared_identities.values()
+            for count in pair_identity_count.values()
             if count > 1
         )
+    )
+    sharing_components = _component_nodes(sharing_neighbours)
+    result["identity_sharing_subgraph_largest_component_population_fraction"] = (
+        result["identity_sharing_subgraph_largest_component_account_count"]
+        / len(account_ids)
+        if account_ids
+        else 0.0
+    )
+    result["identity_sharing_subgraph_max_labelled_account_fraction"] = (
+        max(
+            (len(component & labelled_accounts) for component in sharing_components),
+            default=0,
+        )
+        / len(labelled_accounts)
+        if labelled_accounts
+        else 0.0
     )
     for identity_type in IDENTITY_TYPES:
         degrees = typed_degrees[identity_type]
@@ -446,7 +474,7 @@ def diagnose_world(world: SyntheticWorld) -> SyntheticDiagnostics:
     burstiness = (
         (gap_std - gap_mean) / (gap_std + gap_mean) if gap_std + gap_mean else 0.0
     )
-    graph = _graph_statistics(account_ids, identity_accounts)
+    graph = graph_statistics(account_ids, identity_accounts, labelled_accounts)
     graph.update(_typed_peer_jaccard(account_ids, identity_accounts))
     identity_degrees = [float(len(accounts)) for accounts in identity_accounts.values()]
     return SyntheticDiagnostics(
@@ -628,10 +656,25 @@ def diagnose_feature_health(
         for name in profile.expected_active_numeric_features
         if name not in numeric or numeric[name].unique_count < 2
     )
+    positive_count = sum(labels)
+    negative_count = len(labels) - positive_count
+    support_warnings: list[str] = []
+    if positive_count < profile.min_cutoff_positive_samples:
+        support_warnings.append(
+            "insufficient positive samples for class metrics: "
+            f"{positive_count} < {profile.min_cutoff_positive_samples}"
+        )
+    if negative_count < profile.min_cutoff_negative_samples:
+        support_warnings.append(
+            "insufficient negative samples for class metrics: "
+            f"{negative_count} < {profile.min_cutoff_negative_samples}"
+        )
     return FeatureHealthAtCutoff(
         cutoff=cutoff,
         sample_count=len(ordered),
-        labelled_sample_count=sum(labels),
+        labelled_sample_count=positive_count,
+        unlabelled_sample_count=negative_count,
+        class_support_warnings=tuple(support_warnings),
         numeric=numeric,
         categorical=categorical,
         redundant_numeric_pairs=tuple(sorted(redundant)),
@@ -674,6 +717,17 @@ def guardrail_failures(
             failures.append(
                 "labelled account prevalence is outside configured tolerance"
             )
+    graph = diagnostics.graph
+    if (
+        graph["identity_sharing_subgraph_largest_component_population_fraction"]
+        > profile.diagnostics.max_identity_sharing_component_fraction
+    ):
+        failures.append("identity-sharing component is disproportionately large")
+    if (
+        graph["identity_sharing_subgraph_max_labelled_account_fraction"]
+        > profile.diagnostics.max_labelled_accounts_in_single_component_fraction
+    ):
+        failures.append("too many labelled accounts occupy one identity component")
     return tuple(failures)
 
 

@@ -9,6 +9,7 @@ from mayajaal.graph import GraphProjection, build_graph_projection
 from mayajaal.resolution import resolve_all
 from mayajaal.schemas import EventType
 from mayajaal.synthetic import (
+    FeatureHealthAtCutoff,
     GenerationProfile,
     SyntheticWorld,
     cutoff_times,
@@ -162,7 +163,7 @@ class FeatureServiceTests(unittest.TestCase):
         self,
     ) -> None:
         world, service = prepared()
-        reports = {}
+        reports: dict[str, FeatureHealthAtCutoff] = {}
         for name, cutoff in cutoff_times(profile()).items():
             vectors = service.extract_many(
                 (
@@ -188,4 +189,33 @@ class FeatureServiceTests(unittest.TestCase):
                 "recent_shared_account_creation_count",
                 "recent_shared_identity_event_count",
             ),
+        )
+
+    def test_feature_health_warns_when_a_cutoff_has_insufficient_class_support(
+        self,
+    ) -> None:
+        world, service = prepared()
+        cutoff = cutoff_times(profile())["early"]
+        vectors = service.extract_many(
+            (
+                str(account.id)
+                for account in world.accounts
+                if account.created_at <= cutoff
+            ),
+            cutoff,
+        )
+        report = diagnose_feature_health(
+            vectors,
+            service.schema,
+            world,
+            cutoff,
+            profile().diagnostics.model_copy(
+                update={"min_cutoff_positive_samples": 100}
+            ),
+        )
+        self.assertTrue(
+            any(
+                "insufficient positive samples" in warning
+                for warning in report.class_support_warnings
+            )
         )
