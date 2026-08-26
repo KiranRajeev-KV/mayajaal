@@ -39,6 +39,11 @@ from .models import (
     SplitMetrics,
     ThresholdSelection,
 )
+from .provenance import (
+    FrozenFullArtifactInput,
+    provenance_base_model_id,
+    write_frozen_full_artifacts,
+)
 
 LOCAL_IDENTITY_FEATURE_NAMES = frozenset(
     {
@@ -259,6 +264,7 @@ def write_evaluation_artifacts(
     config: EvaluationConfig,
     *,
     seed: int,
+    frozen_full: FrozenFullArtifactInput | None = None,
 ) -> dict[str, Path]:
     """Persist the reusable manifest, prediction contract, reports, and curves."""
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -268,6 +274,26 @@ def write_evaluation_artifacts(
     manifest_path.write_text(
         json.dumps(_manifest_json(manifest), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+    frozen_artifacts = (
+        write_frozen_full_artifacts(
+            output_directory,
+            manifest_path=manifest_path,
+            full_records=frozen_full.records,
+            raw_scores=frozen_full.raw_scores,
+            schema=frozen_full.schema,
+            model_artifacts=frozen_full.model_artifacts,
+            training_config=frozen_full.training_config,
+            evaluation_config=config,
+            generation_profile=frozen_full.generation_profile,
+        )
+        if frozen_full is not None
+        else {}
+    )
+    frozen_base_model_id = (
+        provenance_base_model_id(frozen_artifacts["full_provenance"])
+        if frozen_artifacts
+        else None
     )
     prediction_frame(
         record for records in records_by_variant.values() for record in records
@@ -298,6 +324,11 @@ def write_evaluation_artifacts(
                     },
                 },
                 "benchmark": asdict(held_out_validity(thresholds, metrics)),
+                "frozen_full": (
+                    {"base_model_id": frozen_base_model_id}
+                    if frozen_artifacts
+                    else None
+                ),
                 "variants": {
                     name: {
                         "threshold": asdict(thresholds[name]),
@@ -316,6 +347,7 @@ def write_evaluation_artifacts(
                     "predictions": str(predictions_path),
                     "pr_curve": str(pr_path),
                     "roc_curve": str(roc_path),
+                    **{name: str(path) for name, path in frozen_artifacts.items()},
                 },
             },
             indent=2,
@@ -330,6 +362,7 @@ def write_evaluation_artifacts(
         "evaluation": evaluation_path,
         "pr_curve": pr_path,
         "roc_curve": roc_path,
+        **frozen_artifacts,
     }
 
 

@@ -1,9 +1,11 @@
 """Deterministic CatBoost training kept separate from graph feature extraction."""
 
+import hashlib
 import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
 import numpy as np
@@ -11,6 +13,8 @@ import shap  # type: ignore[reportMissingTypeStubs]
 from catboost import CatBoostClassifier, Pool  # type: ignore[reportMissingTypeStubs]
 
 from mayajaal.features import (
+    FeatureDefinition,
+    FeatureKind,
     FeatureSchema,
     FeatureVector,
     LabeledFeatureVector,
@@ -193,6 +197,68 @@ def save_baseline(
     )
     save_shap_summary(baseline, vectors, shap_summary_path)
     return BaselineArtifacts(model_path, metadata_path, shap_summary_path)
+
+
+def load_baseline(model_path: Path, metadata_path: Path) -> TrainedBaseline:
+    """Load a persisted CatBoost model with its exact ordered feature schema.
+
+    Loading is kept in the CatBoost adapter boundary: downstream consumers only
+    receive the model-neutral ``TrainedBaseline`` contract and never construct
+    a CatBoost model themselves.
+    """
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    try:
+        definitions = tuple(
+            FeatureDefinition(
+                name=str(item["name"]),
+                kind=FeatureKind(str(item["kind"])),
+                description=str(item["description"]),
+            )
+            for item in metadata["feature_definitions"]
+        )
+        training = BaselineConfig(**metadata["training"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("invalid persisted CatBoost feature metadata") from error
+    model = CatBoostClassifier()
+    cast(Any, model).load_model(str(model_path))
+    return TrainedBaseline(
+        model=model,
+        schema=FeatureSchema(definitions),
+        config=training,
+    )
+
+
+def model_semantic_hash(baseline: TrainedBaseline) -> str:
+    """Return a stable hash of CatBoost model semantics, not save-time metadata.
+
+    CatBoost's binary ``.cbm`` is retained and byte-hashed for integrity, but it
+    includes a generated model GUID.  CatBoost's documented JSON model export
+    exposes the same tree representation; removing that mutable GUID gives a
+    reproducible identifier for an otherwise identical frozen model.
+    """
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "model.json"
+        cast(Any, baseline.model).save_model(str(path), format="json")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    normalized = _without_mutable_model_metadata(payload)
+    encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _without_mutable_model_metadata(value: object) -> object:
+    """Exclude CatBoost run identifiers while preserving fitted tree semantics."""
+    if isinstance(value, dict):
+        items = cast(dict[str, object], value).items()
+        return {
+            str(key): _without_mutable_model_metadata(item)
+            for key, item in items
+            if key not in {"model_guid", "train_finish_time"}
+        }
+    if isinstance(value, list):
+        return [
+            _without_mutable_model_metadata(item) for item in cast(list[object], value)
+        ]
+    return value
 
 
 def save_shap_summary(

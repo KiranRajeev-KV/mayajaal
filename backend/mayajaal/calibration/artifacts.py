@@ -29,7 +29,9 @@ def save_calibration_artifacts(
     distribution_path = output_directory / "probability_distribution.png"
     calibrator_path.write_text(
         json.dumps(
-            _calibrator_json(evaluation.fit.calibrator), indent=2, sort_keys=True
+            _calibrator_json(evaluation.fit.calibrator, metadata),
+            indent=2,
+            sort_keys=True,
         )
         + "\n",
         encoding="utf-8",
@@ -81,10 +83,20 @@ def _prediction_frame(predictions: tuple[CalibrationPrediction, ...]) -> pl.Data
     )
 
 
-def _calibrator_json(calibrator: SigmoidCalibrator | None) -> dict[str, object]:
+def _calibrator_json(
+    calibrator: SigmoidCalibrator | None, metadata: dict[str, object]
+) -> dict[str, object]:
+    provenance = {
+        "base_model_id": metadata.get("base_model_id"),
+        "frozen_provenance": metadata.get("frozen_provenance"),
+    }
     if calibrator is None:
-        return {"status": "INVALID", "parameters": None}
-    return {"status": "VALID", "parameters": asdict(calibrator)}
+        return {"status": "INVALID", "parameters": None, "provenance": provenance}
+    return {
+        "status": "VALID",
+        "parameters": asdict(calibrator),
+        "provenance": provenance,
+    }
 
 
 def _save_reliability_diagram(

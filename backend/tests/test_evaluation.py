@@ -1,5 +1,6 @@
 """Focused tests for chronological, reusable held-out evaluation contracts."""
 
+import json
 import unittest
 from collections import defaultdict
 from dataclasses import replace
@@ -8,6 +9,7 @@ from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from unittest.mock import patch
 
 from mayajaal.baseline import BaselineConfig, predict_raw_score
 from mayajaal.calibration import CalibrationConfig, CalibrationStatus, calibrate_records
@@ -15,15 +17,19 @@ from mayajaal.evaluation import (
     EvaluationConfig,
     EvaluationSample,
     EvaluationSplit,
+    FrozenFullArtifactInput,
     PredictionRecord,
     build_split_manifest,
+    canonical_hash,
     evaluate_catboost,
     evaluate_predictions,
     fit_full_catboost_scores,
     held_out_validity,
+    load_frozen_full_evaluation,
     save_catboost_evaluation_models,
     select_threshold,
     vectors_for_manifest,
+    verify_frozen_full_predictions,
     write_evaluation_artifacts,
 )
 from mayajaal.features import FeatureService
@@ -134,6 +140,47 @@ def with_spanning_campaign(
         for event in world.events
     )
     return replace(world, events=updated_events), group_id
+
+
+def write_frozen_fixture(
+    output: Path,
+) -> tuple[GenerationProfile, EvaluationConfig, FeatureService]:
+    """Persist a compact full-model contract for provenance-focused tests."""
+    current, world, service = prepared()
+    config = EvaluationConfig(minimum_positive_samples=1, minimum_negative_samples=1)
+    manifest = build_split_manifest(
+        world, config, start_at=current.start_at, end_at=current.end_at
+    )
+    records, thresholds, reports, schemas, models = evaluate_catboost(
+        service, manifest, config, baseline_config=BaselineConfig(iterations=4)
+    )
+    model_artifacts = save_catboost_evaluation_models(
+        models, service, manifest, output / "models", shap_sample_count=1
+    )
+    vectors = vectors_for_manifest(service, manifest)
+    raw_scores = {
+        sample.sample_id: predict_raw_score(models["full"], vectors[sample.sample_id])
+        for sample in manifest.samples
+    }
+    _ = write_evaluation_artifacts(
+        output,
+        manifest,
+        records,
+        thresholds,
+        reports,
+        schemas,
+        config,
+        seed=current.seed,
+        frozen_full=FrozenFullArtifactInput(
+            records=records["full"],
+            raw_scores=raw_scores,
+            schema=schemas["full"],
+            model_artifacts=model_artifacts["full"],
+            training_config=models["full"].config,
+            generation_profile=current,
+        ),
+    )
+    return current, config, service
 
 
 class ChronologicalEvaluationTests(unittest.TestCase):
@@ -662,6 +709,128 @@ class ChronologicalEvaluationTests(unittest.TestCase):
         }
         self.assertEqual(before, after)
         self.assertEqual(calibrated.fit.status, CalibrationStatus.VALID)
+
+    def test_frozen_full_artifact_reloads_without_training_and_reproduces_scores(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            current, config, service = write_frozen_fixture(output)
+            with patch(
+                "mayajaal.evaluation.runner.train_baseline",
+                side_effect=AssertionError("calibration must not train a model"),
+            ):
+                frozen = load_frozen_full_evaluation(
+                    output,
+                    expected_profile=current,
+                    expected_evaluation_config=config,
+                )
+                verify_frozen_full_predictions(frozen, service)
+            _, first_calibration = calibrate_records(
+                frozen.records,
+                frozen.raw_scores,
+                CalibrationConfig(
+                    minimum_positive_samples=1, minimum_negative_samples=1
+                ),
+            )
+            reloaded = load_frozen_full_evaluation(
+                output,
+                expected_profile=current,
+                expected_evaluation_config=config,
+            )
+            _, second_calibration = calibrate_records(
+                reloaded.records,
+                reloaded.raw_scores,
+                CalibrationConfig(
+                    minimum_positive_samples=1, minimum_negative_samples=1
+                ),
+            )
+            self.assertEqual(first_calibration, second_calibration)
+            self.assertTrue((output / "full_predictions.parquet").is_file())
+            self.assertTrue((output / "full_model_provenance.json").is_file())
+            evaluation = json.loads(
+                (output / "evaluation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                evaluation["frozen_full"]["base_model_id"], frozen.base_model_id
+            )
+            self.assertEqual(
+                {record.sample_id for record in frozen.records},
+                set(frozen.raw_scores),
+            )
+
+    def test_frozen_provenance_is_deterministic_and_rejects_tampering(self) -> None:
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            current, config, _ = write_frozen_fixture(output)
+            first = json.loads(
+                (output / "full_model_provenance.json").read_text(encoding="utf-8")
+            )
+            _ = write_frozen_fixture(output)
+            second = json.loads(
+                (output / "full_model_provenance.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(first["base_model_id"], second["base_model_id"])
+            self.assertEqual(
+                first["identity"]["model_semantic_sha256"],
+                second["identity"]["model_semantic_sha256"],
+            )
+
+            with self.assertRaisesRegex(ValueError, "evaluation config mismatch"):
+                _ = load_frozen_full_evaluation(
+                    output,
+                    expected_profile=current,
+                    expected_evaluation_config=config.model_copy(
+                        update={"train_end_fraction": 0.20}
+                    ),
+                )
+
+            manifest_path = output / "split_manifest.json"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8") + " ", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ValueError, "split_manifest artifact hash mismatch"
+            ):
+                _ = load_frozen_full_evaluation(
+                    output,
+                    expected_profile=current,
+                    expected_evaluation_config=config,
+                )
+
+    def test_frozen_provenance_rejects_wrong_model_and_schema(self) -> None:
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            current, config, _ = write_frozen_fixture(output)
+            model_path = output / "models/full/catboost_fraud_baseline.cbm"
+            model_path.write_bytes(model_path.read_bytes() + b"tampered")
+            with self.assertRaisesRegex(ValueError, "model artifact hash mismatch"):
+                _ = load_frozen_full_evaluation(
+                    output,
+                    expected_profile=current,
+                    expected_evaluation_config=config,
+                )
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            current, config, _ = write_frozen_fixture(output)
+            provenance_path = output / "full_model_provenance.json"
+            provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            provenance["feature_schema"]["definitions"][0]["name"] = "tampered"
+            provenance["identity"]["feature_schema_sha256"] = canonical_hash(
+                provenance["feature_schema"]
+            )
+            identity = provenance["identity"]
+            provenance["base_model_id"] = canonical_hash(identity)
+            provenance_path.write_text(
+                json.dumps(provenance, sort_keys=True), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "feature schema mismatch"):
+                _ = load_frozen_full_evaluation(
+                    output,
+                    expected_profile=current,
+                    expected_evaluation_config=config,
+                )
 
 
 if __name__ == "__main__":

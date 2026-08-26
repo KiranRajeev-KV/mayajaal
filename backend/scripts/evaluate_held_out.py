@@ -3,12 +3,15 @@
 import argparse
 from pathlib import Path
 
+from mayajaal.baseline import predict_raw_score
 from mayajaal.evaluation import (
     EvaluationSplit,
+    FrozenFullArtifactInput,
     build_split_manifest,
     evaluate_catboost,
     held_out_validity,
     save_catboost_evaluation_models,
+    vectors_for_manifest,
     write_evaluation_artifacts,
 )
 from mayajaal.features import FeatureService
@@ -71,6 +74,18 @@ def main() -> int:
     records, thresholds, reports, schemas, models = evaluate_catboost(
         service, manifest, config.evaluation
     )
+    model_artifacts = save_catboost_evaluation_models(
+        models,
+        service,
+        manifest,
+        output_directory / "models",
+        shap_sample_count=profile.validation.shap_sample_count,
+    )
+    vectors = vectors_for_manifest(service, manifest)
+    full_raw_scores = {
+        sample.sample_id: predict_raw_score(models["full"], vectors[sample.sample_id])
+        for sample in manifest.samples
+    }
     artifacts = write_evaluation_artifacts(
         output_directory,
         manifest,
@@ -80,13 +95,14 @@ def main() -> int:
         schemas,
         config.evaluation,
         seed=profile.seed,
-    )
-    model_artifacts = save_catboost_evaluation_models(
-        models,
-        service,
-        manifest,
-        output_directory / "models",
-        shap_sample_count=profile.validation.shap_sample_count,
+        frozen_full=FrozenFullArtifactInput(
+            records=records["full"],
+            raw_scores=full_raw_scores,
+            schema=schemas["full"],
+            model_artifacts=model_artifacts["full"],
+            training_config=models["full"].config,
+            generation_profile=profile,
+        ),
     )
     validity = held_out_validity(thresholds, reports)
     print(f"held-out benchmark: {validity.status.value}")
@@ -94,6 +110,7 @@ def main() -> int:
         print(f"  {reason}")
     print(f"evaluation: {artifacts['evaluation']}")
     print(f"predictions: {artifacts['predictions']}")
+    print(f"frozen full provenance: {artifacts['full_provenance']}")
     for name, report in sorted(reports.items()):
         test = report[EvaluationSplit.TEST]
         print(

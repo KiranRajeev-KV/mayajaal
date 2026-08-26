@@ -1,13 +1,12 @@
-"""Fit validation-only sigmoid calibration for the frozen full CatBoost baseline."""
+"""Fit sigmoid calibration from a verified, frozen full-model evaluation."""
 
 import argparse
-from dataclasses import asdict
 from pathlib import Path
 
 from mayajaal.calibration import calibrate_records, save_calibration_artifacts
 from mayajaal.evaluation import (
-    build_split_manifest,
-    fit_full_catboost_scores,
+    load_frozen_full_evaluation,
+    verify_frozen_full_predictions,
 )
 from mayajaal.features import FeatureService
 from mayajaal.graph import build_graph_projection
@@ -26,6 +25,11 @@ def parse_arguments() -> argparse.Namespace:
         help="Defaults to <output.directory>/calibration-evaluation",
     )
     parser.add_argument(
+        "--evaluation-dir",
+        type=Path,
+        help="Frozen held-out evaluation directory; defaults to <output.directory>/held-out-evaluation",
+    )
+    parser.add_argument(
         "--full",
         action="store_true",
         help="Derive the configured validation.full_account_count benchmark population.",
@@ -34,7 +38,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> int:
-    """Rebuild a deterministic benchmark and calibrate only its full model."""
+    """Verify a frozen full model, then fit only validation-time calibration."""
     arguments = parse_arguments()
     config_path = arguments.config.resolve()
     config = load_generation_config(config_path)
@@ -43,6 +47,12 @@ def main() -> int:
     )
     if not output_directory.is_absolute():
         output_directory = config_path.parent / output_directory
+    evaluation_directory = (
+        arguments.evaluation_dir
+        or Path(config.output.directory) / "held-out-evaluation"
+    )
+    if not evaluation_directory.is_absolute():
+        evaluation_directory = config_path.parent / evaluation_directory
     profile = (
         profile_for_total_accounts(
             config.synthetic_world,
@@ -60,15 +70,14 @@ def main() -> int:
         devices=world.devices,
     )
     service = FeatureService(build_graph_projection(world, resolution))
-    manifest = build_split_manifest(
-        world,
-        config.evaluation,
-        start_at=profile.start_at,
-        end_at=profile.end_at,
+    frozen = load_frozen_full_evaluation(
+        evaluation_directory,
+        expected_profile=profile,
+        expected_evaluation_config=config.evaluation,
     )
-    full_records, raw_scores, schema, _ = fit_full_catboost_scores(service, manifest)
+    verify_frozen_full_predictions(frozen, service)
     predictions, report = calibrate_records(
-        full_records, raw_scores, config.calibration
+        frozen.records, frozen.raw_scores, config.calibration
     )
     artifacts = save_calibration_artifacts(
         output_directory,
@@ -78,15 +87,11 @@ def main() -> int:
             "name": "validation-only sigmoid calibration",
             "model_variant": "full",
             "seed": profile.seed,
+            "base_model_id": frozen.base_model_id,
+            "frozen_evaluation_directory": str(evaluation_directory),
+            "frozen_provenance": frozen.provenance,
             "calibration_config": config.calibration.model_dump(mode="json"),
-            "evaluation_config": config.evaluation.model_dump(mode="json"),
-            "cutoffs": {
-                "train": manifest.train_cutoff.isoformat(),
-                "validation": manifest.validation_cutoff.isoformat(),
-                "test": manifest.test_cutoff.isoformat(),
-            },
-            "feature_schema": [asdict(item) for item in schema.definitions],
-            "leakage_policy": "CatBoost is fit on train; the frozen raw-score sigmoid is fit only on validation; test is evaluated once and never used for fitting, threshold selection, or method selection.",
+            "leakage_policy": "The persisted CatBoost model is never retrained here; its frozen raw validation scores fit the sigmoid, and test is evaluated once without fitting, threshold selection, or method selection.",
         },
     )
     print(f"calibration: {report.fit.status.value}")

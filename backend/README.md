@@ -314,6 +314,17 @@ The output directory (by default
 `artifacts/synthetic-world/held-out-evaluation`) contains
 `split_manifest.json`, `predictions.parquet`, `evaluation.json`, `pr_curve.png`,
 `roc_curve.png`, and a model/metadata/SHAP directory for each ablation variant.
+For the `full` variant it also writes `full_predictions.parquet` (the stable
+decision contract plus raw CatBoost margin and uncalibrated probability) and
+`full_model_provenance.json`. The latter binds the exact `.cbm`, manifest,
+feature schema, full predictions, training configuration, evaluation
+configuration, and generation profile with SHA-256 integrity hashes. Because a
+CatBoost `.cbm` embeds a generated model GUID, the stable `base_model_id` uses a
+canonical CatBoost semantic hash with that mutable metadata removed, while the
+raw file hash still detects byte-level tampering. It is the required hand-off for calibration and later
+post-model consumers; changing any bound artifact or relevant configuration is
+rejected rather than silently recreating an equivalent model. `evaluation.json`
+also repeats this stable `base_model_id` for quick artifact lineage checks.
 `[evaluation]` in [config.toml](config.toml) controls the fixed chronological
 cutoffs, support-warning thresholds, threshold rule, and optional fixed
 assumptions. All three model variants calculate their offline SHAP summaries from
@@ -323,11 +334,14 @@ model settings, features, thresholds, or generator behaviour.
 
 ## Probability calibration
 
-`mayajaal.calibration` is a model-neutral post-model layer. It accepts stable
-score records plus model raw margins, fits a strictly increasing sigmoid/Platt
+`mayajaal.calibration` is a model-neutral post-model layer. It loads the exact
+frozen `full` CatBoost model, manifest, schema, raw-margin records, and
+uncalibrated probabilities from a held-out evaluation directory, verifies their
+hash-bound provenance and direct model predictions, then fits a strictly
+increasing sigmoid/Platt
 mapping through `fit(scores, labels)` and exposes
 `predict_probability(scores)`. The current command trains the frozen `full`
-CatBoost model on `T_train`, fits this mapping only from its raw validation
+CatBoost model nowhere: it fits this mapping only from its persisted raw validation
 scores at `T_validation`, then evaluates the mapping once at `T_test`. It never
 uses CatBoost training scores for calibration and it does not select a new
 classification threshold.
@@ -345,6 +359,7 @@ only deterministic bin counts/ranges for inspection and its ECE-style summary.
 just calibration-evaluate
 just calibration-evaluate --full  # derives validation.full_account_count (10k)
 just calibration-evaluate --config another-profile.toml
+just calibration-evaluate --full --evaluation-dir artifacts/held-out-standard-10k
 ```
 
 The output directory (by default
@@ -358,3 +373,7 @@ sigmoid method, validation support gates, deterministic quantile-bin count, and
 optimizer iteration limit. Insufficient validation support writes diagnostic
 uncalibrated metrics but marks calibration `INVALID` and refuses to fit a
 mapping; these are benchmark-validation gates, not statistical guarantees.
+Both `sigmoid_calibrator.json` and `calibration_evaluation.json` record the
+source `base_model_id` and complete frozen provenance. By default calibration
+reads `artifacts/synthetic-world/held-out-evaluation`; pass `--evaluation-dir`
+to consume another completed held-out run.
