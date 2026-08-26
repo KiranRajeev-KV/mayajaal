@@ -16,10 +16,14 @@ from mayajaal.calibration import (
     CalibrationConfig,
     CalibrationPrediction,
     CalibrationStatus,
+    SigmoidCalibrator,
     calibrate_records,
     fit,
+    load_probability_model,
     predict_probability,
     probability_metrics,
+    probability_model_id,
+    probability_model_provenance,
     quantile_bins,
     save_calibration_artifacts,
 )
@@ -258,7 +262,13 @@ class CalibrationTests(unittest.TestCase):
                 output,
                 predictions,
                 evaluation,
-                metadata={"seed": 7, "leakage_policy": "validation only"},
+                metadata={
+                    "seed": 7,
+                    "leakage_policy": "validation only",
+                    "base_model_id": "base-model-fixture",
+                    "calibration_config": config.model_dump(mode="json"),
+                    "frozen_provenance": {"base_model_id": "base-model-fixture"},
+                },
             )
             first_evaluation = first["evaluation"].read_text(encoding="utf-8")
             first_calibrator = first["calibrator"].read_text(encoding="utf-8")
@@ -266,7 +276,13 @@ class CalibrationTests(unittest.TestCase):
                 output,
                 predictions,
                 evaluation,
-                metadata={"seed": 7, "leakage_policy": "validation only"},
+                metadata={
+                    "seed": 7,
+                    "leakage_policy": "validation only",
+                    "base_model_id": "base-model-fixture",
+                    "calibration_config": config.model_dump(mode="json"),
+                    "frozen_provenance": {"base_model_id": "base-model-fixture"},
+                },
             )
             self.assertEqual(
                 first_evaluation, second["evaluation"].read_text(encoding="utf-8")
@@ -290,7 +306,113 @@ class CalibrationTests(unittest.TestCase):
             )
             report = json.loads(second["evaluation"].read_text(encoding="utf-8"))
             self.assertEqual(report["calibration"]["fit"]["status"], "VALID")
+            probability_model = report["probability_model"]
+            self.assertEqual(probability_model["base_model_id"], "base-model-fixture")
+            calibrator_document = json.loads(
+                second["calibrator"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                calibrator_document["provenance"]["base_model_id"],
+                probability_model["base_model_id"],
+            )
+            self.assertEqual(
+                calibrator_document["provenance"]["probability_model_id"],
+                probability_model["probability_model_id"],
+            )
+            loaded = load_probability_model(
+                second["calibrator"],
+                expected_base_model_id="base-model-fixture",
+                expected_probability_model_id=probability_model["probability_model_id"],
+            )
+            self.assertEqual(
+                loaded.probability_model_id, probability_model["probability_model_id"]
+            )
+            self.assertEqual(
+                predict_probability(
+                    loaded.calibrator,
+                    tuple(item.raw_model_score for item in predictions),
+                ),
+                tuple(
+                    float(item.calibrated_probability)
+                    for item in predictions
+                    if item.calibrated_probability is not None
+                ),
+            )
             self.assertTrue(all(path.is_file() for path in second.values()))
+
+    def test_probability_model_id_binds_only_calibration_semantics(self) -> None:
+        config = CalibrationConfig(
+            minimum_positive_samples=2, minimum_negative_samples=2
+        )
+        calibrator = SigmoidCalibrator(coefficient=0.5, intercept=-0.2)
+        first = probability_model_provenance(
+            base_model_id="base-a",
+            calibration_config=config,
+            calibrator=calibrator,
+            frozen_provenance={"location": "first"},
+        )
+        equivalent = probability_model_provenance(
+            base_model_id="base-a",
+            calibration_config=config,
+            calibrator=calibrator,
+            frozen_provenance={"location": "second"},
+        )
+        self.assertEqual(
+            first["probability_model_id"], equivalent["probability_model_id"]
+        )
+
+        variants = (
+            probability_model_provenance(
+                base_model_id="base-b",
+                calibration_config=config,
+                calibrator=calibrator,
+                frozen_provenance=None,
+            )["probability_model_id"],
+            probability_model_provenance(
+                base_model_id="base-a",
+                calibration_config=config,
+                calibrator=SigmoidCalibrator(coefficient=0.6, intercept=-0.2),
+                frozen_provenance=None,
+            )["probability_model_id"],
+            probability_model_provenance(
+                base_model_id="base-a",
+                calibration_config=config.model_copy(update={"quantile_bin_count": 5}),
+                calibrator=calibrator,
+                frozen_provenance=None,
+            )["probability_model_id"],
+            probability_model_id(
+                base_model_id="base-a",
+                calibration_contract_version=1,
+                calibration_method="future_method",
+                calibration_config=config.model_dump(mode="json"),
+                calibrator_parameters={"coefficient": 0.5, "intercept": -0.2},
+            ),
+        )
+        self.assertTrue(all(item != first["probability_model_id"] for item in variants))
+
+    def test_probability_model_loader_rejects_tampered_lineage(self) -> None:
+        records = fixture_records()
+        scores = raw_scores(records)
+        config = CalibrationConfig(
+            minimum_positive_samples=2, minimum_negative_samples=2
+        )
+        predictions, evaluation = calibrate_records(records, scores, config)
+        with TemporaryDirectory() as directory:
+            artifacts = save_calibration_artifacts(
+                Path(directory),
+                predictions,
+                evaluation,
+                metadata={
+                    "base_model_id": "base-model-fixture",
+                    "calibration_config": config.model_dump(mode="json"),
+                    "frozen_provenance": {"base_model_id": "base-model-fixture"},
+                },
+            )
+            document = json.loads(artifacts["calibrator"].read_text(encoding="utf-8"))
+            document["parameters"]["coefficient"] = 99.0
+            artifacts["calibrator"].write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "parameters mismatch"):
+                _ = load_probability_model(artifacts["calibrator"])
 
 
 if __name__ == "__main__":

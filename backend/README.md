@@ -374,6 +374,14 @@ optimizer iteration limit. Insufficient validation support writes diagnostic
 uncalibrated metrics but marks calibration `INVALID` and refuses to fit a
 mapping; these are benchmark-validation gates, not statistical guarantees.
 Both `sigmoid_calibrator.json` and `calibration_evaluation.json` record the
-source `base_model_id` and complete frozen provenance. By default calibration
+source `base_model_id`, complete frozen provenance, and a deterministic
+`probability_model_id`. This second identifier hashes only the lineage that
+defines calibrated probabilities: `base_model_id`, calibration provenance
+contract version, method, validated calibration configuration, and fitted
+calibrator parameters. It intentionally excludes artifact paths, output names,
+timestamps, and JSON formatting. The lineage is therefore
+`base_model_id → probability_model_id → future policy_id`; downstream code can
+load and verify both IDs through `mayajaal.calibration.load_probability_model`
+rather than reconstructing calibration assumptions. By default calibration
 reads `artifacts/synthetic-world/held-out-evaluation`; pass `--evaluation-dir`
 to consume another completed held-out run.

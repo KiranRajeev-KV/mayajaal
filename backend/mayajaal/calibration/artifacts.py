@@ -4,11 +4,20 @@ import json
 from dataclasses import asdict
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 
-from .models import CalibrationEvaluation, CalibrationPrediction, SigmoidCalibrator
+from .models import (
+    CalibrationConfig,
+    CalibrationEvaluation,
+    CalibrationPrediction,
+    SigmoidCalibrator,
+)
+from .provenance import (
+    CALIBRATION_PROVENANCE_CONTRACT_VERSION,
+    probability_model_provenance,
+)
 
 plt: Any = import_module("matplotlib.pyplot")
 
@@ -27,9 +36,10 @@ def save_calibration_artifacts(
     evaluation_path = output_directory / "calibration_evaluation.json"
     reliability_path = output_directory / "reliability_diagram.png"
     distribution_path = output_directory / "probability_distribution.png"
+    provenance = _probability_provenance(evaluation.fit.calibrator, metadata)
     calibrator_path.write_text(
         json.dumps(
-            _calibrator_json(evaluation.fit.calibrator, metadata),
+            _calibrator_json(evaluation.fit.calibrator, provenance),
             indent=2,
             sort_keys=True,
         )
@@ -41,6 +51,7 @@ def save_calibration_artifacts(
         json.dumps(
             {
                 "protocol": metadata,
+                "probability_model": provenance,
                 "calibration": asdict(evaluation),
                 "artifacts": {
                     "calibrator": str(calibrator_path),
@@ -84,12 +95,8 @@ def _prediction_frame(predictions: tuple[CalibrationPrediction, ...]) -> pl.Data
 
 
 def _calibrator_json(
-    calibrator: SigmoidCalibrator | None, metadata: dict[str, object]
+    calibrator: SigmoidCalibrator | None, provenance: dict[str, object]
 ) -> dict[str, object]:
-    provenance = {
-        "base_model_id": metadata.get("base_model_id"),
-        "frozen_provenance": metadata.get("frozen_provenance"),
-    }
     if calibrator is None:
         return {"status": "INVALID", "parameters": None, "provenance": provenance}
     return {
@@ -97,6 +104,45 @@ def _calibrator_json(
         "parameters": asdict(calibrator),
         "provenance": provenance,
     }
+
+
+def _probability_provenance(
+    calibrator: SigmoidCalibrator | None, metadata: dict[str, object]
+) -> dict[str, object]:
+    """Build a stable lineage contract without changing calibration semantics."""
+    base_model_id = metadata.get("base_model_id")
+    frozen_provenance = metadata.get("frozen_provenance")
+    if calibrator is None:
+        return {
+            "calibration_contract_version": CALIBRATION_PROVENANCE_CONTRACT_VERSION,
+            "base_model_id": base_model_id,
+            "probability_model_id": None,
+            "calibration_method": metadata.get("calibration_method"),
+            "calibration_config": metadata.get("calibration_config"),
+            "calibrator_parameters": None,
+            "frozen_provenance": frozen_provenance,
+        }
+    if not isinstance(base_model_id, str):
+        raise ValueError("valid calibration artifacts require a base_model_id")
+    try:
+        config = CalibrationConfig.model_validate(metadata["calibration_config"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "valid calibration artifacts require a valid calibration_config"
+        ) from error
+    if frozen_provenance is not None and not isinstance(frozen_provenance, dict):
+        raise ValueError("frozen_provenance must be an object when provided")
+    frozen_contract = (
+        cast(dict[str, object], frozen_provenance)
+        if frozen_provenance is not None
+        else None
+    )
+    return probability_model_provenance(
+        base_model_id=base_model_id,
+        calibration_config=config,
+        calibrator=calibrator,
+        frozen_provenance=frozen_contract,
+    )
 
 
 def _save_reliability_diagram(
