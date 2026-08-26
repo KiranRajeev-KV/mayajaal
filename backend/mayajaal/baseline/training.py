@@ -102,13 +102,22 @@ def predict_fraud_probability(
     return float(probabilities[0][1])
 
 
+def predict_raw_score(baseline: TrainedBaseline, vector: FeatureVector) -> float:
+    """Return CatBoost's pre-sigmoid ``RawFormulaVal`` for one vector."""
+    values = cast(
+        Any,
+        baseline.model,
+    ).predict(_pool((vector,), baseline.schema), prediction_type="RawFormulaVal")
+    return float(values[0])
+
+
 def explain_prediction(
     baseline: TrainedBaseline,
     vector: FeatureVector,
     *,
     limit: int = 5,
 ) -> PredictionExplanation:
-    """Return strongest positive and negative exact TreeSHAP contributions."""
+    """Return strongest raw-score TreeSHAP contributions and probability."""
     if limit < 1:
         raise ValueError("limit must be positive")
     contributions, base_values = _shap_values(baseline, (vector,))
@@ -125,6 +134,7 @@ def explain_prediction(
     )
     return PredictionExplanation(
         fraud_probability=predict_fraud_probability(baseline, vector),
+        raw_score=predict_raw_score(baseline, vector),
         base_value=float(base_values[0]),
         positive=tuple(item for item in ranked if item.shap_value > 0.0)[:limit],
         negative=tuple(item for item in ranked if item.shap_value < 0.0)[:limit],
@@ -173,6 +183,7 @@ def save_baseline(
                 "training": asdict(baseline.config),
                 "target": "synthetic event-labelled coordinated abuse at cutoff",
                 "leakage_policy": "features use only immutable graph events at or before cutoff",
+                "shap_output": "raw CatBoost score (RawFormulaVal), not probability",
             },
             indent=2,
             sort_keys=True,
@@ -187,7 +198,7 @@ def save_baseline(
 def save_shap_summary(
     baseline: TrainedBaseline, vectors: tuple[FeatureVector, ...], output_path: Path
 ) -> None:
-    """Use SHAP to write a global mean-absolute-contribution bar summary."""
+    """Write mean absolute TreeSHAP raw-score contributions."""
     contributions, base_values = _shap_values(baseline, vectors)
     values = np.asarray(
         [[vector.values[name] for name in baseline.schema.names] for vector in vectors],
@@ -233,7 +244,7 @@ def _shap_values(
     """Obtain SHAP TreeExplainer values in stable schema column order."""
     if not vectors:
         raise ValueError("at least one vector is required")
-    explainer = cast(Any, shap.TreeExplainer(baseline.model))
+    explainer = cast(Any, shap.TreeExplainer(baseline.model, model_output="raw"))
     matrix = np.asarray(
         explainer.shap_values(_pool(vectors, baseline.schema)), dtype=float
     )

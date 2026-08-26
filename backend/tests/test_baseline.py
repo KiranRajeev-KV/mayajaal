@@ -12,6 +12,7 @@ from mayajaal.baseline import (
     global_shap_importance,
     label_vectors,
     predict_fraud_probability,
+    predict_raw_score,
     save_baseline,
     train_baseline,
 )
@@ -66,10 +67,19 @@ class BaselineTests(unittest.TestCase):
         ]
         self.assertEqual(first_probabilities, second_probabilities)
 
-        explanation = explain_prediction(first, vectors[0])
+        explanation = explain_prediction(
+            first, vectors[0], limit=len(service.schema.names)
+        )
         self.assertGreaterEqual(explanation.fraud_probability, 0.0)
         self.assertLessEqual(explanation.fraud_probability, 1.0)
         self.assertTrue(explanation.positive or explanation.negative)
+        self.assertAlmostEqual(
+            explanation.base_value
+            + sum(item.shap_value for item in explanation.positive)
+            + sum(item.shap_value for item in explanation.negative),
+            predict_raw_score(first, vectors[0]),
+            places=8,
+        )
         importance = global_shap_importance(first, vectors)
         self.assertEqual(len(importance), len(service.schema.names))
 

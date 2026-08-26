@@ -29,7 +29,7 @@ class TrainedBaseline:
 
 @dataclass(frozen=True)
 class FeatureContribution:
-    """One signed SHAP contribution to a fraud probability prediction."""
+    """One signed TreeSHAP contribution to the model's raw score."""
 
     feature_name: str
     feature_value: float | str
@@ -38,9 +38,10 @@ class FeatureContribution:
 
 @dataclass(frozen=True)
 class PredictionExplanation:
-    """Reusable local explanation with the strongest signed feature effects."""
+    """Probability plus raw-score TreeSHAP effects for one prediction."""
 
     fraud_probability: float
+    raw_score: float
     base_value: float
     positive: tuple[FeatureContribution, ...]
     negative: tuple[FeatureContribution, ...]
