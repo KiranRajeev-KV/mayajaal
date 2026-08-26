@@ -1,5 +1,6 @@
 """Deterministic synthetic fraud-world generation and Parquet export."""
 
+from .benchmark import profile_for_total_accounts
 from .diagnostics import (
     FeatureHealthAtCutoff,
     FeatureHealthDiagnostics,
@@ -32,6 +33,7 @@ __all__ = [
     "feature_health_review_warnings",
     "generate_world",
     "guardrail_failures",
+    "profile_for_total_accounts",
     "to_tables",
     "write_diagnostics",
 ]

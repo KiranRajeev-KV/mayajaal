@@ -29,6 +29,7 @@ from mayajaal.synthetic import (
     feature_health_review_warnings,
     generate_world,
     guardrail_failures,
+    profile_for_total_accounts,
 )
 from mayajaal.synthetic.config import load_generation_config
 
@@ -53,48 +54,6 @@ def parse_arguments() -> argparse.Namespace:
         help="Defaults to <output.directory>/validation.",
     )
     return parser.parse_args()
-
-
-def profile_for_total_accounts(
-    profile: GenerationProfile, requested_total: int, seed: int
-) -> GenerationProfile:
-    """Derive normal-population size so target-rate campaigns reach the total."""
-    target_rate = profile.prevalence.resolved_target_rate()
-    target_ordinary_accounts = (
-        round(requested_total * (1.0 - target_rate))
-        if target_rate is not None
-        else requested_total
-    )
-
-    # Context counts may be population-scaled, so solve their small deterministic
-    # fixed point instead of assuming legacy fixed counts.
-    def ordinary_accounts(normal_account_count: int) -> int:
-        return (
-            normal_account_count
-            + profile.model_copy(
-                update={"normal_account_count": normal_account_count}
-            ).resolved_shared_household_count()
-            * profile.accounts_per_shared_household
-            + profile.population.resolved_benign_network_group_count(
-                normal_account_count
-            )
-            * profile.population.accounts_per_benign_network_group
-        )
-
-    candidates = range(max(target_ordinary_accounts + 1, 1))
-    normal_account_count = min(
-        candidates,
-        key=lambda count: (
-            abs(ordinary_accounts(count) - target_ordinary_accounts),
-            count,
-        ),
-    )
-    return profile.model_copy(
-        update={
-            "seed": seed,
-            "normal_account_count": normal_account_count,
-        }
-    )
 
 
 def _resolved_service(
