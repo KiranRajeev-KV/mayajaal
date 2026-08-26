@@ -132,12 +132,13 @@ SHAP's top-feature share produces a review warning only. It is never an input to
 generation or a target for tuning the generator. The full validation trains on
 all configured accounts but uses the deterministic configured
 `validation.shap_sample_count` sample for the offline SHAP report and PNG, so a
-10k run remains practical. The canonical profile requires at least 20 positive
+10k run remains practical. The canonical profile requires at least 50 positive
 and 20 negative accounts at a cutoff before AUC/overlap separability violations
-are enforced. Lower-support snapshots retain their metrics for inspection, but
-emit clearly named `early:`, `middle:`, or `late:` review warnings rather than
-hard shortcut failures; null class metrics are never silently treated as
-evidence.
+are enforced. This is a Mayajaal benchmark-validation support gate, not a
+statistical guarantee. Lower-support snapshots retain their metrics for
+inspection, but emit clearly named `early:`, `middle:`, or `late:` review
+warnings rather than hard shortcut failures; null class metrics are never
+silently treated as evidence.
 
 ## Deterministic resolution
 

@@ -262,7 +262,7 @@ class DiagnosticProfile(SchemaModel):
     max_single_feature_auc: float = Field(default=0.95, ge=0.5, le=1.0)
     min_class_histogram_overlap: float = Field(default=0.05, ge=0.0, le=1.0)
     shap_top_feature_share_warning: float = Field(default=0.60, gt=0.0, le=1.0)
-    min_cutoff_positive_samples: int = Field(default=20, ge=1)
+    min_cutoff_positive_samples: int = Field(default=50, ge=1)
     min_cutoff_negative_samples: int = Field(default=20, ge=1)
     max_identity_sharing_component_fraction: float = Field(default=0.05, gt=0.0, le=1.0)
     max_labelled_accounts_in_single_component_fraction: float = Field(

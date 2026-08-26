@@ -79,8 +79,9 @@ intentionally_sparse_numeric_features = [
 max_single_feature_auc = 0.95
 min_class_histogram_overlap = 0.05
 shap_top_feature_share_warning = 0.60
-# Below this support, cutoff feature separability is reported for review only.
-min_cutoff_positive_samples = 20
+# Benchmark-validation support gate, not a statistical guarantee. Below this,
+# cutoff feature separability is reported for review only.
+min_cutoff_positive_samples = 50
 min_cutoff_negative_samples = 20
 max_identity_sharing_component_fraction = 0.05
 max_labelled_accounts_in_single_component_fraction = 0.25

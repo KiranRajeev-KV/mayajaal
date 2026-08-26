@@ -257,7 +257,7 @@ class FeatureServiceTests(unittest.TestCase):
             labelled_sample_count=2,
             unlabelled_sample_count=6,
             class_support_warnings=(
-                "insufficient positive samples for class metrics: 2 < 20",
+                "insufficient positive samples for class metrics: 2 < 50",
             ),
             numeric={
                 "shortcut": NumericFeatureHealth(
@@ -300,9 +300,9 @@ class FeatureServiceTests(unittest.TestCase):
     def test_sufficient_support_enforces_prefixed_separability_guardrail(self) -> None:
         health = FeatureHealthAtCutoff(
             cutoff=profile().end_at,
-            sample_count=50,
-            labelled_sample_count=25,
-            unlabelled_sample_count=25,
+            sample_count=100,
+            labelled_sample_count=50,
+            unlabelled_sample_count=50,
             class_support_warnings=(),
             numeric={
                 "shortcut": NumericFeatureHealth(
@@ -328,3 +328,35 @@ class FeatureServiceTests(unittest.TestCase):
         )
         self.assertTrue(all(failure.startswith("late:") for failure in failures))
         self.assertTrue(any("single-feature AUC" in failure for failure in failures))
+
+    def test_non_label_invariants_remain_hard_with_insufficient_support(self) -> None:
+        health = FeatureHealthAtCutoff(
+            cutoff=profile().end_at,
+            sample_count=12,
+            labelled_sample_count=12,
+            unlabelled_sample_count=0,
+            class_support_warnings=(
+                "insufficient positive samples for class metrics: 12 < 50",
+                "insufficient negative samples for class metrics: 0 < 20",
+            ),
+            numeric={},
+            categorical={},
+            redundant_numeric_pairs=(),
+            inactive_expected_numeric_features=("device_count",),
+            intentionally_sparse_numeric_features=(),
+        )
+        failures = feature_health_guardrail_failures(
+            health,
+            profile(),
+            cutoff_name="late",
+            late=True,
+        )
+        warnings = feature_health_review_warnings(
+            health, profile().diagnostics, cutoff_name="late"
+        )
+
+        self.assertEqual(
+            failures,
+            ("late: expected-active numeric feature is constant at late cutoff",),
+        )
+        self.assertTrue(all(warning.startswith("late:") for warning in warnings))

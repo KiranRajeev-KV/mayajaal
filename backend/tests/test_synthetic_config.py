@@ -38,7 +38,7 @@ class SyntheticConfigTests(unittest.TestCase):
             2,
         )
         self.assertEqual(
-            config.synthetic_world.diagnostics.min_cutoff_positive_samples, 20
+            config.synthetic_world.diagnostics.min_cutoff_positive_samples, 50
         )
         self.assertEqual(
             config.synthetic_world.diagnostics.cutoff_fractions, (0.25, 0.50, 1.00)
