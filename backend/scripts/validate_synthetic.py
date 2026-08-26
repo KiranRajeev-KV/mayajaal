@@ -26,6 +26,7 @@ from mayajaal.synthetic import (
     diagnose_feature_health,
     diagnose_world,
     feature_health_guardrail_failures,
+    feature_health_review_warnings,
     generate_world,
     guardrail_failures,
 )
@@ -133,10 +134,17 @@ def validate_profile(
         )
         health_by_cutoff[name] = health
         review_warnings.extend(
-            f"{name} cutoff: {warning}" for warning in health.class_support_warnings
+            feature_health_review_warnings(
+                health, profile.diagnostics, cutoff_name=name
+            )
         )
         warnings.extend(
-            feature_health_guardrail_failures(health, profile, late=name == "late")
+            feature_health_guardrail_failures(
+                health,
+                profile,
+                cutoff_name=name,
+                late=name == "late",
+            )
         )
     report: dict[str, object] = {
         "seed": profile.seed,

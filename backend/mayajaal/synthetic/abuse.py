@@ -29,7 +29,6 @@ class CampaignPlan:
     shared_payment: bool
     shared_address: bool
     low_and_slow: bool
-    warmup_orders: int
     timeline_bucket: str | None
     activity_center_fraction: float
     activity_spread_fraction: float
@@ -91,17 +90,6 @@ def plan_campaign(
                 * difficulty.campaign_low_and_slow_multiplier,
                 1.0,
             )
-        ),
-        warmup_orders=max(
-            0,
-            round(
-                int(
-                    rng.integers(
-                        profile.min_warmup_orders, profile.max_warmup_orders + 1
-                    )
-                )
-                * difficulty.campaign_warmup_multiplier
-            ),
         ),
         timeline_bucket=timeline_bucket,
         activity_center_fraction=(

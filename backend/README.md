@@ -70,7 +70,7 @@ activity later in the configured window.
 `difficulty` and `prevalence` are intentionally orthogonal. Difficulty (`easy`,
 `standard`, `hard`, or `drift`) selects a fully configured bundle controlling
 persona concentration, benign sharing, identity lifecycle churn, campaign
-sharing, warm-up, burstiness, and seasonality. Prevalence selects the target
+sharing, burstiness, and seasonality. Prevalence selects the target
 labelled-account rarity independently. `development` may use a target such as
 3%; `rare_abuse` defaults to 0.75% when no explicit target is supplied. These
 are Mayajaal benchmark configurations, not claims about a merchant's fraud
@@ -84,9 +84,13 @@ than a few oversized rings. `strategy_weights` are sampling weights for each
 campaign and `timeline_weights` allocate plans across early, middle, and late
 chronological windows; `minimum_campaigns_per_timeline_bucket` protects class
 support at every configured cutoff. Campaigns retain partial identity sharing,
-warm-up orders, and either narrow burst windows or low-and-slow activity. They
-are hidden generation plans: only their abuse-relevant event labels become
-synthetic evaluation truth.
+and either narrow burst windows or low-and-slow activity. Every campaign member
+first follows the same unlabelled persona-history path as an ordinary account;
+the campaign action is then injected at its configured time with its campaign
+identities. Consequently, ordinary history is neither forced to contain a
+minimum number of orders nor scheduled by campaign timing, and campaign-sharing
+facts cannot exist before the injected action. Campaign plans are hidden: only
+their abuse-relevant event labels become synthetic evaluation truth.
 
 Benign households and office/campus contexts scale from the ordinary population
 through `population.households_per_thousand_ordinary_accounts` and
@@ -124,9 +128,12 @@ SHAP's top-feature share produces a review warning only. It is never an input to
 generation or a target for tuning the generator. The full validation trains on
 all configured accounts but uses the deterministic configured
 `validation.shap_sample_count` sample for the offline SHAP report and PNG, so a
-10k run remains practical. Each cutoff also reports a review warning if it has
-fewer than the configured positive or negative samples; null class metrics are
-never silently treated as evidence.
+10k run remains practical. The canonical profile requires at least 20 positive
+and 20 negative accounts at a cutoff before AUC/overlap separability violations
+are enforced. Lower-support snapshots retain their metrics for inspection, but
+emit clearly named `early:`, `middle:`, or `late:` review warnings rather than
+hard shortcut failures; null class metrics are never silently treated as
+evidence.
 
 ## Deterministic resolution
 

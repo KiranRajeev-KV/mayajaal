@@ -78,6 +78,11 @@ class FeatureHealthAtCutoff:
     inactive_expected_numeric_features: tuple[str, ...]
     intentionally_sparse_numeric_features: tuple[str, ...]
 
+    @property
+    def has_sufficient_class_support(self) -> bool:
+        """Whether label-separability diagnostics are statistically enforceable."""
+        return not self.class_support_warnings
+
     def to_dict(self) -> dict[str, object]:
         return {
             "cutoff": self.cutoff.isoformat(),
@@ -731,35 +736,70 @@ def guardrail_failures(
     return tuple(failures)
 
 
-def feature_health_guardrail_failures(
-    health: FeatureHealthAtCutoff, profile: GenerationProfile, *, late: bool
+def _separability_violations(
+    health: FeatureHealthAtCutoff, profile: DiagnosticProfile
 ) -> tuple[str, ...]:
-    """Check expected-active late features and label-only shortcut diagnostics."""
     failures: list[str] = []
-    if late and health.inactive_expected_numeric_features:
-        failures.append("expected-active numeric feature is constant at late cutoff")
     for name, details in health.numeric.items():
         if (
             details.class_auc is not None
-            and details.class_auc > profile.diagnostics.max_single_feature_auc
+            and details.class_auc > profile.max_single_feature_auc
         ):
             failures.append(
                 f"numeric feature exceeds single-feature AUC guardrail: {name}"
             )
         if (
             details.class_histogram_overlap is not None
-            and details.class_histogram_overlap
-            < profile.diagnostics.min_class_histogram_overlap
+            and details.class_histogram_overlap < profile.min_class_histogram_overlap
         ):
             failures.append(f"numeric feature has low class histogram overlap: {name}")
     for name, details in health.categorical.items():
         if (
             details.best_category_balanced_accuracy is not None
-            and details.best_category_balanced_accuracy
-            > profile.diagnostics.max_single_feature_auc
+            and details.best_category_balanced_accuracy > profile.max_single_feature_auc
         ):
             failures.append(f"categorical feature exceeds separation guardrail: {name}")
     return tuple(sorted(set(failures)))
+
+
+def feature_health_guardrail_failures(
+    health: FeatureHealthAtCutoff,
+    profile: GenerationProfile,
+    *,
+    cutoff_name: str,
+    late: bool,
+) -> tuple[str, ...]:
+    """Return enforceable, cutoff-named feature-health guardrail failures.
+
+    Class support governs label-aware separability checks only.  Feature
+    variation still remains a hard late-cutoff invariant because it does not
+    depend on labels.
+    """
+    failures: list[str] = []
+    if late and health.inactive_expected_numeric_features:
+        failures.append("expected-active numeric feature is constant at late cutoff")
+    if health.has_sufficient_class_support:
+        failures.extend(_separability_violations(health, profile.diagnostics))
+    return tuple(sorted({f"{cutoff_name}: {failure}" for failure in failures}))
+
+
+def feature_health_review_warnings(
+    health: FeatureHealthAtCutoff,
+    profile: DiagnosticProfile,
+    *,
+    cutoff_name: str,
+) -> tuple[str, ...]:
+    """Return cutoff-named support and downgraded separability review warnings."""
+    warnings = [
+        f"{cutoff_name}: {warning}" for warning in health.class_support_warnings
+    ]
+    if not health.has_sufficient_class_support:
+        warnings.extend(
+            f"{cutoff_name}: separability guardrail reviewed only due to insufficient "
+            f"class support: {violation}"
+            for violation in _separability_violations(health, profile)
+        )
+    return tuple(sorted(set(warnings)))
 
 
 def write_diagnostics(diagnostics: SyntheticDiagnostics, path: Path) -> Path:

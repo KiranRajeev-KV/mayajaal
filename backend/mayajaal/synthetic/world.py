@@ -177,27 +177,34 @@ class WorldGenerator:
             raise TypeError("schema ID must be UUID-backed")
         return value
 
-    def _timestamp(self, rng: Generator) -> datetime:
-        """Choose a creation time with enough room for subsequent activity."""
-        available_days = max((self.profile.end_at - self.profile.start_at).days - 7, 1)
+    def _timestamp(
+        self, rng: Generator, *, latest_at: datetime | None = None
+    ) -> datetime:
+        """Choose a persona-history creation time within an optional cohort bound."""
+        latest = min(
+            self.profile.end_at - timedelta(days=7),
+            latest_at if latest_at is not None else self.profile.end_at,
+        )
+        available_days = max((latest - self.profile.start_at).days, 1)
         return self.profile.start_at + timedelta(
             days=int(rng.integers(0, available_days)),
             minutes=int(rng.integers(0, 24 * 60)),
         )
 
-    def _campaign_timestamp(self, campaign: CampaignPlan, rng: Generator) -> datetime:
-        """Create a campaign cohort near its activity window, with warm-up room."""
+    def _campaign_action_timestamp(
+        self, campaign: CampaignPlan, rng: Generator
+    ) -> datetime:
+        """Schedule one injected campaign action in its configured time window."""
         available_days = max((self.profile.end_at - self.profile.start_at).days - 7, 1)
         center = campaign.activity_center_fraction
         if campaign.low_and_slow:
-            center = max(center - 0.22, 0.0)
-        jitter = int(rng.integers(-1_000, 1_001)) / 1_000.0
+            fraction = float(rng.uniform(max(0.02, center - 0.30), center))
+        else:
+            jitter = int(rng.integers(-1_000, 1_001)) / 1_000.0
+            fraction = center + jitter * campaign.activity_spread_fraction
         day = int(
             np.clip(
-                round(
-                    available_days
-                    * (center + jitter * campaign.activity_spread_fraction)
-                ),
+                round(available_days * fraction),
                 0,
                 available_days,
             )
@@ -206,6 +213,17 @@ class WorldGenerator:
             days=day,
             minutes=int(rng.integers(0, 24 * 60)),
         )
+
+    def _campaign_account_timestamp(
+        self, action_at: datetime, rng: Generator
+    ) -> datetime:
+        """Create an enrolled account before its separately injected action.
+
+        This is a cohort-membership condition only.  Its ordinary events are
+        emitted through exactly the same persona-history routine as ordinary
+        accounts and retain no campaign references or labels.
+        """
+        return self._timestamp(rng, latest_at=action_at - timedelta(hours=1))
 
     @staticmethod
     def _phone(rng: Generator) -> str:
@@ -337,8 +355,8 @@ class WorldGenerator:
         persona = choose_persona(self.profile.effective_persona_weights, rng)
         created_at = self._timestamp(rng)
         account = self._create_account(scope, created_at)
-        self._emit_history(
-            account, self._new_refs(scope, persona), persona, scope, None
+        self._emit_ordinary_history(
+            account, self._new_refs(scope, persona), persona, scope
         )
 
     def _create_benign_context(
@@ -364,7 +382,7 @@ class WorldGenerator:
                 share_address=plan.share_address,
                 share_payment=shares(plan.share_payment_probability, rng),
             )
-            self._emit_history(account, refs, persona, member_scope, None)
+            self._emit_ordinary_history(account, refs, persona, member_scope)
 
     def _create_configured_rings(self) -> None:
         """Create legacy configured rings or target-rate benchmark campaigns."""
@@ -521,11 +539,13 @@ class WorldGenerator:
             member_scope = f"{scope}-member-{member_number}"
             member_rng = generator_for(self.profile.seed, member_scope)
             persona = choose_persona(self.profile.effective_persona_weights, member_rng)
+            action_at = self._campaign_action_timestamp(campaign, member_rng)
             account = self._create_account(
-                member_scope, self._campaign_timestamp(campaign, member_rng)
+                member_scope, self._campaign_account_timestamp(action_at, member_rng)
             )
             early_member = member_number < 2
-            refs = self._new_refs(
+            ordinary_refs = self._new_refs(member_scope, persona)
+            campaign_refs = self._new_refs(
                 member_scope,
                 persona,
                 shared_refs=shared_refs,
@@ -538,7 +558,10 @@ class WorldGenerator:
                 share_payment=campaign.shared_payment
                 and (early_member or bool(member_rng.random() < 0.62)),
             )
-            self._emit_history(account, refs, persona, member_scope, campaign)
+            self._emit_ordinary_history(account, ordinary_refs, persona, member_scope)
+            self._inject_campaign_action(
+                account, campaign_refs, persona, member_scope, campaign, action_at
+            )
 
     @staticmethod
     def _timeline_activity_center(bucket: str, rng: Generator) -> float:
@@ -648,7 +671,6 @@ class WorldGenerator:
         count: int,
         persona: PersonaSpec,
         rng: Generator,
-        campaign: CampaignPlan | None,
     ) -> tuple[datetime, ...]:
         """Schedule persona-shaped orders without facts beyond the window."""
         if count == 0:
@@ -656,32 +678,19 @@ class WorldGenerator:
         earliest = created_at + timedelta(hours=1)
         latest = self.profile.end_at - timedelta(days=4)
         span_seconds = max((latest - earliest).total_seconds(), 1.0)
-        if campaign is not None and campaign.low_and_slow:
-            fractions = np.linspace(
-                max(0.02, campaign.activity_center_fraction - 0.30),
-                campaign.activity_center_fraction,
-                count,
-            ) + rng.normal(0.0, 0.045, count)
-        elif campaign is not None:
-            fractions = campaign.activity_center_fraction + rng.normal(
-                0.0, campaign.activity_spread_fraction, count
-            )
-        else:
-            fractions = rng.random(count)
-            calendar = self.profile.calendar
-            seasonal = rng.random(count) < min(
-                calendar.seasonal_activity_share
-                * self.profile.active_difficulty.seasonal_activity_multiplier,
-                1.0,
-            )
-            seasonal_fraction = calendar.seasonal_window_center_fraction + rng.normal(
-                0.0, calendar.seasonal_window_width_fraction / 3.0, count
-            )
-            fractions = np.where(seasonal, seasonal_fraction, fractions)
-            if self.profile.difficulty.value == "drift":
-                fractions = np.clip(
-                    fractions**calendar.drift_late_activity_power, 0.0, 1.0
-                )
+        fractions = rng.random(count)
+        calendar = self.profile.calendar
+        seasonal = rng.random(count) < min(
+            calendar.seasonal_activity_share
+            * self.profile.active_difficulty.seasonal_activity_multiplier,
+            1.0,
+        )
+        seasonal_fraction = calendar.seasonal_window_center_fraction + rng.normal(
+            0.0, calendar.seasonal_window_width_fraction / 3.0, count
+        )
+        fractions = np.where(seasonal, seasonal_fraction, fractions)
+        if self.profile.difficulty.value == "drift":
+            fractions = np.clip(fractions**calendar.drift_late_activity_power, 0.0, 1.0)
         times: list[datetime] = []
         for fraction in fractions:
             provisional = earliest + timedelta(
@@ -798,15 +807,14 @@ class WorldGenerator:
                 discount = min(subtotal, promotion.discount_value)
         return subtotal, discount, subtotal - discount
 
-    def _emit_history(
+    def _emit_ordinary_history(
         self,
         account: Account,
         initial_refs: IdentityRefs,
         persona: PersonaSpec,
         scope: str,
-        campaign: CampaignPlan | None,
     ) -> None:
-        """Emit ordinary history plus an optional hidden campaign action."""
+        """Emit one label-free persona history used by every account type."""
         rng = generator_for(self.profile.seed, f"history:{scope}")
         self._add_event(EventType.ACCOUNT_CREATED, account.created_at, account.id)
         current_refs = initial_refs
@@ -827,14 +835,11 @@ class WorldGenerator:
             refs=current_refs,
         )
         ordinary_count = int(rng.poisson(persona.order_rate))
-        if campaign is not None:
-            ordinary_count = max(ordinary_count, campaign.warmup_orders + 1)
         order_times = self._order_times(
             account.created_at,
             ordinary_count,
             persona,
             rng,
-            campaign,
         )
         for number, order_at in enumerate(order_times):
             if number > 0:
@@ -859,8 +864,7 @@ class WorldGenerator:
                 account.id,
                 refs=current_refs,
             )
-            abusive = campaign is not None and number == len(order_times) - 1
-            promotion = self._promotion_for(persona, rng, campaign, abusive)
+            promotion = self._promotion_for(persona, rng, None, False)
             subtotal, discount, total = self._order_amounts(persona, promotion, rng)
             order = Order(
                 id=OrderId(self._uuid("order")),
@@ -890,30 +894,89 @@ class WorldGenerator:
                     refs=current_refs,
                     order_id=order.id,
                     promotion_id=promotion.id,
-                    labels=self._labels(campaign) if abusive else None,
                 )
-            fraudulent_refund = (
-                abusive
-                and campaign is not None
-                and campaign.strategy
-                in {
-                    AbuseStrategy.REFUND_ABUSE,
-                    AbuseStrategy.MIXED,
-                }
-            )
             ordinary_refund = bool(
                 rng.random()
                 < self.profile.commerce.normal_refund_probability
                 * persona.refund_multiplier
             )
-            if fraudulent_refund or ordinary_refund:
+            if ordinary_refund:
                 self._emit_refund(
                     account,
                     current_refs,
                     order,
-                    campaign if fraudulent_refund else None,
+                    None,
                     rng,
                 )
+
+    def _inject_campaign_action(
+        self,
+        account: Account,
+        refs: IdentityRefs,
+        persona: PersonaSpec,
+        scope: str,
+        campaign: CampaignPlan,
+        action_at: datetime,
+    ) -> None:
+        """Add the hidden abuse action after a normal, unlabelled history.
+
+        Campaign-only identities are introduced here, rather than being used by
+        ordinary activity.  This makes shared-identity evidence an event fact
+        at the campaign time and preserves cutoff-safe reconstruction.
+        """
+        rng = generator_for(self.profile.seed, f"campaign-action:{scope}")
+        self._add_event(
+            EventType.DEVICE_SEEN,
+            action_at - timedelta(minutes=5),
+            account.id,
+            refs=refs,
+        )
+        self._add_event(
+            EventType.IP_SEEN,
+            action_at - timedelta(minutes=3),
+            account.id,
+            refs=refs,
+        )
+        self._add_event(
+            EventType.PAYMENT_ATTACHED,
+            action_at - timedelta(minutes=1),
+            account.id,
+            refs=refs,
+        )
+        promotion = self._promotion_for(persona, rng, campaign, True)
+        subtotal, discount, total = self._order_amounts(persona, promotion, rng)
+        order = Order(
+            id=OrderId(self._uuid("order")),
+            account_id=account.id,
+            shipping_address_id=refs.address_id,
+            placed_at=action_at,
+            subtotal_paise=subtotal,
+            discount_paise=discount,
+            total_paise=total,
+            item_count=max(1, int(rng.poisson(2.1))),
+            status=OrderStatus.DELIVERED,
+            promotion_id=promotion.id if promotion is not None else None,
+        )
+        self.orders.append(order)
+        self._add_event(
+            EventType.ORDER_PLACED,
+            action_at,
+            account.id,
+            refs=refs,
+            order_id=order.id,
+        )
+        if promotion is not None:
+            self._add_event(
+                EventType.PROMOTION_REDEEMED,
+                action_at + timedelta(minutes=1),
+                account.id,
+                refs=refs,
+                order_id=order.id,
+                promotion_id=promotion.id,
+                labels=self._labels(campaign),
+            )
+        if campaign.strategy in {AbuseStrategy.REFUND_ABUSE, AbuseStrategy.MIXED}:
+            self._emit_refund(account, refs, order, campaign, rng)
 
     def _emit_refund(
         self,

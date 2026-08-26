@@ -5,11 +5,12 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import polars as pl
 from pydantic import BaseModel
 
-from mayajaal.schemas import Event, EventType
+from mayajaal.schemas import Account, Event, EventType
 from mayajaal.synthetic import (
     GenerationProfile,
     SyntheticWorld,
@@ -19,6 +20,7 @@ from mayajaal.synthetic import (
     guardrail_failures,
     to_tables,
 )
+from mayajaal.synthetic.personas import PersonaSpec
 from mayajaal.synthetic.profile import (
     AbuseProfile,
     DifficultyPreset,
@@ -26,6 +28,7 @@ from mayajaal.synthetic.profile import (
     PrevalencePreset,
     PrevalenceProfile,
 )
+from mayajaal.synthetic.world import IdentityRefs, WorldGenerator
 
 
 def profile(seed: int) -> GenerationProfile:
@@ -130,6 +133,67 @@ class SyntheticWorldTests(unittest.TestCase):
             for identity_set in identity_sets[1:]:
                 shared_by_every_member.intersection_update(identity_set)
             self.assertLess(len(shared_by_every_member), 4)
+
+    def test_campaign_and_ordinary_accounts_share_the_ordinary_history_path(
+        self,
+    ) -> None:
+        calls: list[str] = []
+        original = WorldGenerator._emit_ordinary_history  # pyright: ignore[reportPrivateUsage]
+
+        def record_history(
+            generator: WorldGenerator,
+            account: Account,
+            refs: IdentityRefs,
+            persona: PersonaSpec,
+            scope: str,
+        ) -> None:
+            calls.append(scope)
+            original(generator, account, refs, persona, scope)
+
+        with patch.object(WorldGenerator, "_emit_ordinary_history", new=record_history):
+            _ = generate_world(profile(73))
+
+        self.assertIn("normal-0", calls)
+        self.assertTrue(
+            any(scope.startswith("promo-ring-000-member-") for scope in calls)
+        )
+        self.assertEqual(len(calls), len(set(calls)))
+
+    def test_campaign_action_is_injected_after_unlabelled_ordinary_history(
+        self,
+    ) -> None:
+        world = generate_world(profile(73))
+        labelled = [
+            event for event in world.events if event.synthetic_labels is not None
+        ]
+        self.assertTrue(labelled)
+        first_label_time = {
+            account_id: min(
+                event.occurred_at
+                for event in labelled
+                if event.account_id == account_id
+            )
+            for account_id in {event.account_id for event in labelled}
+        }
+        for account_id, first_labelled_at in first_label_time.items():
+            prior = [
+                event
+                for event in world.events
+                if event.account_id == account_id
+                and event.occurred_at < first_labelled_at
+            ]
+            self.assertTrue(prior)
+            self.assertTrue(all(event.synthetic_labels is None for event in prior))
+        for event in labelled:
+            order_event = next(
+                candidate
+                for candidate in world.events
+                if candidate.account_id == event.account_id
+                and candidate.order_id == event.order_id
+                and candidate.event_type is EventType.ORDER_PLACED
+            )
+            self.assertIsNone(order_event.synthetic_labels)
+            self.assertLess(order_event.occurred_at, event.occurred_at)
 
     def test_shared_household_is_unlabelled(self) -> None:
         household_only = GenerationProfile(

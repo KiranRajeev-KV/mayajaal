@@ -14,8 +14,11 @@ from mayajaal.synthetic import (
     SyntheticWorld,
     cutoff_times,
     diagnose_feature_health,
+    feature_health_guardrail_failures,
+    feature_health_review_warnings,
     generate_world,
 )
+from mayajaal.synthetic.diagnostics import NumericFeatureHealth
 from mayajaal.synthetic.profile import PopulationProfile
 
 
@@ -150,6 +153,31 @@ class FeatureServiceTests(unittest.TestCase):
             label_free_service.extract(target, profile().end_at),
         )
 
+    def test_injected_campaign_action_is_not_visible_before_its_first_fact(
+        self,
+    ) -> None:
+        world, service = prepared()
+        labelled = next(
+            event
+            for event in world.events
+            if event.synthetic_labels is not None and event.order_id is not None
+        )
+        action_order = next(
+            event
+            for event in world.events
+            if event.account_id == labelled.account_id
+            and event.order_id == labelled.order_id
+            and event.event_type is EventType.ORDER_PLACED
+        )
+        before_action = action_order.occurred_at - timedelta(minutes=5, seconds=1)
+        after_order = action_order.occurred_at
+        before = service.extract(str(labelled.account_id), before_action)
+        after = service.extract(str(labelled.account_id), after_order)
+        self.assertLess(
+            float(before.values["order_count"]),
+            float(after.values["order_count"]),
+        )
+
     def test_extraction_and_schema_are_deterministic(self) -> None:
         world, service = prepared()
         account_ids = tuple(str(account.id) for account in world.accounts)
@@ -219,3 +247,84 @@ class FeatureServiceTests(unittest.TestCase):
                 for warning in report.class_support_warnings
             )
         )
+
+    def test_insufficient_support_downgrades_separability_to_review_warning(
+        self,
+    ) -> None:
+        health = FeatureHealthAtCutoff(
+            cutoff=profile().start_at,
+            sample_count=8,
+            labelled_sample_count=2,
+            unlabelled_sample_count=6,
+            class_support_warnings=(
+                "insufficient positive samples for class metrics: 2 < 20",
+            ),
+            numeric={
+                "shortcut": NumericFeatureHealth(
+                    unique_count=2,
+                    variance=1.0,
+                    zero_fraction=0.5,
+                    median=0.5,
+                    p95=1.0,
+                    class_histogram_overlap=0.0,
+                    class_auc=1.0,
+                )
+            },
+            categorical={},
+            redundant_numeric_pairs=(),
+            inactive_expected_numeric_features=(),
+            intentionally_sparse_numeric_features=(),
+        )
+        diagnostics = profile().diagnostics.model_copy(
+            update={"max_single_feature_auc": 0.90}
+        )
+        self.assertFalse(
+            feature_health_guardrail_failures(
+                health,
+                profile().model_copy(update={"diagnostics": diagnostics}),
+                cutoff_name="early",
+                late=False,
+            )
+        )
+        warnings = feature_health_review_warnings(
+            health, diagnostics, cutoff_name="early"
+        )
+        self.assertTrue(all(warning.startswith("early:") for warning in warnings))
+        self.assertTrue(
+            any(
+                "separability guardrail reviewed only" in warning
+                for warning in warnings
+            )
+        )
+
+    def test_sufficient_support_enforces_prefixed_separability_guardrail(self) -> None:
+        health = FeatureHealthAtCutoff(
+            cutoff=profile().end_at,
+            sample_count=50,
+            labelled_sample_count=25,
+            unlabelled_sample_count=25,
+            class_support_warnings=(),
+            numeric={
+                "shortcut": NumericFeatureHealth(
+                    unique_count=2,
+                    variance=1.0,
+                    zero_fraction=0.5,
+                    median=0.5,
+                    p95=1.0,
+                    class_histogram_overlap=0.0,
+                    class_auc=1.0,
+                )
+            },
+            categorical={},
+            redundant_numeric_pairs=(),
+            inactive_expected_numeric_features=(),
+            intentionally_sparse_numeric_features=(),
+        )
+        failures = feature_health_guardrail_failures(
+            health,
+            profile(),
+            cutoff_name="late",
+            late=True,
+        )
+        self.assertTrue(all(failure.startswith("late:") for failure in failures))
+        self.assertTrue(any("single-feature AUC" in failure for failure in failures))

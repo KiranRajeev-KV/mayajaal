@@ -33,7 +33,6 @@ class DifficultyBundle(SchemaModel):
     identity_lifecycle_multiplier: float = Field(gt=0.0)
     campaign_sharing_multiplier: float = Field(gt=0.0)
     campaign_low_and_slow_multiplier: float = Field(gt=0.0)
-    campaign_warmup_multiplier: float = Field(gt=0.0)
     seasonal_activity_multiplier: float = Field(gt=0.0)
     burst_activity_spread_fraction: float = Field(gt=0.0, le=1.0)
 
@@ -48,7 +47,6 @@ class DifficultyProfiles(SchemaModel):
             identity_lifecycle_multiplier=0.70,
             campaign_sharing_multiplier=1.30,
             campaign_low_and_slow_multiplier=0.56,
-            campaign_warmup_multiplier=0.70,
             seasonal_activity_multiplier=0.75,
             burst_activity_spread_fraction=0.04,
         )
@@ -60,7 +58,6 @@ class DifficultyProfiles(SchemaModel):
             identity_lifecycle_multiplier=1.00,
             campaign_sharing_multiplier=1.00,
             campaign_low_and_slow_multiplier=1.00,
-            campaign_warmup_multiplier=1.00,
             seasonal_activity_multiplier=1.00,
             burst_activity_spread_fraction=0.06,
         )
@@ -72,7 +69,6 @@ class DifficultyProfiles(SchemaModel):
             identity_lifecycle_multiplier=1.35,
             campaign_sharing_multiplier=0.72,
             campaign_low_and_slow_multiplier=1.33,
-            campaign_warmup_multiplier=1.35,
             seasonal_activity_multiplier=1.10,
             burst_activity_spread_fraction=0.12,
         )
@@ -84,7 +80,6 @@ class DifficultyProfiles(SchemaModel):
             identity_lifecycle_multiplier=1.25,
             campaign_sharing_multiplier=0.78,
             campaign_low_and_slow_multiplier=1.22,
-            campaign_warmup_multiplier=1.25,
             seasonal_activity_multiplier=1.15,
             burst_activity_spread_fraction=0.14,
         )
@@ -178,17 +173,9 @@ class CalendarProfile(SchemaModel):
 class AbuseProfile(SchemaModel):
     """Controls hidden campaign composition without appearing in output records."""
 
-    min_warmup_orders: int = Field(default=1, ge=0)
-    max_warmup_orders: int = Field(default=3, ge=0)
     low_and_slow_probability: float = Field(default=0.45, ge=0.0, le=1.0)
     partial_identity_sharing_probability: float = Field(default=0.68, ge=0.0, le=1.0)
     ring_size_variation: int = Field(default=2, ge=0)
-
-    @model_validator(mode="after")
-    def validate_warmup_orders(self) -> Self:
-        if self.max_warmup_orders < self.min_warmup_orders:
-            raise ValueError("max_warmup_orders cannot be below min_warmup_orders")
-        return self
 
 
 class PrevalenceProfile(SchemaModel):
@@ -275,7 +262,7 @@ class DiagnosticProfile(SchemaModel):
     max_single_feature_auc: float = Field(default=0.95, ge=0.5, le=1.0)
     min_class_histogram_overlap: float = Field(default=0.05, ge=0.0, le=1.0)
     shap_top_feature_share_warning: float = Field(default=0.60, gt=0.0, le=1.0)
-    min_cutoff_positive_samples: int = Field(default=5, ge=1)
+    min_cutoff_positive_samples: int = Field(default=20, ge=1)
     min_cutoff_negative_samples: int = Field(default=20, ge=1)
     max_identity_sharing_component_fraction: float = Field(default=0.05, gt=0.0, le=1.0)
     max_labelled_accounts_in_single_component_fraction: float = Field(

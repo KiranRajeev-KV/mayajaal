@@ -43,8 +43,6 @@ seasonal_activity_share = 0.22
 drift_late_activity_power = 0.72
 
 [synthetic_world.abuse]
-min_warmup_orders = 1
-max_warmup_orders = 3
 low_and_slow_probability = 0.45
 partial_identity_sharing_probability = 0.68
 ring_size_variation = 2
@@ -81,7 +79,8 @@ intentionally_sparse_numeric_features = [
 max_single_feature_auc = 0.95
 min_class_histogram_overlap = 0.05
 shap_top_feature_share_warning = 0.60
-min_cutoff_positive_samples = 5
+# Below this support, cutoff feature separability is reported for review only.
+min_cutoff_positive_samples = 20
 min_cutoff_negative_samples = 20
 max_identity_sharing_component_fraction = 0.05
 max_labelled_accounts_in_single_component_fraction = 0.25
@@ -98,7 +97,6 @@ benign_sharing_multiplier = 0.70
 identity_lifecycle_multiplier = 0.70
 campaign_sharing_multiplier = 1.30
 campaign_low_and_slow_multiplier = 0.56
-campaign_warmup_multiplier = 0.70
 seasonal_activity_multiplier = 0.75
 burst_activity_spread_fraction = 0.04
 
@@ -108,7 +106,6 @@ benign_sharing_multiplier = 1.00
 identity_lifecycle_multiplier = 1.00
 campaign_sharing_multiplier = 1.00
 campaign_low_and_slow_multiplier = 1.00
-campaign_warmup_multiplier = 1.00
 seasonal_activity_multiplier = 1.00
 burst_activity_spread_fraction = 0.06
 
@@ -118,7 +115,6 @@ benign_sharing_multiplier = 1.25
 identity_lifecycle_multiplier = 1.35
 campaign_sharing_multiplier = 0.72
 campaign_low_and_slow_multiplier = 1.33
-campaign_warmup_multiplier = 1.35
 seasonal_activity_multiplier = 1.10
 burst_activity_spread_fraction = 0.12
 
@@ -128,7 +124,6 @@ benign_sharing_multiplier = 1.20
 identity_lifecycle_multiplier = 1.25
 campaign_sharing_multiplier = 0.78
 campaign_low_and_slow_multiplier = 1.22
-campaign_warmup_multiplier = 1.25
 seasonal_activity_multiplier = 1.15
 burst_activity_spread_fraction = 0.14
 

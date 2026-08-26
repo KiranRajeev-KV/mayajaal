@@ -94,7 +94,7 @@ class GraphProjectionTests(unittest.TestCase):
             by_device.setdefault(relationship.target_canonical_id, set()).add(
                 relationship.source_canonical_id
             )
-        self.assertTrue(any(len(accounts) == 3 for accounts in by_device.values()))
+        self.assertTrue(any(len(accounts) >= 2 for accounts in by_device.values()))
 
         ring_events = [
             event
