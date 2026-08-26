@@ -91,6 +91,10 @@ identities. Consequently, ordinary history is neither forced to contain a
 minimum number of orders nor scheduled by campaign timing, and campaign-sharing
 facts cannot exist before the injected action. Campaign plans are hidden: only
 their abuse-relevant event labels become synthetic evaluation truth.
+The injected action inherits the account's ordinary identity state at that
+time; only identity types explicitly selected for campaign sharing are replaced
+with the campaign's shared reference. Identity rotation is therefore not an
+implicit fraud-account property.
 
 Benign households and office/campus contexts scale from the ordinary population
 through `population.households_per_thousand_ordinary_accounts` and

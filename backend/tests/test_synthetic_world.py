@@ -2,15 +2,25 @@
 
 import unittest
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from uuid import uuid4
 
+import numpy as np
 import polars as pl
 from pydantic import BaseModel
 
-from mayajaal.schemas import Account, Event, EventType
+from mayajaal.schemas import (
+    Account,
+    AddressId,
+    DeviceId,
+    Event,
+    EventType,
+    IPAddressId,
+    PaymentIdentityId,
+)
 from mayajaal.synthetic import (
     GenerationProfile,
     SyntheticWorld,
@@ -20,6 +30,7 @@ from mayajaal.synthetic import (
     guardrail_failures,
     to_tables,
 )
+from mayajaal.synthetic.abuse import AbuseStrategy, CampaignPlan
 from mayajaal.synthetic.personas import PersonaSpec
 from mayajaal.synthetic.profile import (
     AbuseProfile,
@@ -146,9 +157,13 @@ class SyntheticWorldTests(unittest.TestCase):
             refs: IdentityRefs,
             persona: PersonaSpec,
             scope: str,
-        ) -> None:
+            *,
+            current_at: datetime | None = None,
+        ) -> IdentityRefs:
             calls.append(scope)
-            original(generator, account, refs, persona, scope)
+            return original(
+                generator, account, refs, persona, scope, current_at=current_at
+            )
 
         with patch.object(WorldGenerator, "_emit_ordinary_history", new=record_history):
             _ = generate_world(profile(73))
@@ -158,6 +173,88 @@ class SyntheticWorldTests(unittest.TestCase):
             any(scope.startswith("promo-ring-000-member-") for scope in calls)
         )
         self.assertEqual(len(calls), len(set(calls)))
+
+    def test_campaign_refs_overlay_only_explicitly_shared_identities(self) -> None:
+        ordinary = IdentityRefs(
+            device_id=DeviceId(uuid4()),
+            ip_address_id=IPAddressId(uuid4()),
+            address_id=AddressId(uuid4()),
+            payment_identity_id=PaymentIdentityId(uuid4()),
+        )
+        shared = IdentityRefs(
+            device_id=DeviceId(uuid4()),
+            ip_address_id=IPAddressId(uuid4()),
+            address_id=AddressId(uuid4()),
+            payment_identity_id=PaymentIdentityId(uuid4()),
+        )
+        device_only_campaign = CampaignPlan(
+            strategy=AbuseStrategy.PROMO_FARM,
+            cluster_id="fixture",
+            shared_device=True,
+            shared_ip=False,
+            shared_payment=False,
+            shared_address=False,
+            low_and_slow=False,
+            timeline_bucket=None,
+            activity_center_fraction=0.5,
+            activity_spread_fraction=0.1,
+        )
+
+        result = WorldGenerator._campaign_refs(  # pyright: ignore[reportPrivateUsage]
+            ordinary,
+            shared,
+            device_only_campaign,
+            np.random.default_rng(7),
+            early_member=True,
+        )
+
+        self.assertEqual(result.device_id, shared.device_id)
+        self.assertEqual(result.ip_address_id, ordinary.ip_address_id)
+        self.assertEqual(result.address_id, ordinary.address_id)
+        self.assertEqual(result.payment_identity_id, ordinary.payment_identity_id)
+
+    def test_shared_campaign_identity_is_not_observed_before_first_action(
+        self,
+    ) -> None:
+        world = generate_world(profile(73))
+        labelled_orders = {
+            event.order_id
+            for event in world.events
+            if event.synthetic_labels is not None and event.order_id is not None
+        }
+        action_orders = {
+            event.order_id: event
+            for event in world.events
+            if event.event_type is EventType.ORDER_PLACED
+            and event.order_id in labelled_orders
+        }
+        self.assertTrue(action_orders)
+
+        identity_fields = (
+            "device_id",
+            "ip_address_id",
+            "payment_identity_id",
+            "address_id",
+        )
+        for field in identity_fields:
+            action_identity_times: defaultdict[object, list[datetime]] = defaultdict(
+                list
+            )
+            for action in action_orders.values():
+                identity_id = getattr(action, field)
+                if identity_id is not None:
+                    action_identity_times[identity_id].append(action.occurred_at)
+            for identity_id, action_times in action_identity_times.items():
+                if len(action_times) < 2:
+                    continue
+                first_action_fact_at = min(action_times) - timedelta(minutes=5)
+                prior = [
+                    event
+                    for event in world.events
+                    if getattr(event, field) == identity_id
+                    and event.occurred_at < first_action_fact_at
+                ]
+                self.assertFalse(prior, msg=f"{field} leaked before campaign action")
 
     def test_campaign_action_is_injected_after_unlabelled_ordinary_history(
         self,

@@ -545,23 +545,66 @@ class WorldGenerator:
             )
             early_member = member_number < 2
             ordinary_refs = self._new_refs(member_scope, persona)
-            campaign_refs = self._new_refs(
-                member_scope,
+            current_refs = self._emit_ordinary_history(
+                account,
+                ordinary_refs,
                 persona,
-                shared_refs=shared_refs,
-                share_device=campaign.shared_device
-                and (early_member or bool(member_rng.random() < 0.62)),
-                share_ip=campaign.shared_ip
-                and (early_member or bool(member_rng.random() < 0.62)),
-                share_address=campaign.shared_address
-                and (early_member or bool(member_rng.random() < 0.62)),
-                share_payment=campaign.shared_payment
-                and (early_member or bool(member_rng.random() < 0.62)),
+                member_scope,
+                current_at=action_at - timedelta(minutes=5),
             )
-            self._emit_ordinary_history(account, ordinary_refs, persona, member_scope)
+            campaign_refs = self._campaign_refs(
+                current_refs,
+                shared_refs,
+                campaign,
+                member_rng,
+                early_member=early_member,
+            )
             self._inject_campaign_action(
                 account, campaign_refs, persona, member_scope, campaign, action_at
             )
+
+    @staticmethod
+    def _campaign_refs(
+        ordinary_refs: IdentityRefs,
+        shared_refs: IdentityRefs,
+        campaign: CampaignPlan,
+        rng: Generator,
+        *,
+        early_member: bool,
+    ) -> IdentityRefs:
+        """Overlay only selected campaign-sharing identities on current refs.
+
+        A campaign action normally continues with the identities already active
+        for the account.  A selected sharing strategy may replace an individual
+        field with the campaign's shared identity; it never allocates a private
+        replacement merely because that field is outside the strategy.
+        """
+
+        def joins_campaign_identity(selected: bool) -> bool:
+            return selected and (early_member or bool(rng.random() < 0.62))
+
+        return IdentityRefs(
+            device_id=(
+                shared_refs.device_id
+                if joins_campaign_identity(campaign.shared_device)
+                else ordinary_refs.device_id
+            ),
+            ip_address_id=(
+                shared_refs.ip_address_id
+                if joins_campaign_identity(campaign.shared_ip)
+                else ordinary_refs.ip_address_id
+            ),
+            address_id=(
+                shared_refs.address_id
+                if joins_campaign_identity(campaign.shared_address)
+                else ordinary_refs.address_id
+            ),
+            payment_identity_id=(
+                shared_refs.payment_identity_id
+                if joins_campaign_identity(campaign.shared_payment)
+                else ordinary_refs.payment_identity_id
+            ),
+        )
 
     @staticmethod
     def _timeline_activity_center(bucket: str, rng: Generator) -> float:
@@ -813,8 +856,15 @@ class WorldGenerator:
         initial_refs: IdentityRefs,
         persona: PersonaSpec,
         scope: str,
-    ) -> None:
-        """Emit one label-free persona history used by every account type."""
+        *,
+        current_at: datetime | None = None,
+    ) -> IdentityRefs:
+        """Emit a label-free persona history and return refs active at a cutoff.
+
+        ``current_at`` is used only while constructing a later campaign action.
+        It chooses the latest ordinary identity state observed no later than that
+        action's first identity fact; it does not alter the ordinary history.
+        """
         rng = generator_for(self.profile.seed, f"history:{scope}")
         self._add_event(EventType.ACCOUNT_CREATED, account.created_at, account.id)
         current_refs = initial_refs
@@ -841,11 +891,14 @@ class WorldGenerator:
             persona,
             rng,
         )
+        refs_at_cutoff = initial_refs
         for number, order_at in enumerate(order_times):
             if number > 0:
                 current_refs = self._replace_refs(
                     current_refs, f"{scope}-{number}", persona, rng
                 )
+            if current_at is None or order_at - timedelta(minutes=5) <= current_at:
+                refs_at_cutoff = current_refs
             self._add_event(
                 EventType.DEVICE_SEEN,
                 order_at - timedelta(minutes=5),
@@ -908,6 +961,7 @@ class WorldGenerator:
                     None,
                     rng,
                 )
+        return refs_at_cutoff
 
     def _inject_campaign_action(
         self,
