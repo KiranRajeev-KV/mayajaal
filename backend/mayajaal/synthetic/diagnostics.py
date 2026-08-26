@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from mayajaal.interop.sklearn import roc_auc
 from mayajaal.schemas import EventType
 
 if TYPE_CHECKING:
@@ -558,26 +559,13 @@ def _histogram_overlap(positive: list[float], negative: list[float]) -> float | 
     return float(np.minimum(positive_probability, negative_probability).sum())
 
 
-def _auc(values: list[float], labels: list[bool]) -> float | None:
+def _class_separability_auc(values: list[float], labels: list[bool]) -> float | None:
+    """Use sklearn ROC-AUC while treating either score direction as a shortcut."""
     positives = sum(labels)
     negatives = len(labels) - positives
     if not positives or not negatives:
         return None
-    ordered = sorted(zip(values, labels, strict=True), key=lambda item: item[0])
-    positive_rank_sum = 0.0
-    index = 0
-    while index < len(ordered):
-        end = index + 1
-        while end < len(ordered) and ordered[end][0] == ordered[index][0]:
-            end += 1
-        average_rank = (index + 1 + end) / 2.0
-        positive_rank_sum += average_rank * sum(
-            label for _, label in ordered[index:end]
-        )
-        index = end
-    auc = (positive_rank_sum - positives * (positives + 1) / 2.0) / (
-        positives * negatives
-    )
+    auc = roc_auc([int(label) for label in labels], values)
     return float(max(auc, 1.0 - auc))
 
 
@@ -633,7 +621,7 @@ def diagnose_feature_health(
             median=_median(values),
             p95=_p95(values),
             class_histogram_overlap=_histogram_overlap(positive, negative),
-            class_auc=_auc(values, labels),
+            class_auc=_class_separability_auc(values, labels),
         )
     for name in schema.categorical_names:
         values = [str(vector.values[name]) for vector in ordered]

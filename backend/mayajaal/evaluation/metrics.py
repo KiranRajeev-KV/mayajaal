@@ -7,6 +7,18 @@ from typing import Any
 
 import polars as pl
 
+from mayajaal.interop.sklearn import (
+    average_precision as sklearn_average_precision,
+)
+from mayajaal.interop.sklearn import (
+    classification_metrics,
+    precision_recall_points,
+    roc_points,
+)
+from mayajaal.interop.sklearn import (
+    roc_auc as sklearn_roc_auc,
+)
+
 from .models import (
     BenchmarkStatus,
     BenchmarkValidity,
@@ -48,8 +60,7 @@ def select_threshold(
     candidates = sorted(set(scores), reverse=True)
     ranked: list[tuple[float, float, float, float]] = []
     for threshold in candidates:
-        metrics = _threshold_counts(labels, scores, threshold)
-        precision, recall, f1 = _classification_metrics(metrics)
+        precision, recall, f1, _ = _threshold_metrics(labels, scores, threshold)
         ranked.append((f1, precision, threshold, recall))
     _, _, threshold, _ = max(ranked)
     return ThresholdSelection(
@@ -83,22 +94,23 @@ def evaluate_predictions(
             f"{split.value}: Average Precision is undefined without positives"
         )
     else:
-        average_precision = _average_precision(labels, scores)
+        average_precision = sklearn_average_precision(labels, scores)
     if positive_count == 0 or negative_count == 0:
         roc_auc = None
         warnings.append(f"{split.value}: ROC-AUC is undefined without both classes")
     else:
-        roc_auc = _roc_auc(labels, scores)
-    counts = (
-        _threshold_counts(labels, scores, threshold) if threshold is not None else None
+        roc_auc = sklearn_roc_auc(labels, scores)
+    threshold_metrics = (
+        _threshold_metrics(labels, scores, threshold) if threshold is not None else None
     )
-    if counts is None:
+    if threshold_metrics is None:
         precision = recall = f1 = None
+        counts = None
         warnings.append(
             f"{split.value}: threshold metrics are unavailable because validation threshold selection was invalid"
         )
     else:
-        precision, recall, f1 = _classification_metrics(counts)
+        precision, recall, f1, counts = threshold_metrics
     fp_cost, prevented = _fixed_assumption_values(counts, config)
     return SplitMetrics(
         split=split,
@@ -169,7 +181,7 @@ def save_curve_plots(
         labels, scores = _labels_scores(records)
         if not labels or not any(labels):
             continue
-        precision, recall = _precision_recall_points(labels, scores)
+        precision, recall = precision_recall_points(labels, scores)
         axes.plot(recall, precision, label=name)
         pr_curve_count += 1
     axes.set(xlabel="Recall", ylabel="Precision", title="Held-out precision-recall")
@@ -186,7 +198,7 @@ def save_curve_plots(
         labels, scores = _labels_scores(records)
         if not labels or not any(labels) or all(labels):
             continue
-        false_positive_rate, true_positive_rate = _roc_points(labels, scores)
+        false_positive_rate, true_positive_rate = roc_points(labels, scores)
         axes.plot(false_positive_rate, true_positive_rate, label=name)
         roc_curve_count += 1
     if roc_curve_count:
@@ -211,110 +223,11 @@ def _labels_scores(
     ]
 
 
-def _precision_recall_points(
-    labels: Sequence[int], scores: Sequence[float]
-) -> tuple[list[float], list[float]]:
-    """Return score-threshold PR points with the AP-compatible initial point."""
-    positives = sum(labels)
-    if positives == 0:
-        return [1.0], [0.0]
-    pairs = sorted(zip(scores, labels, strict=True), key=lambda item: -item[0])
-    precision = [1.0]
-    recall = [0.0]
-    true_positive = false_positive = 0
-    index = 0
-    while index < len(pairs):
-        score = pairs[index][0]
-        while index < len(pairs) and pairs[index][0] == score:
-            if pairs[index][1]:
-                true_positive += 1
-            else:
-                false_positive += 1
-            index += 1
-        precision.append(true_positive / (true_positive + false_positive))
-        recall.append(true_positive / positives)
-    return precision, recall
-
-
-def _average_precision(labels: Sequence[int], scores: Sequence[float]) -> float:
-    """Weighted precision increments, matching scikit-learn's AP definition."""
-    precision, recall = _precision_recall_points(labels, scores)
-    return sum(
-        (recall[index] - recall[index - 1]) * precision[index]
-        for index in range(1, len(recall))
-    )
-
-
-def _roc_points(
-    labels: Sequence[int], scores: Sequence[float]
-) -> tuple[list[float], list[float]]:
-    """Return threshold ROC points, grouping ties before each step."""
-    positives = sum(labels)
-    negatives = len(labels) - positives
-    if positives == 0 or negatives == 0:
-        return [0.0], [0.0]
-    pairs = sorted(zip(scores, labels, strict=True), key=lambda item: -item[0])
-    false_positive_rate = [0.0]
-    true_positive_rate = [0.0]
-    true_positive = false_positive = 0
-    index = 0
-    while index < len(pairs):
-        score = pairs[index][0]
-        while index < len(pairs) and pairs[index][0] == score:
-            if pairs[index][1]:
-                true_positive += 1
-            else:
-                false_positive += 1
-            index += 1
-        false_positive_rate.append(false_positive / negatives)
-        true_positive_rate.append(true_positive / positives)
-    return false_positive_rate, true_positive_rate
-
-
-def _roc_auc(labels: Sequence[int], scores: Sequence[float]) -> float:
-    """Trapezoidal area over grouped-tie ROC points."""
-    false_positive_rate, true_positive_rate = _roc_points(labels, scores)
-    return sum(
-        (false_positive_rate[index] - false_positive_rate[index - 1])
-        * (true_positive_rate[index] + true_positive_rate[index - 1])
-        / 2.0
-        for index in range(1, len(false_positive_rate))
-    )
-
-
-def _threshold_counts(
+def _threshold_metrics(
     labels: Sequence[int], scores: Sequence[float], threshold: float
-) -> tuple[int, int, int, int]:
-    true_positive = false_positive = false_negative = true_negative = 0
-    for label, score in zip(labels, scores, strict=True):
-        predicted = score >= threshold
-        if label and predicted:
-            true_positive += 1
-        elif not label and predicted:
-            false_positive += 1
-        elif label:
-            false_negative += 1
-        else:
-            true_negative += 1
-    return true_positive, false_positive, false_negative, true_negative
-
-
-def _classification_metrics(
-    counts: tuple[int, int, int, int],
-) -> tuple[float, float, float]:
-    true_positive, false_positive, false_negative, _ = counts
-    precision = (
-        true_positive / (true_positive + false_positive)
-        if true_positive + false_positive
-        else 0.0
-    )
-    recall = (
-        true_positive / (true_positive + false_negative)
-        if true_positive + false_negative
-        else 0.0
-    )
-    f1 = 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0
-    return precision, recall, f1
+) -> tuple[float, float, float, tuple[int, int, int, int]]:
+    predicted = tuple(int(score >= threshold) for score in scores)
+    return classification_metrics(labels, predicted)
 
 
 def held_out_validity(
