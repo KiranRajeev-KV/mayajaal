@@ -64,6 +64,10 @@ features-extract config="config.toml":
 baseline-train config="config.toml":
     just --justfile {{backend_justfile}} baseline-train {{config}}
 
+# Forward evaluation flags, for example: `just held-out-evaluate --full`.
+held-out-evaluate *args:
+    just --justfile {{backend_justfile}} held-out-evaluate {{args}}
+
 # Forward arbitrary validation flags after the recipe name, for example:
 # `just synthetic-validate --full --output-dir artifacts/validation-10k`.
 synthetic-validate *args:

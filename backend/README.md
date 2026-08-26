@@ -261,3 +261,48 @@ just baseline-train another-profile.toml
 The command defaults to the profile's `synthetic_world.end_at`; its Python
 entry point accepts a timezone-aware `--cutoff` for an earlier reconstruction
 and `--output-dir` for the artifact directory.
+
+## Chronological held-out evaluation
+
+`mayajaal.evaluation` is model-independent: it defines deterministic account
+review samples, a chronological `train → validation → test` manifest, stable
+prediction records, threshold selection, metrics, and plots without importing a
+specific model. The current CatBoost adapter trains two models on exactly that
+same manifest: the complete feature schema and an ablation with identity-sharing
+and other graph-derived features removed. Future model adapters, including a
+graph model, only need to produce the same prediction-record contract.
+
+Each account appears once. Ordinary accounts are assigned from their
+account-creation cohort; every member of a hidden synthetic campaign is assigned
+as a whole from that campaign's final labelled fact. This evaluation-only group
+assignment prevents a campaign from leaking across partitions. Each account is
+scored at the end of its assigned calendar window, so its feature vector and
+synthetic label include facts at or before the recorded decision time only.
+Training is strictly earlier than validation, which is strictly earlier than the
+held-out test. The threshold is selected by the configured validation-only rule
+and then frozen before test metrics are calculated.
+
+The primary ranking metric is **Average Precision (AP)**, not a trapezoidal
+area labelled ambiguously as “PR-AUC”. Reports also contain precision, recall,
+F1, ROC-AUC, the TP/FP/FN/TN confusion counts, prevalence, support warnings,
+and optional fixed-assumption paise exposure figures. Support thresholds in
+`[evaluation]` flag small split classes; they are diagnostics rather than a
+statistical guarantee. Optional cost figures are evaluation reporting only and
+are not a policy engine.
+
+```bash
+just held-out-evaluate
+just held-out-evaluate --full  # derives validation.full_account_count (10k)
+just held-out-evaluate --config another-profile.toml
+```
+
+The output directory (by default
+`artifacts/synthetic-world/held-out-evaluation`) contains
+`split_manifest.json`, `predictions.parquet`, `evaluation.json`, `pr_curve.png`,
+`roc_curve.png`, and a model/metadata/SHAP directory for each ablation variant.
+`[evaluation]` in [config.toml](config.toml) controls the fixed chronological
+cutoffs, support-warning thresholds, threshold rule, and optional fixed
+assumptions. Both model variants calculate their offline SHAP summaries from
+the deterministic, bounded `synthetic_world.validation.shap_sample_count`
+training sample (1,000 by default). Do not use the held-out test report to tune
+model settings, features, thresholds, or generator behaviour.

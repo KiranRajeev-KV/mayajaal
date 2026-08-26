@@ -55,6 +55,11 @@ features-extract config="config.toml":
 baseline-train config="config.toml":
     uv run python -m scripts.train_baseline --config {{config}}
 
+# Run chronological train/validation/held-out CatBoost evaluation. For the
+# configured 10k benchmark: `just held-out-evaluate --full`.
+held-out-evaluate *args:
+    uv run python -m scripts.evaluate_held_out --config config.toml {{args}}
+
 # Run multi-seed realism diagnostics; pass flags after the recipe name.
 synthetic-validate *args:
     uv run python -m scripts.validate_synthetic --config config.toml {{args}}

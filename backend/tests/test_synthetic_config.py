@@ -3,6 +3,7 @@
 import unittest
 from pathlib import Path
 
+from mayajaal.evaluation import EvaluationConfig
 from mayajaal.synthetic.config import load_generation_config
 from mayajaal.synthetic.profile import DiagnosticProfile, PrevalenceProfile
 
@@ -44,12 +45,19 @@ class SyntheticConfigTests(unittest.TestCase):
             config.synthetic_world.diagnostics.cutoff_fractions, (0.25, 0.50, 1.00)
         )
         self.assertEqual(config.output.directory, "artifacts/synthetic-world")
+        self.assertEqual(config.evaluation.train_end_fraction, 0.25)
+        self.assertEqual(config.evaluation.validation_end_fraction, 0.50)
+        self.assertEqual(config.evaluation.minimum_positive_samples, 10)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
         with self.assertRaises(ValueError):
             _ = PrevalenceProfile(ring_sizes=(2, 4), ring_size_weights=(0.5, 0.5))
         with self.assertRaises(ValueError):
             _ = DiagnosticProfile(cutoff_fractions=(0.50, 0.25, 1.00))
+        with self.assertRaises(ValueError):
+            _ = EvaluationConfig(train_end_fraction=0.50, validation_end_fraction=0.50)
+        with self.assertRaises(ValueError):
+            _ = EvaluationConfig(false_positive_review_cost_paise=1)
 
 
 if __name__ == "__main__":

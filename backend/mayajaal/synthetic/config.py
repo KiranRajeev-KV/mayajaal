@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import Field
 
+from mayajaal.evaluation import EvaluationConfig
 from mayajaal.schemas.common import SchemaModel
 
 from .profile import GenerationProfile
@@ -20,6 +21,7 @@ class GenerationConfig(SchemaModel):
     """The file-backed configuration accepted by the generation script."""
 
     synthetic_world: GenerationProfile
+    evaluation: EvaluationConfig
     output: OutputConfig
 
 

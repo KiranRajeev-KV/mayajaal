@@ -1,0 +1,333 @@
+"""Model-neutral evaluation orchestration plus the CatBoost adapter boundary."""
+
+import json
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+
+from mayajaal.baseline import (
+    BaselineArtifacts,
+    BaselineConfig,
+    TrainedBaseline,
+    predict_fraud_probability,
+    save_baseline,
+    train_baseline,
+)
+from mayajaal.features import (
+    FeatureSchema,
+    FeatureService,
+    FeatureVector,
+    LabeledFeatureVector,
+)
+
+from .metrics import (
+    evaluate_predictions,
+    prediction_frame,
+    save_curve_plots,
+    select_threshold,
+)
+from .models import (
+    EvaluationConfig,
+    EvaluationSample,
+    EvaluationSplit,
+    PredictionRecord,
+    SplitManifest,
+    SplitMetrics,
+    ThresholdSelection,
+)
+
+GRAPH_IDENTITY_FEATURE_NAMES = frozenset(
+    {
+        "device_count",
+        "ip_address_count",
+        "payment_identity_count",
+        "address_count",
+        "shared_device_account_count",
+        "shared_ip_account_count",
+        "shared_payment_account_count",
+        "shared_address_account_count",
+        "max_identity_reuse_count",
+        "identity_neighbour_count",
+        "identity_component_account_count",
+        "shared_promotion_account_count",
+        "recent_shared_account_creation_count",
+        "recent_shared_identity_event_count",
+    }
+)
+
+
+def vectors_for_manifest(
+    service: FeatureService, manifest: SplitManifest
+) -> dict[str, FeatureVector]:
+    """Extract each review vector once, batching the three shared cutoffs."""
+    by_decision_time: defaultdict[datetime, list[str]] = defaultdict(list)
+    for sample in manifest.samples:
+        by_decision_time[sample.decision_time].append(sample.account_id)
+    vectors: dict[str, FeatureVector] = {}
+    for decision_time, account_ids in sorted(
+        by_decision_time.items(), key=lambda item: item[0]
+    ):
+        vectors.update(
+            {
+                vector.account_id: vector
+                for vector in service.extract_many(account_ids, decision_time)
+            }
+        )
+    return vectors
+
+
+def evaluate_catboost(
+    service: FeatureService,
+    manifest: SplitManifest,
+    config: EvaluationConfig,
+    *,
+    baseline_config: BaselineConfig | None = None,
+) -> tuple[
+    dict[str, tuple[PredictionRecord, ...]],
+    dict[str, ThresholdSelection],
+    dict[str, dict[EvaluationSplit, SplitMetrics]],
+    dict[str, FeatureSchema],
+    dict[str, TrainedBaseline],
+]:
+    """Run full and no-graph CatBoost on an identical split manifest.
+
+    This is deliberately an adapter: sample construction, score records, metric
+    calculation, and artifact formats have no CatBoost-specific dependency.
+    """
+    vectors = vectors_for_manifest(service, manifest)
+    full_schema = service.schema
+    no_graph_schema = _without_graph_schema(full_schema)
+    variants = {
+        "full": (full_schema, _identity),
+        "no_graph_identity": (no_graph_schema, _without_graph_vector),
+    }
+    records_by_variant: dict[str, tuple[PredictionRecord, ...]] = {}
+    thresholds: dict[str, ThresholdSelection] = {}
+    metrics: dict[str, dict[EvaluationSplit, SplitMetrics]] = {}
+    models: dict[str, TrainedBaseline] = {}
+    for name, (schema, transform) in variants.items():
+        examples_by_split = _examples_by_split(manifest.samples, vectors, transform)
+        model = train_baseline(
+            examples_by_split[EvaluationSplit.TRAIN], schema, baseline_config
+        )
+        models[name] = model
+        records = tuple(
+            PredictionRecord(
+                sample_id=sample.sample_id,
+                account_id=sample.account_id,
+                decision_time=sample.decision_time,
+                split=sample.split,
+                y_true=sample.y_true,
+                score=predict_fraud_probability(
+                    model, transform(vectors[sample.account_id])
+                ),
+                model_variant=name,
+            )
+            for sample in manifest.samples
+        )
+        records_by_variant[name] = records
+        validation_records = tuple(
+            record for record in records if record.split is EvaluationSplit.VALIDATION
+        )
+        threshold = select_threshold(validation_records, config)
+        thresholds[name] = threshold
+        metrics[name] = {
+            split: evaluate_predictions(
+                tuple(record for record in records if record.split is split),
+                threshold.threshold,
+                config,
+            )
+            for split in EvaluationSplit
+        }
+    return (
+        records_by_variant,
+        thresholds,
+        metrics,
+        {"full": full_schema, "no_graph_identity": no_graph_schema},
+        models,
+    )
+
+
+def save_catboost_evaluation_models(
+    models: dict[str, TrainedBaseline],
+    service: FeatureService,
+    manifest: SplitManifest,
+    output_directory: Path,
+    *,
+    shap_sample_count: int,
+) -> dict[str, BaselineArtifacts]:
+    """Save each adapter model and bounded deterministic training SHAP sample."""
+    if shap_sample_count < 1:
+        raise ValueError("shap_sample_count must be positive")
+    vectors = vectors_for_manifest(service, manifest)
+    train_samples = tuple(
+        sorted(
+            (
+                sample
+                for sample in manifest.samples
+                if sample.split is EvaluationSplit.TRAIN
+            ),
+            key=lambda sample: sample.account_id,
+        )[:shap_sample_count]
+    )
+    return {
+        name: save_baseline(
+            model,
+            tuple(
+                _without_graph_vector(vectors[sample.account_id])
+                if name == "no_graph_identity"
+                else vectors[sample.account_id]
+                for sample in train_samples
+            ),
+            output_directory / name,
+        )
+        for name, model in sorted(models.items())
+    }
+
+
+def write_evaluation_artifacts(
+    output_directory: Path,
+    manifest: SplitManifest,
+    records_by_variant: dict[str, tuple[PredictionRecord, ...]],
+    thresholds: dict[str, ThresholdSelection],
+    metrics: dict[str, dict[EvaluationSplit, SplitMetrics]],
+    schemas: dict[str, FeatureSchema],
+    config: EvaluationConfig,
+    *,
+    seed: int,
+) -> dict[str, Path]:
+    """Persist the reusable manifest, prediction contract, reports, and curves."""
+    output_directory.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_directory / "split_manifest.json"
+    predictions_path = output_directory / "predictions.parquet"
+    evaluation_path = output_directory / "evaluation.json"
+    manifest_path.write_text(
+        json.dumps(_manifest_json(manifest), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    prediction_frame(
+        record for records in records_by_variant.values() for record in records
+    ).write_parquet(predictions_path, compression="zstd")
+    pr_path, roc_path = save_curve_plots(
+        {
+            name: tuple(
+                record for record in records if record.split is EvaluationSplit.TEST
+            )
+            for name, records in records_by_variant.items()
+        },
+        output_directory,
+    )
+    evaluation_path.write_text(
+        json.dumps(
+            {
+                "protocol": {
+                    "name": "one account, one end-of-window review decision",
+                    "primary_ranking_metric": "Average Precision (AP)",
+                    "leakage_policy": "features and labels use only immutable facts at or before each decision_time; campaigns are assigned as whole evaluation groups",
+                    "threshold_policy": "selected on validation only and frozen for test",
+                    "seed": seed,
+                    "config": config.model_dump(mode="json"),
+                    "cutoffs": {
+                        "train": manifest.train_cutoff.isoformat(),
+                        "validation": manifest.validation_cutoff.isoformat(),
+                        "test": manifest.test_cutoff.isoformat(),
+                    },
+                },
+                "variants": {
+                    name: {
+                        "threshold": asdict(thresholds[name]),
+                        "feature_schema": [
+                            asdict(item) for item in schemas[name].definitions
+                        ],
+                        "metrics": {
+                            split.value: asdict(report)
+                            for split, report in metrics[name].items()
+                        },
+                    }
+                    for name in sorted(metrics)
+                },
+                "artifacts": {
+                    "split_manifest": str(manifest_path),
+                    "predictions": str(predictions_path),
+                    "pr_curve": str(pr_path),
+                    "roc_curve": str(roc_path),
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "split_manifest": manifest_path,
+        "predictions": predictions_path,
+        "evaluation": evaluation_path,
+        "pr_curve": pr_path,
+        "roc_curve": roc_path,
+    }
+
+
+def _examples_by_split(
+    samples: tuple[EvaluationSample, ...],
+    vectors: dict[str, FeatureVector],
+    transform: Callable[[FeatureVector], FeatureVector],
+) -> dict[EvaluationSplit, tuple[LabeledFeatureVector, ...]]:
+    grouped: defaultdict[EvaluationSplit, list[LabeledFeatureVector]] = defaultdict(
+        list
+    )
+    for sample in samples:
+        grouped[sample.split].append(
+            LabeledFeatureVector(
+                vector=transform(vectors[sample.account_id]), is_fraud=sample.y_true
+            )
+        )
+    return {split: tuple(grouped[split]) for split in EvaluationSplit}
+
+
+def _without_graph_schema(schema: FeatureSchema) -> FeatureSchema:
+    return FeatureSchema(
+        tuple(
+            definition
+            for definition in schema.definitions
+            if definition.name not in GRAPH_IDENTITY_FEATURE_NAMES
+        )
+    )
+
+
+def _without_graph_vector(vector: FeatureVector) -> FeatureVector:
+    return FeatureVector(
+        account_id=vector.account_id,
+        cutoff=vector.cutoff,
+        values={
+            name: value
+            for name, value in vector.values.items()
+            if name not in GRAPH_IDENTITY_FEATURE_NAMES
+        },
+    )
+
+
+def _identity(vector: FeatureVector) -> FeatureVector:
+    return vector
+
+
+def _manifest_json(manifest: SplitManifest) -> dict[str, object]:
+    return {
+        "train_cutoff": manifest.train_cutoff.isoformat(),
+        "validation_cutoff": manifest.validation_cutoff.isoformat(),
+        "test_cutoff": manifest.test_cutoff.isoformat(),
+        "purged_campaign_group_ids": list(manifest.purged_campaign_group_ids),
+        "samples": [
+            {
+                "sample_id": sample.sample_id,
+                "account_id": sample.account_id,
+                "decision_time": sample.decision_time.isoformat(),
+                "split": sample.split.value,
+                "y_true": sample.y_true,
+                "campaign_group_id": sample.campaign_group_id,
+            }
+            for sample in manifest.samples
+        ],
+    }
