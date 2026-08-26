@@ -125,7 +125,7 @@ class WorldGenerator:
         self._create_promotions()
         for number in range(self.profile.normal_account_count):
             self._create_independent_customer(number)
-        for number in range(self.profile.shared_household_count):
+        for number in range(self.profile.resolved_shared_household_count()):
             self._create_benign_context(
                 f"household-{number}",
                 household_plan(
@@ -134,7 +134,11 @@ class WorldGenerator:
                 ),
                 self.profile.accounts_per_shared_household,
             )
-        for number in range(self.profile.population.benign_network_group_count):
+        for number in range(
+            self.profile.population.resolved_benign_network_group_count(
+                self.profile.normal_account_count
+            )
+        ):
             self._create_benign_context(
                 f"office-{number}",
                 office_network_plan(
@@ -381,77 +385,171 @@ class WorldGenerator:
             round(ordinary_accounts * target_rate / (1.0 - target_rate)),
         )
         active_strategies = tuple(
-            strategy for strategy, count in counts.items() if count > 0
+            strategy for strategy, count in counts.items() if count
         )
         if not active_strategies:
             return
-        ring_count = min(len(active_strategies), max(1, target_accounts // 2))
-        ordered_strategies = sorted(
-            active_strategies,
-            key=lambda strategy: (
-                -self.profile.prevalence.strategy_weights[strategy.value],
-                strategy.value,
-            ),
+        self._create_prevalence_campaigns(target_accounts, active_strategies)
+
+    def _create_prevalence_campaigns(
+        self, target_accounts: int, active_strategies: tuple[AbuseStrategy, ...]
+    ) -> None:
+        """Sample many bounded campaigns for a target-rate benchmark.
+
+        Size, strategy, and timeline are separate seeded draws.  The small
+        forced timeline allocation provides class support at every chronological
+        reconstruction point; remaining plans follow their configured weights.
+        """
+        profile = self.profile.prevalence
+        rng = generator_for(self.profile.seed, "prevalence-campaign-planning")
+        sizes = self._sample_campaign_sizes(target_accounts, rng)
+        timeline_buckets = self._sample_timeline_buckets(len(sizes), rng)
+        strategy_weights = np.asarray(
+            [
+                profile.strategy_weights[strategy.value]
+                for strategy in active_strategies
+            ],
+            dtype=float,
         )
-        members = tuple(
-            target_accounts // ring_count + (index < target_accounts % ring_count)
-            for index in range(ring_count)
-        )
-        for index, member_count in enumerate(members):
-            self._create_rings(
-                ordered_strategies[index % len(ordered_strategies)],
-                (member_count,),
+        strategy_weights /= strategy_weights.sum()
+        strategy_counts: defaultdict[AbuseStrategy, int] = defaultdict(int)
+        for member_count, timeline_bucket in zip(sizes, timeline_buckets, strict=True):
+            strategy = active_strategies[
+                int(rng.choice(len(active_strategies), p=strategy_weights))
+            ]
+            number = strategy_counts[strategy]
+            strategy_counts[strategy] += 1
+            self._create_ring(
+                strategy,
+                f"{strategy.value}-ring-{number:03d}",
+                member_count,
+                timeline_bucket=timeline_bucket,
             )
+
+    def _sample_campaign_sizes(
+        self, target_accounts: int, rng: Generator
+    ) -> tuple[int, ...]:
+        """Draw bounded heterogeneous sizes while matching the account target."""
+        sizes = self.profile.prevalence.ring_sizes
+        weights = np.asarray(self.profile.prevalence.ring_size_weights, dtype=float)
+        remaining = target_accounts
+        sampled: list[int] = []
+        while remaining:
+            eligible = [
+                index
+                for index, size in enumerate(sizes)
+                if size <= remaining and remaining - size != 1
+            ]
+            if not eligible:
+                raise ValueError(
+                    "ring-size distribution cannot match target account count"
+                )
+            eligible_weights = weights[eligible]
+            eligible_weights /= eligible_weights.sum()
+            size = sizes[int(rng.choice(eligible, p=eligible_weights))]
+            sampled.append(size)
+            remaining -= size
+        return tuple(sampled)
+
+    def _sample_timeline_buckets(
+        self, campaign_count: int, rng: Generator
+    ) -> tuple[str, ...]:
+        """Assign campaigns across fixed chronological windows deterministically."""
+        profile = self.profile.prevalence
+        bucket_names = ("early", "middle", "late")
+        assignments: list[str] = []
+        minimum = min(
+            profile.minimum_campaigns_per_timeline_bucket,
+            campaign_count // len(bucket_names),
+        )
+        for name in bucket_names:
+            assignments.extend((name,) * minimum)
+        weights = np.asarray(
+            [profile.timeline_weights[name] for name in bucket_names], dtype=float
+        )
+        weights /= weights.sum()
+        assignments.extend(
+            bucket_names[int(rng.choice(len(bucket_names), p=weights))]
+            for _ in range(campaign_count - len(assignments))
+        )
+        rng.shuffle(assignments)
+        return tuple(assignments)
 
     def _create_rings(
         self, strategy: AbuseStrategy, member_counts: tuple[int | None, ...]
     ) -> None:
         for ring_number, explicit_member_count in enumerate(member_counts):
             scope = f"{strategy.value}-ring-{ring_number:03d}"
-            rng = generator_for(self.profile.seed, scope)
-            campaign = plan_campaign(
-                strategy,
-                scope,
-                self.profile.abuse,
-                self.profile.active_difficulty,
-                rng,
+            self._create_ring(strategy, scope, explicit_member_count)
+
+    def _create_ring(
+        self,
+        strategy: AbuseStrategy,
+        scope: str,
+        explicit_member_count: int | None,
+        *,
+        timeline_bucket: str | None = None,
+    ) -> None:
+        rng = generator_for(self.profile.seed, scope)
+        activity_center = (
+            self._timeline_activity_center(timeline_bucket, rng)
+            if timeline_bucket is not None
+            else None
+        )
+        campaign = plan_campaign(
+            strategy,
+            scope,
+            self.profile.abuse,
+            self.profile.active_difficulty,
+            rng,
+            timeline_bucket=timeline_bucket,
+            activity_center_fraction=activity_center,
+        )
+        seed_persona = choose_persona(self.profile.effective_persona_weights, rng)
+        shared_refs = self._new_refs(f"shared-{scope}", seed_persona)
+        variation = self.profile.abuse.ring_size_variation
+        member_count = (
+            explicit_member_count
+            if explicit_member_count is not None
+            else max(
+                2,
+                self.profile.accounts_per_ring
+                + int(rng.integers(-variation, variation + 1)),
             )
-            seed_persona = choose_persona(self.profile.effective_persona_weights, rng)
-            shared_refs = self._new_refs(f"shared-{scope}", seed_persona)
-            variation = self.profile.abuse.ring_size_variation
-            member_count = (
-                explicit_member_count
-                if explicit_member_count is not None
-                else max(
-                    2,
-                    self.profile.accounts_per_ring
-                    + int(rng.integers(-variation, variation + 1)),
-                )
+        )
+        for member_number in range(member_count):
+            member_scope = f"{scope}-member-{member_number}"
+            member_rng = generator_for(self.profile.seed, member_scope)
+            persona = choose_persona(self.profile.effective_persona_weights, member_rng)
+            account = self._create_account(
+                member_scope, self._campaign_timestamp(campaign, member_rng)
             )
-            for member_number in range(member_count):
-                member_scope = f"{scope}-member-{member_number}"
-                member_rng = generator_for(self.profile.seed, member_scope)
-                persona = choose_persona(
-                    self.profile.effective_persona_weights, member_rng
-                )
-                account = self._create_account(
-                    member_scope, self._campaign_timestamp(campaign, member_rng)
-                )
-                early_member = member_number < 2
-                refs = self._new_refs(
-                    member_scope,
-                    persona,
-                    shared_refs=shared_refs,
-                    share_device=campaign.shared_device
-                    and (early_member or bool(member_rng.random() < 0.62)),
-                    share_ip=campaign.shared_ip
-                    and (early_member or bool(member_rng.random() < 0.62)),
-                    share_address=campaign.shared_address
-                    and (early_member or bool(member_rng.random() < 0.62)),
-                    share_payment=campaign.shared_payment
-                    and (early_member or bool(member_rng.random() < 0.62)),
-                )
-                self._emit_history(account, refs, persona, member_scope, campaign)
+            early_member = member_number < 2
+            refs = self._new_refs(
+                member_scope,
+                persona,
+                shared_refs=shared_refs,
+                share_device=campaign.shared_device
+                and (early_member or bool(member_rng.random() < 0.62)),
+                share_ip=campaign.shared_ip
+                and (early_member or bool(member_rng.random() < 0.62)),
+                share_address=campaign.shared_address
+                and (early_member or bool(member_rng.random() < 0.62)),
+                share_payment=campaign.shared_payment
+                and (early_member or bool(member_rng.random() < 0.62)),
+            )
+            self._emit_history(account, refs, persona, member_scope, campaign)
+
+    @staticmethod
+    def _timeline_activity_center(bucket: str, rng: Generator) -> float:
+        """Leave warm-up room while retaining an abuse event in each time slice."""
+        ranges = {
+            "early": (0.12, 0.20),
+            "middle": (0.37, 0.46),
+            "late": (0.68, 0.78),
+        }
+        low, high = ranges[bucket]
+        return float(rng.uniform(low, high))
 
     def _create_promotions(self) -> None:
         promotion_rows = (
@@ -559,7 +657,11 @@ class WorldGenerator:
         latest = self.profile.end_at - timedelta(days=4)
         span_seconds = max((latest - earliest).total_seconds(), 1.0)
         if campaign is not None and campaign.low_and_slow:
-            fractions = np.linspace(0.18, 0.92, count) + rng.normal(0.0, 0.045, count)
+            fractions = np.linspace(
+                max(0.02, campaign.activity_center_fraction - 0.30),
+                campaign.activity_center_fraction,
+                count,
+            ) + rng.normal(0.0, 0.045, count)
         elif campaign is not None:
             fractions = campaign.activity_center_fraction + rng.normal(
                 0.0, campaign.activity_spread_fraction, count

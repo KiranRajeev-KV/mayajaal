@@ -4,7 +4,6 @@
 [synthetic_world]
 seed = 20260824
 normal_account_count = 100
-shared_household_count = 10
 accounts_per_shared_household = 3
 promo_ring_count = 2
 refund_ring_count = 2
@@ -15,8 +14,11 @@ start_at = "2026-01-01T00:00:00+00:00"
 end_at = "2026-04-01T00:00:00+00:00"
 
 [synthetic_world.population]
-benign_network_group_count = 6
+# Omit explicit context-count overrides to scale these label-free groups with
+# normal_account_count. Set either legacy count field explicitly to override.
 accounts_per_benign_network_group = 5
+households_per_thousand_ordinary_accounts = 35.0
+benign_network_groups_per_thousand_ordinary_accounts = 10.0
 persona_weights = { occasional = 0.25, repeat = 0.25, promo_sensitive = 0.15, high_value = 0.10, commuter = 0.15, digital_first = 0.10 }
 
 [synthetic_world.benign_sharing]
@@ -53,6 +55,11 @@ preset = "development"
 target_labelled_account_rate = 0.03
 target_tolerance = 0.01
 strategy_weights = { promo = 0.40, refund = 0.30, mixed = 0.30 }
+# Target-rate runs draw many small/medium campaigns from this bounded mixture.
+ring_sizes = [2, 3, 4, 5, 6, 8]
+ring_size_weights = [0.10, 0.20, 0.28, 0.22, 0.14, 0.06]
+timeline_weights = { early = 0.34, middle = 0.33, late = 0.33 }
+minimum_campaigns_per_timeline_bucket = 2
 
 [synthetic_world.diagnostics]
 min_variable_numeric_features = 5
@@ -74,6 +81,10 @@ intentionally_sparse_numeric_features = [
 max_single_feature_auc = 0.95
 min_class_histogram_overlap = 0.05
 shap_top_feature_share_warning = 0.60
+min_cutoff_positive_samples = 5
+min_cutoff_negative_samples = 20
+max_identity_sharing_component_fraction = 0.05
+max_labelled_accounts_in_single_component_fraction = 0.25
 
 [synthetic_world.validation]
 multi_seed_count = 5

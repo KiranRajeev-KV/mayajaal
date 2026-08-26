@@ -98,8 +98,14 @@ class DifficultyProfiles(SchemaModel):
 class PopulationProfile(SchemaModel):
     """Controls the mix of ordinary people and benign shared contexts."""
 
-    benign_network_group_count: int = Field(default=4, ge=0)
+    # ``None`` means population-scaled; a number, including zero, is an
+    # explicit scenario override retained for compact fixtures and callers.
+    benign_network_group_count: int | None = Field(default=None, ge=0)
     accounts_per_benign_network_group: int = Field(default=5, gt=1)
+    households_per_thousand_ordinary_accounts: float = Field(default=35.0, ge=0.0)
+    benign_network_groups_per_thousand_ordinary_accounts: float = Field(
+        default=10.0, ge=0.0
+    )
     persona_weights: dict[str, float] = Field(
         default_factory=lambda: {
             "occasional": 0.25,
@@ -118,6 +124,22 @@ class PopulationProfile(SchemaModel):
         ):
             raise ValueError("persona_weights must contain positive weights")
         return self
+
+    def resolved_benign_network_group_count(self, ordinary_account_count: int) -> int:
+        """Scale office/campus contexts unless an explicit count was requested."""
+        if self.benign_network_group_count is not None:
+            return self.benign_network_group_count
+        return _scaled_context_count(
+            ordinary_account_count,
+            self.benign_network_groups_per_thousand_ordinary_accounts,
+        )
+
+
+def _scaled_context_count(population: int, per_thousand: float) -> int:
+    """Round deterministic context counts while retaining small non-zero worlds."""
+    if population <= 0 or per_thousand <= 0.0:
+        return 0
+    return max(1, round(population * per_thousand / 1_000.0))
 
 
 class BenignSharingProfile(SchemaModel):
@@ -178,6 +200,12 @@ class PrevalenceProfile(SchemaModel):
     strategy_weights: dict[str, float] = Field(
         default_factory=lambda: {"promo": 0.40, "refund": 0.30, "mixed": 0.30}
     )
+    ring_sizes: tuple[int, ...] = (2, 3, 4, 5, 6, 8)
+    ring_size_weights: tuple[float, ...] = (0.10, 0.20, 0.28, 0.22, 0.14, 0.06)
+    timeline_weights: dict[str, float] = Field(
+        default_factory=lambda: {"early": 0.34, "middle": 0.33, "late": 0.33}
+    )
+    minimum_campaigns_per_timeline_bucket: int = Field(default=2, ge=0)
 
     @model_validator(mode="after")
     def validate_strategy_weights(self) -> Self:
@@ -187,6 +215,22 @@ class PrevalenceProfile(SchemaModel):
         ):
             raise ValueError(
                 "strategy_weights must contain positive promo/refund/mixed weights"
+            )
+        if (
+            len(self.ring_sizes) < 2
+            or len(self.ring_sizes) != len(self.ring_size_weights)
+            or any(size < 2 for size in self.ring_sizes)
+            or any(weight <= 0.0 for weight in self.ring_size_weights)
+            or not {2, 3}.issubset(self.ring_sizes)
+        ):
+            raise ValueError(
+                "ring_sizes must include 2 and 3, with matching positive weights"
+            )
+        if set(self.timeline_weights) != {"early", "middle", "late"} or any(
+            weight <= 0.0 for weight in self.timeline_weights.values()
+        ):
+            raise ValueError(
+                "timeline_weights must contain positive early/middle/late weights"
             )
         return self
 
@@ -231,6 +275,12 @@ class DiagnosticProfile(SchemaModel):
     max_single_feature_auc: float = Field(default=0.95, ge=0.5, le=1.0)
     min_class_histogram_overlap: float = Field(default=0.05, ge=0.0, le=1.0)
     shap_top_feature_share_warning: float = Field(default=0.60, gt=0.0, le=1.0)
+    min_cutoff_positive_samples: int = Field(default=5, ge=1)
+    min_cutoff_negative_samples: int = Field(default=20, ge=1)
+    max_identity_sharing_component_fraction: float = Field(default=0.05, gt=0.0, le=1.0)
+    max_labelled_accounts_in_single_component_fraction: float = Field(
+        default=0.25, gt=0.0, le=1.0
+    )
 
     @model_validator(mode="after")
     def validate_feature_expectations(self) -> Self:
@@ -240,6 +290,12 @@ class DiagnosticProfile(SchemaModel):
             raise ValueError(
                 "expected-active and intentionally sparse features must not overlap"
             )
+        if (
+            any(fraction <= 0.0 or fraction > 1.0 for fraction in self.cutoff_fractions)
+            or tuple(sorted(self.cutoff_fractions)) != self.cutoff_fractions
+            or self.cutoff_fractions[-1] != 1.0
+        ):
+            raise ValueError("cutoff_fractions must increase in (0, 1] and end at 1.0")
         return self
 
 
@@ -262,7 +318,7 @@ class GenerationProfile(SchemaModel):
 
     seed: int = Field(ge=0)
     normal_account_count: int = Field(default=20, ge=0)
-    shared_household_count: int = Field(default=3, ge=0)
+    shared_household_count: int | None = Field(default=None, ge=0)
     accounts_per_shared_household: int = Field(default=3, gt=0)
     promo_ring_count: int = Field(default=1, ge=0)
     refund_ring_count: int = Field(default=1, ge=0)
@@ -303,3 +359,12 @@ class GenerationProfile(SchemaModel):
             name: weight ** (1.0 / temperature)
             for name, weight in self.population.persona_weights.items()
         }
+
+    def resolved_shared_household_count(self) -> int:
+        """Scale households with ordinary population unless explicitly overridden."""
+        if self.shared_household_count is not None:
+            return self.shared_household_count
+        return _scaled_context_count(
+            self.normal_account_count,
+            self.population.households_per_thousand_ordinary_accounts,
+        )

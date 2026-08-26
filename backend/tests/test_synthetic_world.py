@@ -21,7 +21,9 @@ from mayajaal.synthetic import (
 )
 from mayajaal.synthetic.profile import (
     AbuseProfile,
+    DifficultyPreset,
     PopulationProfile,
+    PrevalencePreset,
     PrevalenceProfile,
 )
 
@@ -318,8 +320,8 @@ class SyntheticWorldTests(unittest.TestCase):
     def test_difficulty_and_prevalence_are_orthogonal(self) -> None:
         profile_with_rare_abuse = GenerationProfile(
             seed=817,
-            difficulty="hard",
-            prevalence=PrevalenceProfile(preset="rare_abuse"),
+            difficulty=DifficultyPreset.HARD,
+            prevalence=PrevalenceProfile(preset=PrevalencePreset.RARE_ABUSE),
         )
         self.assertEqual(
             profile_with_rare_abuse.prevalence.resolved_target_rate(), 0.0075
@@ -354,6 +356,99 @@ class SyntheticWorldTests(unittest.TestCase):
             "labelled account prevalence is outside configured tolerance",
             guardrail_failures(diagnostics, target_profile),
         )
+
+    def test_target_prevalence_uses_small_weighted_campaigns(self) -> None:
+        target_profile = GenerationProfile(
+            seed=338,
+            normal_account_count=2_000,
+            shared_household_count=0,
+            promo_ring_count=1,
+            refund_ring_count=1,
+            mixed_ring_count=1,
+            population=PopulationProfile(benign_network_group_count=0),
+            prevalence=PrevalenceProfile(
+                target_labelled_account_rate=0.20,
+                target_tolerance=0.01,
+                strategy_weights={"promo": 0.50, "refund": 0.30, "mixed": 0.20},
+                ring_sizes=(2, 3, 4, 5),
+                ring_size_weights=(0.15, 0.35, 0.35, 0.15),
+            ),
+            start_at=datetime(2026, 1, 1, tzinfo=UTC),
+            end_at=datetime(2026, 2, 1, tzinfo=UTC),
+        )
+        world = generate_world(target_profile)
+        campaign_accounts: defaultdict[str, set[object]] = defaultdict(set)
+        for event in world.events:
+            if event.synthetic_labels is not None:
+                campaign_accounts[
+                    event.synthetic_labels.coordination_cluster_id or ""
+                ].add(event.account_id)
+        sizes = [len(accounts) for accounts in campaign_accounts.values()]
+        self.assertGreater(len(sizes), 40)
+        self.assertTrue(set(sizes).issubset({2, 3, 4, 5, 6}))
+        strategy_counts: defaultdict[str, int] = defaultdict(int)
+        for cluster_id in campaign_accounts:
+            strategy_counts[cluster_id.split("-ring-", maxsplit=1)[0]] += 1
+        self.assertGreater(strategy_counts["promo"], strategy_counts["mixed"])
+        self.assertGreater(strategy_counts["refund"], strategy_counts["mixed"])
+        self.assertFalse(guardrail_failures(diagnose_world(world), target_profile))
+
+    def test_population_scaled_contexts_preserve_explicit_overrides(self) -> None:
+        scaled = GenerationProfile(
+            seed=339,
+            normal_account_count=1_000,
+            promo_ring_count=0,
+            refund_ring_count=0,
+            mixed_ring_count=0,
+            population=PopulationProfile(
+                households_per_thousand_ordinary_accounts=20.0,
+                benign_network_groups_per_thousand_ordinary_accounts=8.0,
+                accounts_per_benign_network_group=5,
+            ),
+        )
+        self.assertEqual(scaled.resolved_shared_household_count(), 20)
+        self.assertEqual(
+            scaled.population.resolved_benign_network_group_count(1_000), 8
+        )
+        self.assertEqual(len(generate_world(scaled).accounts), 1_100)
+        explicit = scaled.model_copy(
+            update={
+                "shared_household_count": 0,
+                "population": scaled.population.model_copy(
+                    update={"benign_network_group_count": 0}
+                ),
+            }
+        )
+        self.assertEqual(len(generate_world(explicit).accounts), 1_000)
+
+    def test_prevalence_campaigns_cover_chronological_cutoffs(self) -> None:
+        target_profile = GenerationProfile(
+            seed=340,
+            normal_account_count=300,
+            shared_household_count=0,
+            promo_ring_count=1,
+            refund_ring_count=1,
+            mixed_ring_count=1,
+            population=PopulationProfile(benign_network_group_count=0),
+            prevalence=PrevalenceProfile(
+                target_labelled_account_rate=0.15,
+                minimum_campaigns_per_timeline_bucket=2,
+            ),
+            start_at=datetime(2026, 1, 1, tzinfo=UTC),
+            end_at=datetime(2026, 4, 1, tzinfo=UTC),
+        )
+        world = generate_world(target_profile)
+        for fraction in (0.25, 0.50, 1.00):
+            cutoff = (
+                target_profile.start_at
+                + (target_profile.end_at - target_profile.start_at) * fraction
+            )
+            labelled_accounts = {
+                event.account_id
+                for event in world.events
+                if event.occurred_at <= cutoff and event.synthetic_labels is not None
+            }
+            self.assertGreaterEqual(len(labelled_accounts), 4)
 
     def test_campaign_schedule_supports_bursty_and_low_and_slow_activity(
         self,

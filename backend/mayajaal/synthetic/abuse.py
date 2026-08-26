@@ -30,6 +30,7 @@ class CampaignPlan:
     shared_address: bool
     low_and_slow: bool
     warmup_orders: int
+    timeline_bucket: str | None
     activity_center_fraction: float
     activity_spread_fraction: float
 
@@ -48,6 +49,9 @@ def plan_campaign(
     profile: AbuseProfile,
     difficulty: DifficultyBundle,
     rng: Generator,
+    *,
+    timeline_bucket: str | None = None,
+    activity_center_fraction: float | None = None,
 ) -> CampaignPlan:
     """Create one partial-sharing campaign without creating an obvious clique."""
     chance = min(
@@ -99,6 +103,11 @@ def plan_campaign(
                 * difficulty.campaign_warmup_multiplier
             ),
         ),
-        activity_center_fraction=float(rng.uniform(0.18, 0.82)),
+        timeline_bucket=timeline_bucket,
+        activity_center_fraction=(
+            activity_center_fraction
+            if activity_center_fraction is not None
+            else float(rng.uniform(0.18, 0.82))
+        ),
         activity_spread_fraction=(difficulty.burst_activity_spread_fraction),
     )
