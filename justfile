@@ -68,6 +68,10 @@ baseline-train config="config.toml":
 held-out-evaluate *args:
     just --justfile {{backend_justfile}} held-out-evaluate {{args}}
 
+# Forward calibration flags, for example: `just calibration-evaluate --full`.
+calibration-evaluate *args:
+    just --justfile {{backend_justfile}} calibration-evaluate {{args}}
+
 # Forward arbitrary validation flags after the recipe name, for example:
 # `just synthetic-validate --full --output-dir artifacts/validation-10k`.
 synthetic-validate *args:

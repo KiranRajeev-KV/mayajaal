@@ -12,6 +12,7 @@ from mayajaal.baseline import (
     BaselineConfig,
     TrainedBaseline,
     predict_fraud_probability,
+    predict_raw_score,
     save_baseline,
     train_baseline,
 )
@@ -172,6 +173,45 @@ def evaluate_catboost(
         },
         models,
     )
+
+
+def fit_full_catboost_scores(
+    service: FeatureService,
+    manifest: SplitManifest,
+    *,
+    baseline_config: BaselineConfig | None = None,
+) -> tuple[
+    tuple[PredictionRecord, ...],
+    dict[str, float],
+    FeatureSchema,
+    TrainedBaseline,
+]:
+    """Train and score only the full CatBoost adapter without selecting a threshold.
+
+    Post-model consumers such as calibration need frozen raw scores but must not
+    introduce an operating-threshold decision into their workflow.
+    """
+    vectors = vectors_for_manifest(service, manifest)
+    schema = service.schema
+    examples = _examples_by_split(manifest.samples, vectors, _identity)
+    model = train_baseline(examples[EvaluationSplit.TRAIN], schema, baseline_config)
+    records = tuple(
+        PredictionRecord(
+            sample_id=sample.sample_id,
+            account_id=sample.account_id,
+            decision_time=sample.decision_time,
+            split=sample.split,
+            y_true=sample.y_true,
+            score=predict_fraud_probability(model, vectors[sample.sample_id]),
+            model_variant="full",
+        )
+        for sample in manifest.samples
+    )
+    raw_scores = {
+        sample.sample_id: predict_raw_score(model, vectors[sample.sample_id])
+        for sample in manifest.samples
+    }
+    return records, raw_scores, schema, model
 
 
 def save_catboost_evaluation_models(

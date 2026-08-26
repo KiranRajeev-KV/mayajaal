@@ -4,10 +4,13 @@ import unittest
 from collections import defaultdict
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
-from mayajaal.baseline import BaselineConfig
+from mayajaal.baseline import BaselineConfig, predict_raw_score
+from mayajaal.calibration import CalibrationConfig, CalibrationStatus, calibrate_records
 from mayajaal.evaluation import (
     EvaluationConfig,
     EvaluationSample,
@@ -16,6 +19,7 @@ from mayajaal.evaluation import (
     build_split_manifest,
     evaluate_catboost,
     evaluate_predictions,
+    fit_full_catboost_scores,
     held_out_validity,
     save_catboost_evaluation_models,
     select_threshold,
@@ -28,6 +32,8 @@ from mayajaal.resolution import resolve_all
 from mayajaal.synthetic import GenerationProfile, generate_world
 from mayajaal.synthetic.profile import PopulationProfile, PrevalenceProfile
 from mayajaal.synthetic.world import SyntheticWorld
+
+sklearn_metrics: Any = import_module("sklearn.metrics")
 
 
 def profile() -> GenerationProfile:
@@ -332,6 +338,85 @@ class ChronologicalEvaluationTests(unittest.TestCase):
         self.assertFalse(report.support_is_sufficient)
         self.assertTrue(all(warning.startswith("test:") for warning in report.warnings))
 
+    def test_metrics_match_sklearn_for_tied_scores(self) -> None:
+        records = (
+            record("t0", EvaluationSplit.TEST, True, 0.8),
+            record("t1", EvaluationSplit.TEST, False, 0.8),
+            record("t2", EvaluationSplit.TEST, True, 0.4),
+            record("t3", EvaluationSplit.TEST, False, 0.1),
+        )
+        labels = [1, 0, 1, 0]
+        scores = [0.8, 0.8, 0.4, 0.1]
+        report = evaluate_predictions(
+            records,
+            0.4,
+            EvaluationConfig(minimum_positive_samples=1, minimum_negative_samples=1),
+        )
+        assert report.average_precision is not None
+        assert report.roc_auc is not None
+        assert report.precision is not None
+        assert report.recall is not None
+        assert report.f1 is not None
+        predicted = [int(score >= 0.4) for score in scores]
+        expected_confusion = sklearn_metrics.confusion_matrix(
+            labels, predicted, labels=(0, 1)
+        )
+        self.assertAlmostEqual(
+            report.average_precision,
+            float(sklearn_metrics.average_precision_score(labels, scores)),
+        )
+        self.assertAlmostEqual(
+            report.roc_auc,
+            float(sklearn_metrics.roc_auc_score(labels, scores)),
+        )
+        self.assertAlmostEqual(
+            report.precision,
+            float(sklearn_metrics.precision_score(labels, predicted, zero_division=0)),
+        )
+        self.assertAlmostEqual(
+            report.recall,
+            float(sklearn_metrics.recall_score(labels, predicted, zero_division=0)),
+        )
+        self.assertAlmostEqual(
+            report.f1,
+            float(sklearn_metrics.f1_score(labels, predicted, zero_division=0)),
+        )
+        self.assertEqual(
+            (
+                report.true_positive,
+                report.false_positive,
+                report.false_negative,
+                report.true_negative,
+            ),
+            (
+                int(expected_confusion[1, 1]),
+                int(expected_confusion[0, 1]),
+                int(expected_confusion[1, 0]),
+                int(expected_confusion[0, 0]),
+            ),
+        )
+
+    def test_degenerate_class_support_preserves_explicit_null_metrics(self) -> None:
+        report = evaluate_predictions(
+            (
+                record("t0", EvaluationSplit.TEST, False, 0.8),
+                record("t1", EvaluationSplit.TEST, False, 0.1),
+            ),
+            0.5,
+            EvaluationConfig(minimum_positive_samples=1, minimum_negative_samples=1),
+        )
+        self.assertIsNone(report.average_precision)
+        self.assertIsNone(report.roc_auc)
+        self.assertTrue(
+            any(
+                "Average Precision is undefined" in warning
+                for warning in report.warnings
+            )
+        )
+        self.assertTrue(
+            any("ROC-AUC is undefined" in warning for warning in report.warnings)
+        )
+
     def test_insufficient_validation_support_does_not_select_threshold(self) -> None:
         config = EvaluationConfig(
             minimum_positive_samples=2, minimum_negative_samples=2
@@ -545,6 +630,38 @@ class ChronologicalEvaluationTests(unittest.TestCase):
                     if record.split is not EvaluationSplit.TEST
                 ],
             )
+
+    def test_frozen_full_catboost_raw_scores_are_calibrated_from_validation_only(
+        self,
+    ) -> None:
+        current, world, service = prepared()
+        evaluation_config = EvaluationConfig(
+            minimum_positive_samples=1, minimum_negative_samples=1
+        )
+        manifest = build_split_manifest(
+            world,
+            evaluation_config,
+            start_at=current.start_at,
+            end_at=current.end_at,
+        )
+        records, raw_scores, _, model = fit_full_catboost_scores(
+            service,
+            manifest,
+            baseline_config=BaselineConfig(iterations=4),
+        )
+        vectors = vectors_for_manifest(service, manifest)
+        before = dict(raw_scores)
+        _, calibrated = calibrate_records(
+            records,
+            raw_scores,
+            CalibrationConfig(minimum_positive_samples=1, minimum_negative_samples=1),
+        )
+        after = {
+            sample.sample_id: predict_raw_score(model, vectors[sample.sample_id])
+            for sample in manifest.samples
+        }
+        self.assertEqual(before, after)
+        self.assertEqual(calibrated.fit.status, CalibrationStatus.VALID)
 
 
 if __name__ == "__main__":

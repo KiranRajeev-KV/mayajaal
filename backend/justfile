@@ -60,6 +60,11 @@ baseline-train config="config.toml":
 held-out-evaluate *args:
     uv run python -m scripts.evaluate_held_out --config config.toml {{args}}
 
+# Fit sigmoid calibration on chronological validation scores and evaluate it once
+# on held-out test scores. For the configured 10k benchmark add `--full`.
+calibration-evaluate *args:
+    uv run python -m scripts.evaluate_calibration --config config.toml {{args}}
+
 # Run multi-seed realism diagnostics; pass flags after the recipe name.
 synthetic-validate *args:
     uv run python -m scripts.validate_synthetic --config config.toml {{args}}

@@ -299,6 +299,11 @@ insufficient test support marks the held-out result `INVALID` while preserving
 ranking metrics diagnostically. Optional cost figures are evaluation reporting
 only and are not a policy engine.
 
+The supported scikit-learn metrics and curve APIs are the source of truth for
+these reported values. Mayajaal keeps explicit one-class support handling around
+them so an invalid benchmark is reported deterministically rather than relying
+on library warnings.
+
 ```bash
 just held-out-evaluate
 just held-out-evaluate --full  # derives validation.full_account_count (10k)
@@ -315,3 +320,41 @@ assumptions. All three model variants calculate their offline SHAP summaries fro
 the deterministic, bounded `synthetic_world.validation.shap_sample_count`
 training sample (1,000 by default). Do not use the held-out test report to tune
 model settings, features, thresholds, or generator behaviour.
+
+## Probability calibration
+
+`mayajaal.calibration` is a model-neutral post-model layer. It accepts stable
+score records plus model raw margins, fits a strictly increasing sigmoid/Platt
+mapping through `fit(scores, labels)` and exposes
+`predict_probability(scores)`. The current command trains the frozen `full`
+CatBoost model on `T_train`, fits this mapping only from its raw validation
+scores at `T_validation`, then evaluates the mapping once at `T_test`. It never
+uses CatBoost training scores for calibration and it does not select a new
+classification threshold.
+
+Sigmoid is the sole configured method. It is fitted by scikit-learn's regularized
+`LogisticRegression` on validation raw margins—a deliberately low-variance
+choice for the current small, imbalanced validation supports; isotonic is not
+selected by test results or enabled as a default. A non-increasing fitted
+coefficient is rejected, so AP and ROC-AUC remain ranking diagnostics rather
+than calibration objectives. Brier score and log loss come from scikit-learn,
+and reliability points use its quantile `calibration_curve`; the report adds
+only deterministic bin counts/ranges for inspection and its ECE-style summary.
+
+```bash
+just calibration-evaluate
+just calibration-evaluate --full  # derives validation.full_account_count (10k)
+just calibration-evaluate --config another-profile.toml
+```
+
+The output directory (by default
+`artifacts/synthetic-world/calibration-evaluation`) contains
+`sigmoid_calibrator.json`, `calibration_predictions.parquet`,
+`calibration_evaluation.json`, `reliability_diagram.png`, and
+`probability_distribution.png`. Prediction rows retain `sample_id`,
+`account_id`, `decision_time`, `split`, `y_true`, raw model score, and both
+probabilities. `[calibration]` in [config.toml](config.toml) validates the
+sigmoid method, validation support gates, deterministic quantile-bin count, and
+optimizer iteration limit. Insufficient validation support writes diagnostic
+uncalibrated metrics but marks calibration `INVALID` and refuses to fit a
+mapping; these are benchmark-validation gates, not statistical guarantees.

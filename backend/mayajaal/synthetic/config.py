@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import Field
 
+from mayajaal.calibration import CalibrationConfig
 from mayajaal.evaluation import EvaluationConfig
 from mayajaal.schemas.common import SchemaModel
 
@@ -22,6 +23,7 @@ class GenerationConfig(SchemaModel):
 
     synthetic_world: GenerationProfile
     evaluation: EvaluationConfig
+    calibration: CalibrationConfig
     output: OutputConfig
 
 

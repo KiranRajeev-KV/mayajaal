@@ -105,6 +105,15 @@ threshold_rule = "maximize_f1_then_precision_then_threshold"
 # false_positive_review_cost_paise = 50000
 # true_positive_exposure_paise = 250000
 
+[calibration]
+# Validation-only sigmoid/Platt mapping of frozen model raw scores. These are
+# benchmark support gates, not merchant policy or a statistical guarantee.
+method = "sigmoid"
+minimum_positive_samples = 10
+minimum_negative_samples = 20
+quantile_bin_count = 10
+maximum_iterations = 1000
+
 [synthetic_world.difficulty_profiles.easy]
 persona_weight_temperature = 0.80
 benign_sharing_multiplier = 0.70
