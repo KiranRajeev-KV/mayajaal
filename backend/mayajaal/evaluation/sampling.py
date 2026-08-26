@@ -17,11 +17,11 @@ def build_split_manifest(
 ) -> SplitManifest:
     """Create an account-disjoint chronological review benchmark.
 
-    Every account is represented once.  Ordinary accounts are placed from their
-    account-creation cohort; an abuse campaign is placed as a whole from its
-    final labelled fact.  The latter is evaluation-only use of hidden truth to
-    stop the same coordinated campaign appearing in multiple partitions.
-    It never enters graph projection, feature extraction, or model inputs.
+    Every account is provisionally placed from the same observable anchor:
+    ``Account.created_at``.  Hidden campaign membership is used only *after*
+    that label-independent placement to purge a campaign whose members cross
+    windows.  It never moves a sample, changes its decision time, or enters
+    graph projection, feature extraction, or model inputs.
 
     A member's score is produced at the *end* of its assigned calendar window,
     so each vector can use only facts already known at that decision time.  The
@@ -38,7 +38,13 @@ def build_split_manifest(
     validation_cutoff = span[0] + (span[1] - span[0]) * config.validation_end_fraction
     test_cutoff = span[1]
 
-    labelled_by_group: defaultdict[str, list[datetime]] = defaultdict(list)
+    provisional_assignments = {
+        str(account.id): _window_for(
+            account.created_at, train_cutoff, validation_cutoff, test_cutoff
+        )
+        for account in world.accounts
+    }
+
     group_by_account: dict[str, str] = {}
     for event in world.events:
         account_id = str(event.account_id)
@@ -50,21 +56,29 @@ def build_split_manifest(
             existing = group_by_account.setdefault(account_id, group_id)
             if existing != group_id:
                 raise ValueError("an account cannot belong to more than one campaign")
-            labelled_by_group[group_id].append(event.occurred_at)
+    provisional_splits_by_group: defaultdict[str, set[EvaluationSplit]] = defaultdict(
+        set
+    )
+    for account_id, group_id in group_by_account.items():
+        provisional_splits_by_group[group_id].add(
+            provisional_assignments[account_id][0]
+        )
+    purged_campaign_group_ids = tuple(
+        sorted(
+            group_id
+            for group_id, splits in provisional_splits_by_group.items()
+            if len(splits) > 1
+        )
+    )
+    purged_groups = frozenset(purged_campaign_group_ids)
 
-    anchor_by_group = {
-        group_id: max(times) for group_id, times in labelled_by_group.items()
-    }
     samples: list[EvaluationSample] = []
     for account in sorted(world.accounts, key=lambda item: str(item.id)):
         account_id = str(account.id)
         group_id = group_by_account.get(account_id)
-        anchor = (
-            anchor_by_group[group_id] if group_id is not None else account.created_at
-        )
-        split, decision_time = _window_for(
-            anchor, train_cutoff, validation_cutoff, test_cutoff
-        )
+        if group_id in purged_groups:
+            continue
+        split, decision_time = provisional_assignments[account_id]
         if account.created_at > decision_time:
             raise ValueError("an account cannot be scored before it was created")
         samples.append(
@@ -84,6 +98,7 @@ def build_split_manifest(
         samples=tuple(
             sorted(samples, key=lambda item: (item.decision_time, item.sample_id))
         ),
+        purged_campaign_group_ids=purged_campaign_group_ids,
     )
 
 

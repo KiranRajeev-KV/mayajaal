@@ -1,7 +1,9 @@
 """Focused tests for chronological, reusable held-out evaluation contracts."""
 
 import unittest
-from datetime import UTC, datetime
+from collections import defaultdict
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,8 +15,8 @@ from mayajaal.evaluation import (
     build_split_manifest,
     evaluate_catboost,
     evaluate_predictions,
-    select_threshold,
     save_catboost_evaluation_models,
+    select_threshold,
     write_evaluation_artifacts,
 )
 from mayajaal.features import FeatureService
@@ -77,6 +79,54 @@ def record(
     )
 
 
+def campaign_accounts(world: SyntheticWorld) -> dict[str, tuple[str, ...]]:
+    """Return deterministic hidden campaign membership for evaluation fixtures."""
+    groups: defaultdict[str, set[str]] = defaultdict(set)
+    for event in world.events:
+        labels = event.synthetic_labels
+        if labels is not None and labels.is_coordinated_abuse:
+            assert labels.coordination_cluster_id is not None
+            groups[labels.coordination_cluster_id].add(str(event.account_id))
+    return {
+        group_id: tuple(sorted(account_ids))
+        for group_id, account_ids in sorted(groups.items())
+    }
+
+
+def with_cross_partition_campaign(
+    world: SyntheticWorld, current: GenerationProfile
+) -> tuple[SyntheticWorld, str]:
+    """Place two late-campaign members in different observable cohorts."""
+    validation_cutoff = current.start_at + (current.end_at - current.start_at) * 0.50
+    events_by_group: defaultdict[str, list[datetime]] = defaultdict(list)
+    for event in world.events:
+        labels = event.synthetic_labels
+        if labels is not None and labels.coordination_cluster_id is not None:
+            events_by_group[labels.coordination_cluster_id].append(event.occurred_at)
+    groups = campaign_accounts(world)
+    group_id = next(
+        candidate
+        for candidate, times in sorted(events_by_group.items())
+        if len(groups[candidate]) >= 2 and min(times) > validation_cutoff
+    )
+    first_account, second_account = groups[group_id][:2]
+    updated_accounts = tuple(
+        account.model_copy(
+            update={
+                "created_at": (
+                    current.start_at + timedelta(days=1)
+                    if str(account.id) == first_account
+                    else validation_cutoff + timedelta(days=1)
+                    if str(account.id) == second_account
+                    else account.created_at
+                )
+            }
+        )
+        for account in world.accounts
+    )
+    return replace(world, accounts=updated_accounts), group_id
+
+
 class ChronologicalEvaluationTests(unittest.TestCase):
     def test_manifest_is_strictly_chronological_group_disjoint_and_deterministic(
         self,
@@ -107,22 +157,34 @@ class ChronologicalEvaluationTests(unittest.TestCase):
         self.assertTrue(by_split[EvaluationSplit.TEST])
         self.assertTrue(
             all(
-                sample.decision_time <= first.train_cutoff
+                sample.decision_time == first.train_cutoff
                 for sample in by_split[EvaluationSplit.TRAIN]
             )
         )
         self.assertTrue(
             all(
-                first.train_cutoff < sample.decision_time <= first.validation_cutoff
+                sample.decision_time == first.validation_cutoff
                 for sample in by_split[EvaluationSplit.VALIDATION]
             )
         )
         self.assertTrue(
             all(
-                first.validation_cutoff < sample.decision_time <= first.test_cutoff
+                sample.decision_time == first.test_cutoff
                 for sample in by_split[EvaluationSplit.TEST]
             )
         )
+        accounts_by_id = {str(account.id): account for account in world.accounts}
+        for split, samples in by_split.items():
+            for sample in samples:
+                created_at = accounts_by_id[sample.account_id].created_at
+                if split is EvaluationSplit.TRAIN:
+                    self.assertLessEqual(created_at, first.train_cutoff)
+                elif split is EvaluationSplit.VALIDATION:
+                    self.assertLess(first.train_cutoff, created_at)
+                    self.assertLessEqual(created_at, first.validation_cutoff)
+                else:
+                    self.assertLess(first.validation_cutoff, created_at)
+                    self.assertLessEqual(created_at, first.test_cutoff)
         campaign_splits: dict[str, set[EvaluationSplit]] = {}
         for sample in first.samples:
             if sample.campaign_group_id is not None:
@@ -134,6 +196,61 @@ class ChronologicalEvaluationTests(unittest.TestCase):
         self.assertEqual(
             len({sample.account_id for sample in first.samples}), len(first.samples)
         )
+
+    def test_assignments_ignore_campaign_completion_time(self) -> None:
+        current, world, _ = prepared()
+        config = EvaluationConfig(
+            minimum_positive_samples=1, minimum_negative_samples=1
+        )
+        original = build_split_manifest(
+            world, config, start_at=current.start_at, end_at=current.end_at
+        )
+        delayed_events = tuple(
+            event.model_copy(update={"occurred_at": current.end_at})
+            if event.synthetic_labels is not None
+            and event.synthetic_labels.is_coordinated_abuse
+            else event
+            for event in world.events
+        )
+        delayed = build_split_manifest(
+            replace(world, events=delayed_events),
+            config,
+            start_at=current.start_at,
+            end_at=current.end_at,
+        )
+        self.assertEqual(
+            [
+                (sample.account_id, sample.split, sample.decision_time)
+                for sample in original.samples
+            ],
+            [
+                (sample.account_id, sample.split, sample.decision_time)
+                for sample in delayed.samples
+            ],
+        )
+
+    def test_cross_partition_campaigns_are_purged_not_reassigned(self) -> None:
+        current, world, _ = prepared()
+        changed_world, group_id = with_cross_partition_campaign(world, current)
+        config = EvaluationConfig(
+            minimum_positive_samples=1, minimum_negative_samples=1
+        )
+        first = build_split_manifest(
+            changed_world, config, start_at=current.start_at, end_at=current.end_at
+        )
+        second = build_split_manifest(
+            changed_world, config, start_at=current.start_at, end_at=current.end_at
+        )
+        self.assertEqual(first, second)
+        self.assertIn(group_id, first.purged_campaign_group_ids)
+        self.assertFalse(
+            any(sample.campaign_group_id == group_id for sample in first.samples)
+        )
+        campaign_splits: defaultdict[str, set[EvaluationSplit]] = defaultdict(set)
+        for sample in first.samples:
+            if sample.campaign_group_id is not None:
+                campaign_splits[sample.campaign_group_id].add(sample.split)
+        self.assertTrue(all(len(splits) == 1 for splits in campaign_splits.values()))
 
     def test_label_at_decision_time_never_reads_future_abuse(self) -> None:
         current, world, _ = prepared()
@@ -222,12 +339,34 @@ class ChronologicalEvaluationTests(unittest.TestCase):
         )
         full = records["full"]
         no_graph = records["no_graph_identity"]
+        no_relational = records["no_relational_graph"]
         self.assertEqual(
             [(item.sample_id, item.split, item.y_true) for item in full],
             [(item.sample_id, item.split, item.y_true) for item in no_graph],
         )
+        self.assertEqual(
+            [(item.sample_id, item.split, item.y_true) for item in full],
+            [(item.sample_id, item.split, item.y_true) for item in no_relational],
+        )
         self.assertLess(
             len(schemas["no_graph_identity"].names), len(schemas["full"].names)
+        )
+        self.assertTrue(
+            {
+                "device_count",
+                "ip_address_count",
+                "payment_identity_count",
+                "address_count",
+            }.issubset(schemas["no_relational_graph"].names)
+        )
+        self.assertFalse(
+            {
+                "shared_device_account_count",
+                "max_identity_reuse_count",
+                "identity_component_account_count",
+                "shared_promotion_account_count",
+                "recent_shared_identity_event_count",
+            }.intersection(schemas["no_relational_graph"].names)
         )
         self.assertTrue(all(item.decision_time <= current.end_at for item in full))
         repeated_records, repeated_thresholds, repeated_reports, _, _ = (
@@ -265,7 +404,51 @@ class ChronologicalEvaluationTests(unittest.TestCase):
                 shap_sample_count=1,
             )
             self.assertTrue(
-                all(artifact.shap_summary_path.is_file() for artifact in model_artifacts.values())
+                all(
+                    artifact.shap_summary_path.is_file()
+                    for artifact in model_artifacts.values()
+                )
+            )
+
+    def test_test_labels_do_not_affect_model_or_threshold_selection(self) -> None:
+        current, world, service = prepared()
+        config = EvaluationConfig(
+            minimum_positive_samples=1, minimum_negative_samples=1
+        )
+        manifest = build_split_manifest(
+            world, config, start_at=current.start_at, end_at=current.end_at
+        )
+        altered_manifest = replace(
+            manifest,
+            samples=tuple(
+                replace(sample, y_true=not sample.y_true)
+                if sample.split is EvaluationSplit.TEST
+                else sample
+                for sample in manifest.samples
+            ),
+        )
+        first_records, first_thresholds, _, _, _ = evaluate_catboost(
+            service, manifest, config, baseline_config=BaselineConfig(iterations=4)
+        )
+        second_records, second_thresholds, _, _, _ = evaluate_catboost(
+            service,
+            altered_manifest,
+            config,
+            baseline_config=BaselineConfig(iterations=4),
+        )
+        self.assertEqual(first_thresholds, second_thresholds)
+        for name in first_records:
+            self.assertEqual(
+                [
+                    (record.sample_id, record.score)
+                    for record in first_records[name]
+                    if record.split is not EvaluationSplit.TEST
+                ],
+                [
+                    (record.sample_id, record.score)
+                    for record in second_records[name]
+                    if record.split is not EvaluationSplit.TEST
+                ],
             )
 
 

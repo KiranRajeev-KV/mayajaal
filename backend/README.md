@@ -268,19 +268,21 @@ and `--output-dir` for the artifact directory.
 review samples, a chronological `train → validation → test` manifest, stable
 prediction records, threshold selection, metrics, and plots without importing a
 specific model. The current CatBoost adapter trains two models on exactly that
-same manifest: the complete feature schema and an ablation with identity-sharing
-and other graph-derived features removed. Future model adapters, including a
-graph model, only need to produce the same prediction-record contract.
+same manifest: `full`, `no_graph_identity` (all local identity and relational
+graph features removed), and `no_relational_graph` (local identity/lifecycle
+counts retained while peer, reuse, component, shared-promotion, and shared
+velocity features are removed). Future model adapters, including a graph model,
+only need to produce the same prediction-record contract.
 
-Each account appears once. Ordinary accounts are assigned from their
-account-creation cohort; every member of a hidden synthetic campaign is assigned
-as a whole from that campaign's final labelled fact. This evaluation-only group
-assignment prevents a campaign from leaking across partitions. Each account is
-scored at the end of its assigned calendar window, so its feature vector and
-synthetic label include facts at or before the recorded decision time only.
-Training is strictly earlier than validation, which is strictly earlier than the
-held-out test. The threshold is selected by the configured validation-only rule
-and then frozen before test metrics are calculated.
+Each account appears once and is provisionally assigned from the same observable
+anchor: its account-creation time. Hidden campaign membership is used only to
+purge a campaign spanning multiple partitions; it never changes a split or
+decision time. Purged IDs are written to `split_manifest.json`. Each retained
+account is scored at the end of its assigned calendar window, so its feature
+vector and synthetic label include facts at or before the recorded decision
+time only. Training is strictly earlier than validation, which is strictly
+earlier than the held-out test. The threshold is selected by the configured
+validation-only rule and then frozen before test metrics are calculated.
 
 The primary ranking metric is **Average Precision (AP)**, not a trapezoidal
 area labelled ambiguously as “PR-AUC”. Reports also contain precision, recall,

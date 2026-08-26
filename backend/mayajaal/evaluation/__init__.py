@@ -13,6 +13,8 @@ from .models import (
 )
 from .runner import (
     GRAPH_IDENTITY_FEATURE_NAMES,
+    LOCAL_IDENTITY_FEATURE_NAMES,
+    RELATIONAL_GRAPH_FEATURE_NAMES,
     evaluate_catboost,
     save_catboost_evaluation_models,
     vectors_for_manifest,
@@ -22,6 +24,8 @@ from .sampling import build_split_manifest
 
 __all__ = [
     "GRAPH_IDENTITY_FEATURE_NAMES",
+    "LOCAL_IDENTITY_FEATURE_NAMES",
+    "RELATIONAL_GRAPH_FEATURE_NAMES",
     "EvaluationConfig",
     "EvaluationSample",
     "EvaluationSplit",

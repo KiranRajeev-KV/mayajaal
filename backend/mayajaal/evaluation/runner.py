@@ -38,12 +38,17 @@ from .models import (
     ThresholdSelection,
 )
 
-GRAPH_IDENTITY_FEATURE_NAMES = frozenset(
+LOCAL_IDENTITY_FEATURE_NAMES = frozenset(
     {
         "device_count",
         "ip_address_count",
         "payment_identity_count",
         "address_count",
+    }
+)
+
+RELATIONAL_GRAPH_FEATURE_NAMES = frozenset(
+    {
         "shared_device_account_count",
         "shared_ip_account_count",
         "shared_payment_account_count",
@@ -55,6 +60,10 @@ GRAPH_IDENTITY_FEATURE_NAMES = frozenset(
         "recent_shared_account_creation_count",
         "recent_shared_identity_event_count",
     }
+)
+
+GRAPH_IDENTITY_FEATURE_NAMES = (
+    LOCAL_IDENTITY_FEATURE_NAMES | RELATIONAL_GRAPH_FEATURE_NAMES
 )
 
 
@@ -91,7 +100,7 @@ def evaluate_catboost(
     dict[str, FeatureSchema],
     dict[str, TrainedBaseline],
 ]:
-    """Run full and no-graph CatBoost on an identical split manifest.
+    """Run the CatBoost ablations on an identical split manifest.
 
     This is deliberately an adapter: sample construction, score records, metric
     calculation, and artifact formats have no CatBoost-specific dependency.
@@ -99,9 +108,14 @@ def evaluate_catboost(
     vectors = vectors_for_manifest(service, manifest)
     full_schema = service.schema
     no_graph_schema = _without_graph_schema(full_schema)
+    no_relational_schema = _without_relational_graph_schema(full_schema)
     variants = {
         "full": (full_schema, _identity),
         "no_graph_identity": (no_graph_schema, _without_graph_vector),
+        "no_relational_graph": (
+            no_relational_schema,
+            _without_relational_graph_vector,
+        ),
     }
     records_by_variant: dict[str, tuple[PredictionRecord, ...]] = {}
     thresholds: dict[str, ThresholdSelection] = {}
@@ -145,7 +159,11 @@ def evaluate_catboost(
         records_by_variant,
         thresholds,
         metrics,
-        {"full": full_schema, "no_graph_identity": no_graph_schema},
+        {
+            "full": full_schema,
+            "no_graph_identity": no_graph_schema,
+            "no_relational_graph": no_relational_schema,
+        },
         models,
     )
 
@@ -176,9 +194,7 @@ def save_catboost_evaluation_models(
         name: save_baseline(
             model,
             tuple(
-                _without_graph_vector(vectors[sample.account_id])
-                if name == "no_graph_identity"
-                else vectors[sample.account_id]
+                _transform_for_variant(name, vectors[sample.account_id])
                 for sample in train_samples
             ),
             output_directory / name,
@@ -225,7 +241,7 @@ def write_evaluation_artifacts(
                 "protocol": {
                     "name": "one account, one end-of-window review decision",
                     "primary_ranking_metric": "Average Precision (AP)",
-                    "leakage_policy": "features and labels use only immutable facts at or before each decision_time; campaigns are assigned as whole evaluation groups",
+                    "leakage_policy": "features and labels use only immutable facts at or before each decision_time; all accounts are assigned from account creation, then cross-partition campaign groups are purged",
                     "threshold_policy": "selected on validation only and frozen for test",
                     "seed": seed,
                     "config": config.model_dump(mode="json"),
@@ -288,29 +304,61 @@ def _examples_by_split(
 
 
 def _without_graph_schema(schema: FeatureSchema) -> FeatureSchema:
+    return _without_features_schema(schema, GRAPH_IDENTITY_FEATURE_NAMES)
+
+
+def _without_relational_graph_schema(schema: FeatureSchema) -> FeatureSchema:
+    return _without_features_schema(schema, RELATIONAL_GRAPH_FEATURE_NAMES)
+
+
+def _without_features_schema(
+    schema: FeatureSchema, feature_names: frozenset[str]
+) -> FeatureSchema:
     return FeatureSchema(
         tuple(
             definition
             for definition in schema.definitions
-            if definition.name not in GRAPH_IDENTITY_FEATURE_NAMES
+            if definition.name not in feature_names
         )
     )
 
 
 def _without_graph_vector(vector: FeatureVector) -> FeatureVector:
+    return _without_features_vector(vector, GRAPH_IDENTITY_FEATURE_NAMES)
+
+
+def _without_relational_graph_vector(vector: FeatureVector) -> FeatureVector:
+    return _without_features_vector(vector, RELATIONAL_GRAPH_FEATURE_NAMES)
+
+
+def _without_features_vector(
+    vector: FeatureVector, feature_names: frozenset[str]
+) -> FeatureVector:
     return FeatureVector(
         account_id=vector.account_id,
         cutoff=vector.cutoff,
         values={
             name: value
             for name, value in vector.values.items()
-            if name not in GRAPH_IDENTITY_FEATURE_NAMES
+            if name not in feature_names
         },
     )
 
 
 def _identity(vector: FeatureVector) -> FeatureVector:
     return vector
+
+
+def _transform_for_variant(name: str, vector: FeatureVector) -> FeatureVector:
+    transforms: dict[str, Callable[[FeatureVector], FeatureVector]] = {
+        "full": _identity,
+        "no_graph_identity": _without_graph_vector,
+        "no_relational_graph": _without_relational_graph_vector,
+    }
+    try:
+        return transforms[name](vector)
+    except KeyError as error:
+        raise ValueError(f"unknown evaluation model variant: {name}") from error
 
 
 def _manifest_json(manifest: SplitManifest) -> dict[str, object]:
