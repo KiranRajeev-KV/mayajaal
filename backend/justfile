@@ -55,8 +55,12 @@ features-extract config="config.toml":
 baseline-train config="config.toml":
     uv run python -m scripts.train_baseline --config {{config}}
 
-# Run multi-seed realism diagnostics; pass `--full` to include the 10k benchmark.
-synthetic-validate config="config.toml" args="":
+# Run multi-seed realism diagnostics; pass flags after the recipe name.
+synthetic-validate *args:
+    uv run python -m scripts.validate_synthetic --config config.toml {{args}}
+
+# Run diagnostics against a non-default profile, followed by optional flags.
+synthetic-validate-config config *args:
     uv run python -m scripts.validate_synthetic --config {{config}} {{args}}
 
 # Run every non-mutating quality gate.

@@ -58,21 +58,40 @@ def profile_for_total_accounts(
     profile: GenerationProfile, requested_total: int, seed: int
 ) -> GenerationProfile:
     """Derive normal-population size so target-rate campaigns reach the total."""
-    context_accounts = (
-        profile.shared_household_count * profile.accounts_per_shared_household
-        + profile.population.benign_network_group_count
-        * profile.population.accounts_per_benign_network_group
-    )
     target_rate = profile.prevalence.resolved_target_rate()
-    base_accounts = (
+    target_ordinary_accounts = (
         round(requested_total * (1.0 - target_rate))
         if target_rate is not None
         else requested_total
     )
+
+    # Context counts may be population-scaled, so solve their small deterministic
+    # fixed point instead of assuming legacy fixed counts.
+    def ordinary_accounts(normal_account_count: int) -> int:
+        return (
+            normal_account_count
+            + profile.model_copy(
+                update={"normal_account_count": normal_account_count}
+            ).resolved_shared_household_count()
+            * profile.accounts_per_shared_household
+            + profile.population.resolved_benign_network_group_count(
+                normal_account_count
+            )
+            * profile.population.accounts_per_benign_network_group
+        )
+
+    candidates = range(max(target_ordinary_accounts + 1, 1))
+    normal_account_count = min(
+        candidates,
+        key=lambda count: (
+            abs(ordinary_accounts(count) - target_ordinary_accounts),
+            count,
+        ),
+    )
     return profile.model_copy(
         update={
             "seed": seed,
-            "normal_account_count": max(base_accounts - context_accounts, 0),
+            "normal_account_count": normal_account_count,
         }
     )
 
@@ -101,6 +120,7 @@ def validate_profile(
     world, service = _resolved_service(profile)
     health_by_cutoff = {}
     warnings = list(guardrail_failures(diagnose_world(world), profile))
+    review_warnings: list[str] = []
     for name, cutoff in cutoff_times(profile).items():
         account_ids = (
             str(account.id)
@@ -112,6 +132,9 @@ def validate_profile(
             vectors, service.schema, world, cutoff, profile.diagnostics
         )
         health_by_cutoff[name] = health
+        review_warnings.extend(
+            f"{name} cutoff: {warning}" for warning in health.class_support_warnings
+        )
         warnings.extend(
             feature_health_guardrail_failures(health, profile, late=name == "late")
         )
@@ -120,7 +143,7 @@ def validate_profile(
         "world": diagnose_world(world).to_dict(),
         "feature_health": FeatureHealthDiagnostics(health_by_cutoff).to_dict(),
         "guardrail_failures": sorted(set(warnings)),
-        "review_warnings": [],
+        "review_warnings": sorted(set(review_warnings)),
     }
     if include_baseline:
         late_cutoff = cutoff_times(profile)["late"]
@@ -154,9 +177,10 @@ def validate_profile(
             ],
         }
         if top_share > profile.diagnostics.shap_top_feature_share_warning:
-            report["review_warnings"] = [
+            review_warnings.append(
                 "SHAP top-feature share exceeds review threshold; this is not a generator guardrail."
-            ]
+            )
+            report["review_warnings"] = sorted(set(review_warnings))
         if baseline_output_directory is not None:
             artifacts = save_baseline(baseline, shap_vectors, baseline_output_directory)
             report["baseline_artifacts"] = {

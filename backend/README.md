@@ -78,19 +78,34 @@ rate. The Python profile API may set `target_labelled_account_rate=None` for
 backwards-compatible count-driven scenarios; TOML uses the explicit target shown
 in [config.toml](config.toml).
 
-Campaigns have independently seeded, variable ring sizes, partial identity
-sharing, warm-up orders, and either narrow burst windows or low-and-slow
-activity. They are hidden generation plans: only their abuse-relevant event
-labels become synthetic evaluation truth.
+When a target prevalence is selected, campaigns are independently seeded draws
+from the configured small/medium `prevalence.ring_sizes` distribution rather
+than a few oversized rings. `strategy_weights` are sampling weights for each
+campaign and `timeline_weights` allocate plans across early, middle, and late
+chronological windows; `minimum_campaigns_per_timeline_bucket` protects class
+support at every configured cutoff. Campaigns retain partial identity sharing,
+warm-up orders, and either narrow burst windows or low-and-slow activity. They
+are hidden generation plans: only their abuse-relevant event labels become
+synthetic evaluation truth.
+
+Benign households and office/campus contexts scale from the ordinary population
+through `population.households_per_thousand_ordinary_accounts` and
+`population.benign_network_groups_per_thousand_ordinary_accounts`. The legacy
+`shared_household_count` and `population.benign_network_group_count` fields are
+explicit overrides—set either to a number (including `0`) for compact fixtures
+or omit them for population-scaled contexts.
 
 Each `generate_dataset` run also writes `diagnostics.json`. It is an internal
 plausibility report—not a claim of calibration to a private merchant dataset—
 covering entity/order distributions, temporal gaps and burstiness, typed identity
-reuse degrees, peer-set Jaccard overlap, typed multi-identity pairs, 4-cycles,
-and graph topology. It reports both the full account projection, where isolated
-accounts count as zero-degree components, and the identity-sharing subgraph,
-which intentionally excludes them. No SDMetrics dependency is required because
-no real reference data is available.
+reuse degrees, peer-set Jaccard overlap, typed multi-identity pairs, K2,2
+bipartite four-cycles (including cross-type identity pairs), and graph topology.
+It reports both the full account projection, where isolated accounts count as
+zero-degree components, and the identity-sharing subgraph, which intentionally
+excludes them. The configured component guardrails check both population-scale
+component size and the fraction of labelled accounts concentrated in one
+component. No SDMetrics dependency is required because no real reference data
+is available.
 
 `just synthetic-validate` writes a multi-seed report with early, middle, and
 late cutoff-aware feature-health snapshots. It inspects variance, zero rates,
@@ -102,14 +117,16 @@ used only in explicitly evaluation-only overlap/separation fields. Run the full
 benchmark pipeline, including CatBoost and SHAP artifacts, with:
 
 ```bash
-just synthetic-validate args="--full"
+just synthetic-validate --full
 ```
 
 SHAP's top-feature share produces a review warning only. It is never an input to
 generation or a target for tuning the generator. The full validation trains on
 all configured accounts but uses the deterministic configured
 `validation.shap_sample_count` sample for the offline SHAP report and PNG, so a
-10k run remains practical.
+10k run remains practical. Each cutoff also reports a review warning if it has
+fewer than the configured positive or negative samples; null class metrics are
+never silently treated as evidence.
 
 ## Deterministic resolution
 
@@ -219,6 +236,10 @@ It trains a single-threaded, seeded CatBoost classifier with `bootstrap_type=No`
 and `auto_class_weights="Balanced"`. Synthetic labels are used only after
 extraction to make offline targets. The training output includes the `.cbm`
 model, ordered feature metadata, and a SHAP mean-absolute-contribution bar plot.
+TreeSHAP contributions and their base value explain CatBoost's pre-sigmoid
+`RawFormulaVal`, not probability; the reusable explanation returns that raw
+score alongside the separately computed fraud probability. Their sum is tested
+against CatBoost's raw prediction for additivity.
 
 ```bash
 just baseline-train                         # writes CatBoost + metadata + SHAP plot

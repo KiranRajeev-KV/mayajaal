@@ -64,8 +64,14 @@ features-extract config="config.toml":
 baseline-train config="config.toml":
     just --justfile {{backend_justfile}} baseline-train {{config}}
 
-synthetic-validate config="config.toml" args="":
-    just --justfile {{backend_justfile}} synthetic-validate {{config}} {{args}}
+# Forward arbitrary validation flags after the recipe name, for example:
+# `just synthetic-validate --full --output-dir artifacts/validation-10k`.
+synthetic-validate *args:
+    just --justfile {{backend_justfile}} synthetic-validate {{args}}
+
+# Use a non-default profile while retaining arbitrary validation flags.
+synthetic-validate-config config *args:
+    just --justfile {{backend_justfile}} synthetic-validate-config {{config}} {{args}}
 
 check:
     just --justfile {{backend_justfile}} check
