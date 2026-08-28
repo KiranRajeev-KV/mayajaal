@@ -189,9 +189,6 @@ class EvidenceService:
             request.subject_id, subject_links, identity_links
         )
         selected_related = ranked_related[: self._config.max_related_accounts]
-        ranking_metadata = _related_account_metadata(
-            selected_related, len(ranked_related), self._config.max_related_accounts
-        )
         result: list[EvidenceItem] = []
         for subject_link in subject_links:
             same_identity = identity_links[
@@ -219,9 +216,9 @@ class EvidenceService:
                 "related_account_count": len(all_peers),
                 "related_account_ids": list(returned_peers),
                 "related_account_ids_truncated": (len(returned_peers) < len(all_peers)),
+                "max_related_accounts": self._config.max_related_accounts,
                 "first_seen": first_seen.isoformat(),
                 "last_seen": last_seen.isoformat(),
-                **ranking_metadata,
             }
             result.append(
                 self._evidence(
@@ -538,7 +535,7 @@ def _rank_related_accounts(
             if peer_link.account_id == subject_id:
                 continue
             shared_types[peer_link.account_id].add(subject_link.identity_type)
-            observed_at = max(subject_link.last_seen, peer_link.last_seen)
+            observed_at = peer_link.last_seen
             latest_seen[peer_link.account_id] = max(
                 latest_seen.get(peer_link.account_id, observed_at), observed_at
             )

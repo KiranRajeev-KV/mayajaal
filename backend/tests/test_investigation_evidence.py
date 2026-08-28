@@ -222,6 +222,7 @@ def ranking_projection() -> GraphProjection:
         relationship_type: GraphRelationshipType,
         peer_id: str,
         peer_time: datetime,
+        subject_time: datetime | None = None,
     ) -> None:
         nodes.append(GraphNode(identity_type, identity_id, {}))
         relationships.extend(
@@ -233,7 +234,7 @@ def ranking_projection() -> GraphProjection:
                     identity_type,
                     identity_id,
                     f"subject-{identity_id}",
-                    at(2),
+                    subject_time or at(2),
                 ),
                 relationship(
                     relationship_type,
@@ -267,6 +268,7 @@ def ranking_projection() -> GraphProjection:
         GraphRelationshipType.PAID_WITH,
         "account-recent",
         at(9),
+        at(10),
     )
     add_shared(
         GraphNodeType.PAYMENT_IDENTITY,
@@ -274,6 +276,7 @@ def ranking_projection() -> GraphProjection:
         GraphRelationshipType.PAID_WITH,
         "account-older",
         at(7),
+        at(10),
     )
     add_shared(
         GraphNodeType.DEVICE,
@@ -528,12 +531,10 @@ class EvidenceServiceTests(unittest.TestCase):
             frozen_evaluation=self.frozen,
             config=InvestigationConfig(max_related_accounts=5),
         )
-        first = service.get_shared_identity_summary(request())
-        second = service.get_shared_identity_summary(request())
+        first = service.get_related_activity(request())[0]
+        second = service.get_related_activity(request())[0]
         self.assertEqual(first, second)
-        ranking = cast(
-            list[dict[str, object]], first[0].facts["related_account_ranking"]
-        )
+        ranking = cast(list[dict[str, object]], first.facts["related_account_ranking"])
         self.assertEqual(
             [item["account_id"] for item in ranking],
             [
@@ -546,12 +547,16 @@ class EvidenceServiceTests(unittest.TestCase):
         )
         self.assertEqual(ranking[0]["shared_identity_type_count"], 2)
         self.assertEqual(
-            first[0].facts["selected_related_account_ids"],
-            [item["account_id"] for item in ranking],
+            ranking[1]["most_recent_shared_identity_observed_at"], at(9).isoformat()
         )
         self.assertEqual(
-            [item.evidence_id for item in first], [item.evidence_id for item in second]
+            ranking[2]["most_recent_shared_identity_observed_at"], at(7).isoformat()
         )
+        self.assertEqual(
+            first.facts["selected_related_account_ids"],
+            [item["account_id"] for item in ranking],
+        )
+        self.assertEqual(first.evidence_id, second.evidence_id)
 
     def test_related_account_limit_uses_the_same_ranked_selection_everywhere(
         self,
@@ -568,12 +573,19 @@ class EvidenceServiceTests(unittest.TestCase):
         activity = service.get_related_activity(request())
         timeline = service.get_case_timeline(request())[0]
         expected = ["account-many", "account-recent"]
-        for item in (*summary, activity[0], timeline):
+        for item in (activity[0], timeline):
             self.assertEqual(item.facts["selected_related_account_ids"], expected)
             self.assertTrue(bool(item.facts["related_accounts_truncated"]))
             self.assertLessEqual(
                 cast(int, item.facts["returned_related_account_count"]), 2
             )
+        self.assertTrue(
+            all(
+                "related_account_ranking" not in item.facts
+                and "related_account_ids_truncated" in item.facts
+                for item in summary
+            )
+        )
 
     def test_activity_exposes_promotion_and_refund_without_labels(self) -> None:
         service = self.service(max_events_per_tool=20)
