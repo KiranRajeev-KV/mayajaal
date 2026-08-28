@@ -101,6 +101,7 @@ class InvestigationAgentService:
         model: BaseChatModel | None = None,
     ) -> None:
         self._config = config
+        self._uses_injected_model = model is not None
         self._model = model if model is not None else _build_openai_model(config)
 
     @property
@@ -140,6 +141,10 @@ class InvestigationAgentService:
             raise ValueError(
                 "evidence service and investigation agent must share one config instance"
             )
+        # Preserve the validated values that governed this run even if a caller
+        # later mutates its reusable Pydantic configuration object.
+        run_config = self._config.model_copy(deep=True)
+        run_agent_model_id = self._agent_model_id()
         context = InvestigationToolContext.create(
             request=request,
             evidence_service=evidence_service,
@@ -197,12 +202,15 @@ class InvestigationAgentService:
         return InvestigationExecution(
             report=report,
             snapshot=context.ledger.snapshot(),
-            agent_model_id=self._agent_model_id(),
+            agent_model_id=run_agent_model_id,
+            config=run_config,
         )
 
     def _agent_model_id(self) -> str:
-        """Return non-secret configured model identity for run provenance."""
-        if self._config.model_name is not None:
+        """Return the actual runtime model origin without secrets or credentials."""
+        if not self._uses_injected_model:
+            if self._config.model_name is None:
+                raise AssertionError("production model requires configured model_name")
             return self._config.model_name
         model_type = type(self._model)
         return f"injected:{model_type.__module__}.{model_type.__qualname__}"
@@ -216,7 +224,10 @@ def _build_openai_model(config: InvestigationConfig) -> ChatOpenAI:
         )
     if not os.environ.get("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY must be set for an OpenAI investigation run")
-    return ChatOpenAI(model=config.model_name)
+    return ChatOpenAI(
+        model=config.model_name,
+        reasoning_effort=config.reasoning_effort,
+    )
 
 
 def _task(request: InvestigationRequest) -> str:

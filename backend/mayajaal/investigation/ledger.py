@@ -2,11 +2,17 @@
 
 from dataclasses import dataclass, field
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from mayajaal.schemas.common import SchemaModel
 
-from .models import EvidenceItem, InvestigationReport, InvestigationRequest
+from .allowlist import INVESTIGATION_TOOL_NAMES
+from .models import (
+    EvidenceItem,
+    InvestigationConfig,
+    InvestigationReport,
+    InvestigationRequest,
+)
 from .provenance import evidence_id
 
 
@@ -16,6 +22,14 @@ class InvestigationToolTrace(SchemaModel):
     call_index: int = Field(ge=1)
     tool_name: str = Field(min_length=1)
     returned_evidence_ids: tuple[str, ...]
+
+    @field_validator("tool_name")
+    @classmethod
+    def validate_fixed_allowlist(cls, value: str) -> str:
+        """Reject traces that did not invoke one of the five approved tools."""
+        if value not in INVESTIGATION_TOOL_NAMES:
+            raise ValueError("tool trace name is not in the fixed allowlist")
+        return value
 
 
 @dataclass(frozen=True)
@@ -33,6 +47,7 @@ class InvestigationExecution:
     report: InvestigationReport
     snapshot: EvidenceLedgerSnapshot
     agent_model_id: str
+    config: InvestigationConfig
 
 
 @dataclass
@@ -45,8 +60,8 @@ class EvidenceLedger:
 
     def record(self, tool_name: str, items: tuple[EvidenceItem, ...]) -> None:
         """Verify and record exactly one approved tool result in call order."""
-        if not tool_name:
-            raise ValueError("evidence tool name must be non-empty")
+        if tool_name not in INVESTIGATION_TOOL_NAMES:
+            raise ValueError("evidence tool name is not in the fixed allowlist")
         returned_ids: list[str] = []
         for item in items:
             _verify_evidence(item, self.request)
@@ -82,6 +97,8 @@ class EvidenceLedger:
         for trace in snapshot.tool_trace:
             if trace.call_index != expected_call_index:
                 raise ValueError("tool trace call indexes must be consecutive")
+            if trace.tool_name not in INVESTIGATION_TOOL_NAMES:
+                raise ValueError("tool trace name is not in the fixed allowlist")
             expected_call_index += 1
             trace_items: list[EvidenceItem] = []
             for item_id in trace.returned_evidence_ids:

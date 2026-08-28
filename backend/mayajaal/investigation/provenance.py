@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from mayajaal.scoring import canonical_hash
 
+from .allowlist import INVESTIGATION_TOOL_NAMES
 from .models import (
     EvidenceSource,
     EvidenceType,
@@ -58,12 +59,12 @@ def investigation_provenance(
     request: InvestigationRequest,
     config: InvestigationConfig,
     agent_model_id: str,
-    tool_allowlist: tuple[str, ...],
     snapshot: EvidenceLedgerSnapshot,
 ) -> dict[str, object]:
     """Return deterministic identity inputs for one bounded investigation run."""
     if not agent_model_id:
         raise ValueError("investigation agent model identity must be non-empty")
+    _validate_trace_allowlist(snapshot)
     return {
         "investigation_provenance_contract_version": INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
         "agent_prompt_contract_version": AGENT_PROMPT_CONTRACT_VERSION,
@@ -71,14 +72,13 @@ def investigation_provenance(
         "investigation_request": request.model_dump(mode="json"),
         "investigation_config": config.model_dump(mode="json"),
         "agent_model_id": agent_model_id,
-        "tool_allowlist": list(tool_allowlist),
+        "tool_allowlist": list(INVESTIGATION_TOOL_NAMES),
         "tool_trace": [_trace_semantics(trace) for trace in snapshot.tool_trace],
         "evidence_ids": [item.evidence_id for item in snapshot.evidence],
         "investigation_id": investigation_id(
             request=request,
             config=config,
             agent_model_id=agent_model_id,
-            tool_allowlist=tool_allowlist,
             snapshot=snapshot,
         ),
     }
@@ -89,12 +89,12 @@ def investigation_id(
     request: InvestigationRequest,
     config: InvestigationConfig,
     agent_model_id: str,
-    tool_allowlist: tuple[str, ...],
     snapshot: EvidenceLedgerSnapshot,
 ) -> str:
     """Hash run semantics, deliberately excluding nondeterministic report prose."""
     if not agent_model_id:
         raise ValueError("investigation agent model identity must be non-empty")
+    _validate_trace_allowlist(snapshot)
     return canonical_hash(
         {
             "investigation_provenance_contract_version": INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
@@ -103,7 +103,7 @@ def investigation_id(
             "investigation_request": request.model_dump(mode="json"),
             "investigation_config": config.model_dump(mode="json"),
             "agent_model_id": agent_model_id,
-            "tool_allowlist": list(tool_allowlist),
+            "tool_allowlist": list(INVESTIGATION_TOOL_NAMES),
             "tool_trace": [_trace_semantics(trace) for trace in snapshot.tool_trace],
             "evidence_ids": [item.evidence_id for item in snapshot.evidence],
         }
@@ -129,3 +129,11 @@ def _trace_semantics(trace: InvestigationToolTrace) -> dict[str, object]:
         "tool_name": trace.tool_name,
         "returned_evidence_ids": list(trace.returned_evidence_ids),
     }
+
+
+def _validate_trace_allowlist(snapshot: EvidenceLedgerSnapshot) -> None:
+    """Keep hash inputs bound to the same fixed tools used at runtime."""
+    if any(
+        trace.tool_name not in INVESTIGATION_TOOL_NAMES for trace in snapshot.tool_trace
+    ):
+        raise ValueError("tool trace name is not in the fixed allowlist")

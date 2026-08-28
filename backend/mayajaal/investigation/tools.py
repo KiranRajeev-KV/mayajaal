@@ -8,24 +8,18 @@ application code.
 
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Final
 
 from langchain_core.tools import BaseTool, tool
 from pydantic import JsonValue
 
 from mayajaal.scoring import ScoreObservation
 
+from .allowlist import INVESTIGATION_TOOL_NAMES as _INVESTIGATION_TOOL_NAMES
 from .ledger import EvidenceLedger
 from .models import InvestigationConfig, InvestigationRequest
 from .service import EvidenceService
 
-INVESTIGATION_TOOL_NAMES: Final[tuple[str, ...]] = (
-    "risk_explanation",
-    "identity_neighborhood",
-    "shared_identity_summary",
-    "related_activity",
-    "case_timeline",
-)
+INVESTIGATION_TOOL_NAMES = _INVESTIGATION_TOOL_NAMES
 
 
 class InvestigationToolBudgetExhausted(ValueError):

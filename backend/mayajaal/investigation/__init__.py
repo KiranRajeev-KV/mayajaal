@@ -28,6 +28,7 @@ from .models import (
     InvestigationTriggerConfig,
     InvestigationTriggerReason,
     InvestigationUsage,
+    ReasoningEffort,
     RelatedEntity,
 )
 from .provenance import (
@@ -82,6 +83,7 @@ __all__ = [
     "InvestigationTriggerConfig",
     "InvestigationTriggerReason",
     "InvestigationUsage",
+    "ReasoningEffort",
     "RelatedEntity",
     "build_investigation_tools",
     "evidence_id",

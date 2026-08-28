@@ -678,7 +678,10 @@ claim-free application-owned `FAILED` result.
 
 The optional non-secret `[investigation].model_name` must be explicitly set
 for a live run; Mayajaal deliberately supplies no default model because that is
-a deployment cost/quality decision. `ChatOpenAI` reads `OPENAI_API_KEY` only
+a deployment cost/quality decision. `[investigation].reasoning_effort` defaults
+to `"medium"` and accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+or `max`; OpenAI model support is provider/model-dependent, so compatibility is
+validated by the provider rather than guessed by Mayajaal. `ChatOpenAI` reads `OPENAI_API_KEY` only
 from the process environment. Keys are never stored in TOML, artifacts, logs,
 prompts, or source. Unit tests inject a fake chat model and make no OpenAI
 call. [`.env.example`](.env.example) is a shell template only (copy it to the
@@ -718,11 +721,19 @@ ScoreObservation
 → report_id
 ```
 
+`InvestigationExecution` snapshots the exact validated configuration that
+governed the run; artifact saving derives configuration only from that execution
+and loading checks it against the trusted expected configuration. Every trace
+entry must name one of the fixed five tools. A production-created `ChatOpenAI`
+records its configured model name; an injected/test model records an explicit
+`injected:<module>.<type>` identity instead, so provenance never claims an
+OpenAI model ran when it did not.
+
 `investigation_id` is SHA-256 over canonical JSON for the request/decision
-lineage, validated investigation configuration, non-secret agent model
-identity, fixed tool allowlist, prompt-contract version, deterministic tool
-trace, and returned evidence IDs. It intentionally excludes nondeterministic
-report wording. `report_id` separately hashes `investigation_id` and the
+lineage, validated investigation configuration (including reasoning effort),
+non-secret actual agent model identity, fixed tool allowlist, prompt-contract
+version, deterministic tool trace, and returned evidence IDs. It intentionally
+excludes nondeterministic report wording. `report_id` separately hashes `investigation_id` and the
 complete grounded report. `save_investigation_artifacts(...)` writes
 `investigation_provenance.json`, `evidence.json`, and
 `investigation_report.json` only after reconstructing the ledger and grounding

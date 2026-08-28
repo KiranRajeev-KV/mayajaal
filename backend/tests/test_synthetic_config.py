@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mayajaal.calibration import CalibrationConfig
 from mayajaal.evaluation import EvaluationConfig
-from mayajaal.investigation import InvestigationConfig
+from mayajaal.investigation import InvestigationConfig, ReasoningEffort
 from mayajaal.policy import PolicyConfig
 from mayajaal.synthetic.config import load_generation_config
 from mayajaal.synthetic.profile import DiagnosticProfile, PrevalenceProfile
@@ -58,6 +58,7 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.investigation.max_tool_calls, 8)
         self.assertEqual(config.investigation.max_risk_drivers, 5)
         self.assertIsNone(config.investigation.model_name)
+        self.assertIs(config.investigation.reasoning_effort, ReasoningEffort.MEDIUM)
         self.assertTrue(config.investigation.triggers.investigate_review)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
@@ -79,6 +80,17 @@ class SyntheticConfigTests(unittest.TestCase):
             _ = InvestigationConfig(max_risk_drivers=0)
         with self.assertRaises(ValueError):
             _ = InvestigationConfig(model_name="")
+        with self.assertRaises(ValueError):
+            _ = InvestigationConfig.model_validate({"reasoning_effort": "unsupported"})
+
+    def test_reasoning_effort_known_values_are_validated(self) -> None:
+        for value in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+            self.assertEqual(
+                InvestigationConfig.model_validate(
+                    {"reasoning_effort": value}
+                ).reasoning_effort,
+                value,
+            )
 
 
 if __name__ == "__main__":

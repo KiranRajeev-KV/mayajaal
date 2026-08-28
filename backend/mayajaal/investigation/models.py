@@ -85,6 +85,18 @@ class InvestigationTriggerConfig(SchemaModel):
     investigate_unstable_allow: bool = True
 
 
+class ReasoningEffort(StrEnum):
+    """Known reasoning-effort names; provider/model support remains specific."""
+
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
 class InvestigationConfig(SchemaModel):
     """Validated limits and non-secret model selection for investigations."""
 
@@ -97,6 +109,7 @@ class InvestigationConfig(SchemaModel):
     max_events_per_tool: int = Field(default=100, ge=1)
     max_risk_drivers: int = Field(default=5, ge=1)
     model_name: str | None = Field(default=None, min_length=1)
+    reasoning_effort: ReasoningEffort = ReasoningEffort.MEDIUM
     triggers: InvestigationTriggerConfig = Field(
         default_factory=InvestigationTriggerConfig
     )

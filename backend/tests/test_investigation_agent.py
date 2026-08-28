@@ -31,6 +31,7 @@ from mayajaal.investigation import (
     InvestigationRequest,
     InvestigationStatus,
     InvestigationSubjectType,
+    ReasoningEffort,
     evidence_id,
 )
 from mayajaal.policy import PolicyAction
@@ -369,6 +370,57 @@ class InvestigationAgentTests(unittest.TestCase):
                 evidence_service=other_service,  # type: ignore[arg-type]
                 score_observation=score(),
             )
+
+    def test_execution_snapshots_the_exact_runtime_config(self) -> None:
+        config = InvestigationConfig(
+            max_tool_calls=3, reasoning_effort=ReasoningEffort.HIGH
+        )
+        service = InvestigationAgentService(config=config, model=FakeChatModel())
+        evidence_service = RecordingEvidenceService(config)
+        fake_agent = FakeAgent(
+            state={
+                "structured_response": {
+                    "status": "INSUFFICIENT_EVIDENCE",
+                    "summary": "No evidence was retrieved.",
+                }
+            }
+        )
+        with patch.object(investigation_agent, "create_agent", return_value=fake_agent):
+            execution = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        self.assertEqual(execution.config, config)
+        self.assertIsNot(execution.config, config)
+        config.max_tool_calls = 4
+        self.assertEqual(execution.config.max_tool_calls, 3)
+
+    def test_injected_model_identity_never_claims_configured_openai_model(self) -> None:
+        service = InvestigationAgentService(
+            config=InvestigationConfig(model_name="approved-openai-model"),
+            model=FakeChatModel(),
+        )
+        identity = service._agent_model_id()  # pyright: ignore[reportPrivateUsage]
+        self.assertTrue(identity.startswith("injected:"))
+        self.assertNotEqual(identity, "approved-openai-model")
+
+    def test_production_openai_construction_receives_reasoning_effort(self) -> None:
+        config = InvestigationConfig(
+            model_name="approved-openai-model",
+            reasoning_effort=ReasoningEffort.MEDIUM,
+        )
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch.object(investigation_agent, "ChatOpenAI") as factory,
+        ):
+            _ = investigation_agent._build_openai_model(  # pyright: ignore[reportPrivateUsage]
+                config
+            )
+        factory.assert_called_once_with(
+            model="approved-openai-model",
+            reasoning_effort="medium",
+        )
 
     def test_fake_model_needs_no_api_key_and_openai_requires_only_environment_key(
         self,

@@ -25,13 +25,11 @@ from .provenance import (
     investigation_provenance,
     report_id,
 )
-from .tools import INVESTIGATION_TOOL_NAMES
 
 
 def save_investigation_artifacts(
     output_directory: Path,
     execution: InvestigationExecution,
-    config: InvestigationConfig,
 ) -> dict[str, Path]:
     """Verify a run from trusted contents before writing any report artifacts."""
     request = execution.report.request
@@ -39,9 +37,8 @@ def save_investigation_artifacts(
     validate_report_grounding(execution.report, request, snapshot)
     provenance = investigation_provenance(
         request=request,
-        config=config,
+        config=execution.config,
         agent_model_id=execution.agent_model_id,
-        tool_allowlist=INVESTIGATION_TOOL_NAMES,
         snapshot=snapshot,
     )
     investigation_id = str(provenance["investigation_id"])
@@ -106,6 +103,18 @@ def load_investigation_artifacts(
     )
     if report.request != request:
         raise ValueError("investigation report request does not match trusted request")
+    persisted_config = cast(
+        InvestigationConfig,
+        _model(
+            InvestigationConfig,
+            provenance.get("investigation_config"),
+            "investigation configuration",
+        ),
+    )
+    if persisted_config != config:
+        raise ValueError(
+            "investigation artifact configuration does not match trusted expected configuration"
+        )
     snapshot = EvidenceLedgerSnapshot(
         evidence=tuple(
             cast(EvidenceItem, _model(EvidenceItem, value, "evidence"))
@@ -125,7 +134,6 @@ def load_investigation_artifacts(
         request=request,
         config=config,
         agent_model_id=agent_model_id,
-        tool_allowlist=INVESTIGATION_TOOL_NAMES,
         snapshot=snapshot,
     )
     if provenance != expected_provenance:
@@ -146,7 +154,10 @@ def load_investigation_artifacts(
     ):
         raise ValueError("investigation report provenance or content mismatch")
     return InvestigationExecution(
-        report=report, snapshot=snapshot, agent_model_id=agent_model_id
+        report=report,
+        snapshot=snapshot,
+        agent_model_id=agent_model_id,
+        config=persisted_config,
     )
 
 

@@ -25,6 +25,8 @@ from mayajaal.investigation import (
     InvestigationRequest,
     InvestigationStatus,
     InvestigationSubjectType,
+    InvestigationToolTrace,
+    ReasoningEffort,
     RelatedEntity,
     evidence_id,
     investigation_id,
@@ -172,6 +174,40 @@ class InvestigationGroundingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ledger.record("shared_identity_summary", (conflicting,))
 
+    def test_tool_trace_is_restricted_to_the_fixed_allowlist(self) -> None:
+        ledger, shared, _ = self.ledger()
+        with self.assertRaisesRegex(ValueError, "fixed allowlist"):
+            ledger.record("custom_query", (shared,))
+
+        forged_trace = InvestigationToolTrace.model_construct(
+            call_index=1,
+            tool_name="custom_query",
+            returned_evidence_ids=(shared.evidence_id,),
+        )
+        forged_snapshot = EvidenceLedgerSnapshot(
+            evidence=(shared,), tool_trace=(forged_trace,)
+        )
+        with self.assertRaisesRegex(ValueError, "fixed allowlist"):
+            _ = EvidenceLedger.from_snapshot(request(), forged_snapshot)
+
+        valid_report = InvestigationReport(
+            request=request(),
+            policy_action=PolicyAction.REVIEW,
+            status=InvestigationStatus.INSUFFICIENT_EVIDENCE,
+            summary="No factual finding is asserted.",
+        )
+        forged_execution = InvestigationExecution(
+            report=valid_report,
+            snapshot=forged_snapshot,
+            agent_model_id="fixture-model",
+            config=InvestigationConfig(),
+        )
+        with (
+            TemporaryDirectory() as directory,
+            self.assertRaisesRegex(ValueError, "fixed allowlist"),
+        ):
+            _ = save_investigation_artifacts(Path(directory), forged_execution)
+
     def test_grounding_rejects_invented_finding_counterevidence_and_timeline_ids(
         self,
     ) -> None:
@@ -240,7 +276,6 @@ class InvestigationGroundingTests(unittest.TestCase):
             request=request(),
             config=config,
             agent_model_id="fixture-model",
-            tool_allowlist=("shared_identity_summary", "case_timeline"),
             snapshot=snapshot,
         )
         self.assertEqual(
@@ -249,7 +284,6 @@ class InvestigationGroundingTests(unittest.TestCase):
                 request=request(),
                 config=config,
                 agent_model_id="fixture-model",
-                tool_allowlist=("shared_identity_summary", "case_timeline"),
                 snapshot=snapshot,
             ),
         )
@@ -263,7 +297,18 @@ class InvestigationGroundingTests(unittest.TestCase):
                 request=request(),
                 config=changed_config,
                 agent_model_id="fixture-model",
-                tool_allowlist=("shared_identity_summary", "case_timeline"),
+                snapshot=snapshot,
+            ),
+        )
+        changed_reasoning_effort = InvestigationConfig(
+            reasoning_effort=ReasoningEffort.HIGH
+        )
+        self.assertNotEqual(
+            first,
+            investigation_id(
+                request=request(),
+                config=changed_reasoning_effort,
+                agent_model_id="fixture-model",
                 snapshot=snapshot,
             ),
         )
@@ -273,17 +318,6 @@ class InvestigationGroundingTests(unittest.TestCase):
                 request=request(),
                 config=config,
                 agent_model_id="different-model",
-                tool_allowlist=("shared_identity_summary", "case_timeline"),
-                snapshot=snapshot,
-            ),
-        )
-        self.assertNotEqual(
-            first,
-            investigation_id(
-                request=request(),
-                config=config,
-                agent_model_id="fixture-model",
-                tool_allowlist=("case_timeline", "shared_identity_summary"),
                 snapshot=snapshot,
             ),
         )
@@ -300,7 +334,6 @@ class InvestigationGroundingTests(unittest.TestCase):
                 request=request(),
                 config=config,
                 agent_model_id="fixture-model",
-                tool_allowlist=("shared_identity_summary", "case_timeline"),
                 snapshot=changed_ledger.snapshot(),
             ),
         )
@@ -314,10 +347,11 @@ class InvestigationGroundingTests(unittest.TestCase):
             report=report,
             snapshot=ledger.snapshot(),
             agent_model_id="fixture-model",
+            config=InvestigationConfig(),
         )
         with TemporaryDirectory() as directory:
             output = Path(directory)
-            _ = save_investigation_artifacts(output, execution, InvestigationConfig())
+            _ = save_investigation_artifacts(output, execution)
             loaded = load_investigation_artifacts(
                 output,
                 request(),
@@ -325,6 +359,13 @@ class InvestigationGroundingTests(unittest.TestCase):
                 agent_model_id="fixture-model",
             )
             self.assertEqual(loaded, execution)
+            with self.assertRaisesRegex(ValueError, "trusted expected configuration"):
+                load_investigation_artifacts(
+                    output,
+                    request(),
+                    InvestigationConfig(max_tool_calls=9),
+                    agent_model_id="fixture-model",
+                )
             with self.assertRaisesRegex(ValueError, "trusted request"):
                 load_investigation_artifacts(
                     output,
@@ -343,7 +384,19 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(),
                     agent_model_id="fixture-model",
                 )
-            _ = save_investigation_artifacts(output, execution, InvestigationConfig())
+            _ = save_investigation_artifacts(output, execution)
+            trace_document = json.loads(evidence_path.read_text(encoding="utf-8"))
+            trace_document["tool_trace"][0]["tool_name"] = "custom_query"
+            evidence_path.write_text(json.dumps(trace_document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "tool trace"):
+                load_investigation_artifacts(
+                    output,
+                    request(),
+                    InvestigationConfig(),
+                    agent_model_id="fixture-model",
+                )
+
+            _ = save_investigation_artifacts(output, execution)
             report_path = output / "investigation_report.json"
             document = json.loads(report_path.read_text(encoding="utf-8"))
             document["report"]["summary"] = "tampered"
@@ -355,7 +408,7 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(),
                     agent_model_id="fixture-model",
                 )
-            _ = save_investigation_artifacts(output, execution, InvestigationConfig())
+            _ = save_investigation_artifacts(output, execution)
             for path in output.glob("*.json"):
                 self.assertNotIn("OPENAI_API_KEY", path.read_text(encoding="utf-8"))
             provenance_path = output / "investigation_provenance.json"

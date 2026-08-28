@@ -155,6 +155,9 @@ max_risk_drivers = 5
 # run. It is intentionally unset here: model choice is a deployment cost/quality
 # decision, while OPENAI_API_KEY must come only from the environment.
 # model_name = "<approved-openai-model>"
+# Non-secret reasoning budget for compatible OpenAI reasoning models. Supported
+# values are model-dependent; Mayajaal passes this through without guessing.
+reasoning_effort = "medium"
 
 [investigation.triggers]
 # A stable ALLOW is skipped. Review, block, and an unstable ALLOW open a future
