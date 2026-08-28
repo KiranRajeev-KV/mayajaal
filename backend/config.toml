@@ -138,9 +138,11 @@ optimistic_odds_multiplier = 0.5
 stressed_odds_multiplier = 2.0
 
 [investigation]
-# Future read-only investigation limits. They do not create tools or alter the
-# merchant action; any future evidence collection must remain within them.
+# Bounded investigation limits. They do not alter the merchant action; evidence
+# collection and the model loop must remain within them.
 max_tool_calls = 8
+# Maximum LangChain model calls in one investigation run, including calls made
+# after evidence tools. This is a hard execution cap, not a prompt instruction.
 max_iterations = 4
 max_graph_hops = 2
 max_graph_nodes = 200
@@ -149,6 +151,10 @@ max_related_accounts = 50
 max_events_per_tool = 100
 # Maximum positive and negative raw-score TreeSHAP drivers per explanation.
 max_risk_drivers = 5
+# Configure a non-secret OpenAI model explicitly before a live investigation
+# run. It is intentionally unset here: model choice is a deployment cost/quality
+# decision, while OPENAI_API_KEY must come only from the environment.
+# model_name = "<approved-openai-model>"
 
 [investigation.triggers]
 # A stable ALLOW is skipped. Review, block, and an unstable ALLOW open a future

@@ -86,7 +86,7 @@ class InvestigationTriggerConfig(SchemaModel):
 
 
 class InvestigationConfig(SchemaModel):
-    """Validated hard limits for future read-only investigation tools."""
+    """Validated limits and non-secret model selection for investigations."""
 
     max_tool_calls: int = Field(default=8, ge=1)
     max_iterations: int = Field(default=4, ge=1)
@@ -96,6 +96,7 @@ class InvestigationConfig(SchemaModel):
     max_related_accounts: int = Field(default=50, ge=1)
     max_events_per_tool: int = Field(default=100, ge=1)
     max_risk_drivers: int = Field(default=5, ge=1)
+    model_name: str | None = Field(default=None, min_length=1)
     triggers: InvestigationTriggerConfig = Field(
         default_factory=InvestigationTriggerConfig
     )

@@ -96,6 +96,11 @@ class EvidenceService:
             (node.node_type, node.canonical_id): node for node in projection.nodes
         }
 
+    @property
+    def config(self) -> InvestigationConfig:
+        """Return the exact validated limits supplied by trusted application code."""
+        return self._config
+
     def get_risk_explanation(
         self,
         request: InvestigationRequest,

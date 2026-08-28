@@ -68,6 +68,7 @@ class InvestigationToolContext:
     request: InvestigationRequest
     evidence_service: EvidenceService
     score_observation: ScoreObservation
+    config: InvestigationConfig
     budget: InvestigationToolBudget = field(repr=False)
 
     @classmethod
@@ -91,6 +92,7 @@ class InvestigationToolContext:
             request=request,
             evidence_service=evidence_service,
             score_observation=score_observation,
+            config=config,
             budget=InvestigationToolBudget(max_tool_calls=config.max_tool_calls),
         )
 

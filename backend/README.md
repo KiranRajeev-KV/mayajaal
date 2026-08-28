@@ -544,7 +544,11 @@ InvestigationRequest
       ↓
 bounded deterministic evidence collection
       ↓
-future structured InvestigationReport
+bounded LangChain/OpenAI agent
+      ↓
+5 deterministic evidence tools
+      ↓
+structured InvestigationReport
 ```
 
 `InvestigationRequest.from_policy_decision(...)` verifies the supplied
@@ -630,13 +634,49 @@ EvidenceService
 bounded EvidenceItem[]
 ```
 
-LangChain may choose which approved tool to call in a later orchestration
-slice. It does **not** choose a database/query, subject, cutoff, graph hop,
+The bounded LangChain agent may choose which approved tool to call. It does
+**not** choose a database/query, subject, cutoff, graph hop,
 node/edge, related-account, or event limit: those fields do not appear in the
 tool JSON schemas and come only from trusted runtime context and validated
-configuration. The adapter depends only on `langchain-core`; it has no OpenAI
-SDK, provider, model call, prompt, agent loop, LangGraph, network, or write
-capability. Retrieved facts remain untrusted data, never instructions.
+configuration. Retrieved facts remain untrusted data, never instructions.
+
+### Bounded LangChain/OpenAI investigation agent
+
+`InvestigationAgentService` is the framework-isolated orchestration boundary.
+It creates `langchain.agents.create_agent(...)` for one fixed task constructed
+only from a trusted `InvestigationRequest`. It receives exactly the five tools
+above; there is no caller-provided prompt, dynamic tool registration, web,
+shell, filesystem, SQL/Cypher, database, network, write, policy, or
+enforcement capability. The existing `InvestigationToolContext` keeps the
+same validated `InvestigationConfig` instance flowing from `EvidenceService`
+through the tool adapter and agent, so trusted bounds cannot drift.
+
+The model-facing Pydantic output can determine investigation status, pattern,
+evidence-referenced findings, counterevidence, related entities, summary, and
+limitations. Application code supplies the immutable request, its existing
+policy action, and actual budget usage when it constructs
+`InvestigationReport`; the model cannot replace merchant policy authority.
+The fixed system instructions require evidence citations, counterevidence,
+uncertainty, and an `INCONCLUSIVE` or `INSUFFICIENT_EVIDENCE` result when the
+facts are insufficient. TreeSHAP is explicitly framed as a model explanation,
+not factual proof.
+
+`max_tool_calls` remains an atomic shared cap across all evidence tools.
+`max_iterations` now means the hard LangChain run-level model-call cap, enforced
+outside the prompt by `ModelCallLimitMiddleware(..., exit_behavior="error")`.
+Either exhausted budget returns a typed `BUDGET_EXHAUSTED` report with no model
+claims. Other provider and structured-output errors propagate rather than
+being disguised as evidence-based reports.
+
+The optional non-secret `[investigation].model_name` must be explicitly set
+for a live run; Mayajaal deliberately supplies no default model because that is
+a deployment cost/quality decision. `ChatOpenAI` reads `OPENAI_API_KEY` only
+from the process environment. Keys are never stored in TOML, artifacts, logs,
+prompts, or source. Unit tests inject a fake chat model and make no OpenAI
+call. [`.env.example`](.env.example) is a shell template only (copy it to the
+gitignored `.env` and `source .env`); Mayajaal does not auto-load dotenv files.
+This slice uses LangChain's agent runtime only through `create_agent`;
+Mayajaal contains no direct LangGraph orchestration code.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

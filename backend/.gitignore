@@ -9,5 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
+# Local provider credentials. Keep the tracked .env.example as the template.
+.env
+
 # Locally generated synthetic datasets
 artifacts/

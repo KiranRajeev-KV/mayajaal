@@ -57,6 +57,7 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.policy.sensitivity.stressed_odds_multiplier, 2.0)
         self.assertEqual(config.investigation.max_tool_calls, 8)
         self.assertEqual(config.investigation.max_risk_drivers, 5)
+        self.assertIsNone(config.investigation.model_name)
         self.assertTrue(config.investigation.triggers.investigate_review)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
@@ -76,6 +77,8 @@ class SyntheticConfigTests(unittest.TestCase):
             _ = InvestigationConfig(max_related_accounts=0)
         with self.assertRaises(ValueError):
             _ = InvestigationConfig(max_risk_drivers=0)
+        with self.assertRaises(ValueError):
+            _ = InvestigationConfig(model_name="")
 
 
 if __name__ == "__main__":
