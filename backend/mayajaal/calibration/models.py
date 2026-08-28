@@ -55,6 +55,7 @@ class ProbabilityEstimate:
     probability_estimate_id: str
     raw_model_score: float
     calibrated_probability: float
+    scoring_cutoff: AwareDatetime
     scoring_context_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -72,6 +73,11 @@ class ProbabilityEstimate:
             raise ValueError("calibrated probability must be finite and within [0, 1]")
         if self.scoring_context_id == "":
             raise ValueError("scoring_context_id must be non-empty when provided")
+        if (
+            self.scoring_cutoff.tzinfo is None
+            or self.scoring_cutoff.utcoffset() is None
+        ):
+            raise ValueError("scoring_cutoff must include a timezone offset")
 
 
 @dataclass(frozen=True)

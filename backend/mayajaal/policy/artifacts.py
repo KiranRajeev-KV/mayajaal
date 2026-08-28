@@ -1,6 +1,7 @@
 """Portable artifact writers and verifiers for deterministic policy decisions."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -79,6 +80,7 @@ def load_policy_decision(
         "decision_is_stable_across_scenarios",
         "raw_model_score",
         "scoring_context_id",
+        "scoring_cutoff",
     }
     if set(document) != required:
         raise ValueError("policy decision artifact has unsupported or missing fields")
@@ -97,6 +99,7 @@ def load_policy_decision(
     scoring_context_id = document["scoring_context_id"]
     if scoring_context_id is not None and not isinstance(scoring_context_id, str):
         raise ValueError("invalid scoring_context_id in policy decision")
+    scoring_cutoff = _aware_datetime(document["scoring_cutoff"], "scoring_cutoff")
     estimate = ProbabilityEstimate(
         base_model_id=str(document["base_model_id"]),
         probability_model_id=str(document["probability_model_id"]),
@@ -106,6 +109,7 @@ def load_policy_decision(
             document["calibrated_fraud_probability"], "calibrated_fraud_probability"
         ),
         scoring_context_id=scoring_context_id,
+        scoring_cutoff=scoring_cutoff,
     )
     verify_probability_estimate(estimate, probability_model)
     if estimate.probability_estimate_id != document["probability_estimate_id"]:
@@ -136,6 +140,18 @@ def _finite_float(value: object, name: str) -> float:
     return float(value)
 
 
+def _aware_datetime(value: object, name: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"invalid {name} in policy decision")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"invalid {name} in policy decision") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone offset")
+    return parsed
+
+
 def _decision_document(decision: PolicyDecision) -> dict[str, object]:
     """Serialize exactly the semantics needed to reconstruct and verify a decision."""
     return {
@@ -148,6 +164,7 @@ def _decision_document(decision: PolicyDecision) -> dict[str, object]:
         "raw_model_score": decision.raw_model_score,
         "calibrated_fraud_probability": decision.calibrated_fraud_probability,
         "scoring_context_id": decision.scoring_context_id,
+        "scoring_cutoff": decision.scoring_cutoff.isoformat(),
         "context": decision.context.model_dump(mode="json"),
         "chosen_action": decision.chosen_action.value,
         "expected_costs": [_cost_document(cost) for cost in decision.expected_costs],

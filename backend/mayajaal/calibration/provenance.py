@@ -3,6 +3,7 @@
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -14,7 +15,7 @@ from .models import (
 )
 
 CALIBRATION_PROVENANCE_CONTRACT_VERSION = 1
-PROBABILITY_ESTIMATE_CONTRACT_VERSION = 1
+PROBABILITY_ESTIMATE_CONTRACT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -118,8 +119,11 @@ def probability_estimate_semantics(
     raw_model_score: float,
     calibrated_probability: float,
     scoring_context_id: str | None,
+    scoring_cutoff: datetime,
 ) -> dict[str, object]:
     """Return canonical semantic inputs for one score-derived probability."""
+    if scoring_cutoff.tzinfo is None or scoring_cutoff.utcoffset() is None:
+        raise ValueError("scoring_cutoff must include a timezone offset")
     return {
         "probability_estimate_contract_version": probability_estimate_contract_version,
         "base_model_id": base_model_id,
@@ -127,6 +131,7 @@ def probability_estimate_semantics(
         "raw_model_score": raw_model_score,
         "calibrated_probability": calibrated_probability,
         "scoring_context_id": scoring_context_id,
+        "scoring_cutoff": scoring_cutoff.isoformat(),
     }
 
 
@@ -138,6 +143,7 @@ def probability_estimate_id(
     raw_model_score: float,
     calibrated_probability: float,
     scoring_context_id: str | None,
+    scoring_cutoff: datetime,
 ) -> str:
     """Hash the semantic score-to-probability result, not its storage location."""
     return canonical_hash(
@@ -148,6 +154,7 @@ def probability_estimate_id(
             raw_model_score=raw_model_score,
             calibrated_probability=calibrated_probability,
             scoring_context_id=scoring_context_id,
+            scoring_cutoff=scoring_cutoff,
         )
     )
 
@@ -157,6 +164,7 @@ def estimate_probability(
     raw_model_score: float,
     *,
     scoring_context_id: str | None = None,
+    scoring_cutoff: datetime,
 ) -> ProbabilityEstimate:
     """Derive one probability only through a previously verified mapping."""
     from .service import predict_probability
@@ -174,10 +182,12 @@ def estimate_probability(
             raw_model_score=raw_model_score,
             calibrated_probability=calibrated_probability,
             scoring_context_id=scoring_context_id,
+            scoring_cutoff=scoring_cutoff,
         ),
         raw_model_score=raw_model_score,
         calibrated_probability=calibrated_probability,
         scoring_context_id=scoring_context_id,
+        scoring_cutoff=scoring_cutoff,
     )
 
 
@@ -197,6 +207,7 @@ def verify_probability_estimate(
         probability_model,
         estimate.raw_model_score,
         scoring_context_id=estimate.scoring_context_id,
+        scoring_cutoff=estimate.scoring_cutoff,
     )
     if estimate != expected:
         raise ValueError(

@@ -72,7 +72,7 @@ held-out-evaluate *args:
 calibration-evaluate *args:
     just --justfile {{backend_justfile}} calibration-evaluate {{args}}
 
-# Forward one verified-probability decision context to the policy CLI.
+# Forward one verified-probability decision context and scoring cutoff to the policy CLI.
 policy-decide *args:
     just --justfile {{backend_justfile}} policy-decide {{args}}
 

@@ -3,6 +3,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import cast
 
@@ -11,7 +12,7 @@ from mayajaal.calibration import ProbabilityModel
 from .models import ActionCost, DecisionContext, PolicyConfig, ScenarioDecision
 
 POLICY_PROVENANCE_CONTRACT_VERSION = 2
-DECISION_PROVENANCE_CONTRACT_VERSION = 1
+DECISION_PROVENANCE_CONTRACT_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ def decision_semantics(
     probability_estimate_id: str,
     policy_id: str,
     calibrated_fraud_probability: float,
+    scoring_cutoff: datetime,
     context: DecisionContext,
     chosen_action: str,
     expected_costs: tuple[ActionCost, ...],
@@ -125,6 +127,7 @@ def decision_semantics(
         "probability_estimate_id": probability_estimate_id,
         "policy_id": policy_id,
         "calibrated_fraud_probability": calibrated_fraud_probability,
+        "scoring_cutoff": scoring_cutoff.isoformat(),
         "context": context.model_dump(mode="json"),
         "chosen_action": chosen_action,
         "expected_costs": [_cost_semantics(cost) for cost in expected_costs],

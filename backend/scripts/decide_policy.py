@@ -1,6 +1,7 @@
 """Make one auditable expected-cost decision from a verified calibrated model."""
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 from mayajaal.calibration import estimate_probability, load_probability_model
@@ -31,6 +32,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--exposure-paise", type=int, required=True)
     parser.add_argument("--context-id", type=str)
     parser.add_argument(
+        "--scoring-cutoff",
+        type=datetime.fromisoformat,
+        required=True,
+        help="Timezone-aware cutoff used to construct the raw-model score.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         help="Defaults to <output.directory>/policy-decision",
@@ -46,6 +53,11 @@ def _resolve_path(path: Path, config_directory: Path) -> Path:
 def main() -> int:
     """Verify calibrated lineage, apply merchant costs, and persist one decision."""
     arguments = parse_arguments()
+    if (
+        arguments.scoring_cutoff.tzinfo is None
+        or arguments.scoring_cutoff.utcoffset() is None
+    ):
+        raise ValueError("--scoring-cutoff must include a timezone offset")
     config_path = arguments.config.resolve()
     config = load_generation_config(config_path)
     calibration_directory = _resolve_path(
@@ -65,6 +77,7 @@ def main() -> int:
         probability_model,
         arguments.raw_model_score,
         scoring_context_id=arguments.context_id,
+        scoring_cutoff=arguments.scoring_cutoff,
     )
     decision = decide(
         policy_model,

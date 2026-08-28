@@ -1,11 +1,15 @@
 """Framework-neutral contracts for bounded, read-only investigations."""
 
-from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
 
 from pydantic import Field, JsonValue, model_validator
 
+from mayajaal.calibration import (
+    ProbabilityEstimate,
+    ProbabilityModel,
+    verify_probability_estimate,
+)
 from mayajaal.policy import PolicyAction, PolicyDecision
 from mayajaal.schemas.common import AwareDatetime, SchemaModel
 
@@ -29,6 +33,36 @@ class InvestigationPattern(StrEnum):
     MIXED_ABUSE = "MIXED_ABUSE"
     BENIGN_SHARED_IDENTITY = "BENIGN_SHARED_IDENTITY"
     INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class InvestigationSubjectType(StrEnum):
+    """Subject types eligible for the initial account-scored workflow."""
+
+    ACCOUNT = "ACCOUNT"
+
+
+class EvidenceSource(StrEnum):
+    """Closed, read-only evidence sources allowed for the next slice."""
+
+    MODEL_EXPLANATION = "MODEL_EXPLANATION"
+    TEMPORAL_GRAPH = "TEMPORAL_GRAPH"
+    EVENT_HISTORY = "EVENT_HISTORY"
+    IDENTITY_SUMMARY = "IDENTITY_SUMMARY"
+    CASE_TIMELINE = "CASE_TIMELINE"
+
+
+class EvidenceType(StrEnum):
+    """Closed factual evidence types allowed for the next slice."""
+
+    RISK_DRIVER = "RISK_DRIVER"
+    SHARED_DEVICE = "SHARED_DEVICE"
+    SHARED_PAYMENT_IDENTITY = "SHARED_PAYMENT_IDENTITY"
+    SHARED_IP = "SHARED_IP"
+    SHARED_ADDRESS = "SHARED_ADDRESS"
+    RELATED_ACCOUNT_ACTIVITY = "RELATED_ACCOUNT_ACTIVITY"
+    PROMOTION_ACTIVITY = "PROMOTION_ACTIVITY"
+    REFUND_ACTIVITY = "REFUND_ACTIVITY"
+    TIMELINE_EVENT = "TIMELINE_EVENT"
 
 
 class InvestigationTriggerReason(StrEnum):
@@ -88,8 +122,10 @@ class InvestigationRequest(SchemaModel):
     decision_id: NonEmptyId
     policy_id: NonEmptyId
     probability_estimate_id: NonEmptyId
+    subject_type: InvestigationSubjectType
     subject_id: NonEmptyId
     cutoff_time: AwareDatetime
+    context_id: str | None = Field(default=None, min_length=1)
     policy_action: PolicyAction
     decision_is_stable_across_scenarios: bool
 
@@ -97,17 +133,37 @@ class InvestigationRequest(SchemaModel):
     def from_policy_decision(
         cls,
         decision: PolicyDecision,
+        probability_model: ProbabilityModel,
+        probability_estimate: ProbabilityEstimate,
         *,
+        subject_type: InvestigationSubjectType = InvestigationSubjectType.ACCOUNT,
         subject_id: str,
-        cutoff_time: datetime,
     ) -> "InvestigationRequest":
-        """Bind a request to policy lineage without recalculating policy state."""
+        """Bind a request to a verified score and its immutable policy decision."""
+        verified_estimate = verify_probability_estimate(
+            probability_estimate, probability_model
+        )
+        if (
+            decision.base_model_id != verified_estimate.base_model_id
+            or decision.probability_model_id != verified_estimate.probability_model_id
+            or decision.probability_estimate_id
+            != verified_estimate.probability_estimate_id
+            or decision.raw_model_score != verified_estimate.raw_model_score
+            or decision.calibrated_fraud_probability
+            != verified_estimate.calibrated_probability
+            or decision.scoring_cutoff != verified_estimate.scoring_cutoff
+        ):
+            raise ValueError(
+                "policy decision does not match verified probability estimate"
+            )
         return cls(
             decision_id=decision.decision_id,
             policy_id=decision.policy_id,
             probability_estimate_id=decision.probability_estimate_id,
+            subject_type=subject_type,
             subject_id=subject_id,
-            cutoff_time=cutoff_time,
+            cutoff_time=verified_estimate.scoring_cutoff,
+            context_id=decision.context.context_id,
             policy_action=decision.chosen_action,
             decision_is_stable_across_scenarios=decision.decision_is_stable_across_scenarios,
         )
@@ -117,8 +173,8 @@ class EvidenceItem(SchemaModel):
     """One factual observation known no later than the request cutoff."""
 
     evidence_id: NonEmptyId
-    evidence_type: NonEmptyId
-    source: NonEmptyId
+    evidence_type: EvidenceType
+    source: EvidenceSource
     observed_at: AwareDatetime
     cutoff_time: AwareDatetime
     subject_ids: tuple[NonEmptyId, ...] = Field(min_length=1)

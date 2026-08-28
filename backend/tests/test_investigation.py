@@ -2,6 +2,7 @@
 
 import inspect
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from math import log
 
@@ -16,11 +17,14 @@ from mayajaal.calibration import (
 from mayajaal.investigation import (
     EvidenceFinding,
     EvidenceItem,
+    EvidenceSource,
+    EvidenceType,
     InvestigationConfig,
     InvestigationPattern,
     InvestigationReport,
     InvestigationRequest,
     InvestigationStatus,
+    InvestigationSubjectType,
     InvestigationTriggerConfig,
     InvestigationTriggerReason,
     RelatedEntity,
@@ -48,20 +52,28 @@ def probability_model() -> ProbabilityModel:
     )
 
 
-def decision(probability: float, *, exposure_paise: int = 250_000):
+def scored_decision(probability: float, *, exposure_paise: int = 250_000):
     """Create one verified policy decision without any model-training concern."""
     probability_parent = probability_model()
     estimate = estimate_probability(
         probability_parent,
         log(probability / (1.0 - probability)),
         scoring_context_id="order-123",
+        scoring_cutoff=cutoff(),
     )
-    return decide(
-        build_policy_model(probability_parent, PolicyConfig()),
+    policy_model = build_policy_model(probability_parent, PolicyConfig())
+    policy_decision = decide(
+        policy_model,
         probability_parent,
         estimate,
         DecisionContext(exposure_paise=exposure_paise, context_id="order-123"),
     )
+    return probability_parent, estimate, policy_decision
+
+
+def decision(probability: float, *, exposure_paise: int = 250_000):
+    """Return only the policy decision for trigger-focused fixtures."""
+    return scored_decision(probability, exposure_paise=exposure_paise)[2]
 
 
 def cutoff() -> datetime:
@@ -115,10 +127,15 @@ class InvestigationContractTests(unittest.TestCase):
                 trigger.reason, InvestigationTriggerReason.DISABLED_BY_CONFIG
             )
 
-    def test_request_binds_decision_lineage_and_requires_aware_cutoff(self) -> None:
-        policy_decision = decision(0.05)
+    def test_request_binds_decision_lineage_to_verified_scoring_cutoff(self) -> None:
+        probability_parent, probability_estimate, policy_decision = scored_decision(
+            0.05
+        )
         request = InvestigationRequest.from_policy_decision(
-            policy_decision, subject_id="account-123", cutoff_time=cutoff()
+            policy_decision,
+            probability_parent,
+            probability_estimate,
+            subject_id="account-123",
         )
         self.assertEqual(request.decision_id, policy_decision.decision_id)
         self.assertEqual(request.policy_id, policy_decision.policy_id)
@@ -126,6 +143,11 @@ class InvestigationContractTests(unittest.TestCase):
             request.probability_estimate_id, policy_decision.probability_estimate_id
         )
         self.assertIs(request.policy_action, policy_decision.chosen_action)
+        self.assertEqual(request.cutoff_time, probability_estimate.scoring_cutoff)
+        self.assertEqual(request.cutoff_time, policy_decision.scoring_cutoff)
+        self.assertIs(request.subject_type, InvestigationSubjectType.ACCOUNT)
+        self.assertEqual(request.subject_id, "account-123")
+        self.assertEqual(request.context_id, "order-123")
         self.assertEqual(
             request.decision_is_stable_across_scenarios,
             policy_decision.decision_is_stable_across_scenarios,
@@ -135,16 +157,45 @@ class InvestigationContractTests(unittest.TestCase):
                 decision_id="",
                 policy_id="policy-1",
                 probability_estimate_id="estimate-1",
+                subject_type=InvestigationSubjectType.ACCOUNT,
                 subject_id="account-1",
                 cutoff_time=cutoff(),
                 policy_action=PolicyAction.REVIEW,
                 decision_is_stable_across_scenarios=True,
             )
         with self.assertRaises(ValueError):
-            _ = InvestigationRequest.from_policy_decision(
-                policy_decision,
+            _ = InvestigationRequest(
+                decision_id="decision-1",
+                policy_id="policy-1",
+                probability_estimate_id="estimate-1",
+                subject_type=InvestigationSubjectType.ACCOUNT,
                 subject_id="account-123",
                 cutoff_time=datetime(2026, 5, 1, 12, 0),  # noqa: DTZ001
+                policy_action=PolicyAction.REVIEW,
+                decision_is_stable_across_scenarios=True,
+            )
+        changed_cutoff_estimate = estimate_probability(
+            probability_parent,
+            probability_estimate.raw_model_score,
+            scoring_context_id=probability_estimate.scoring_context_id,
+            scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+        )
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            _ = InvestigationRequest.from_policy_decision(
+                policy_decision,
+                probability_parent,
+                changed_cutoff_estimate,
+                subject_id="account-123",
+            )
+        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+            _ = InvestigationRequest.from_policy_decision(
+                policy_decision,
+                probability_parent,
+                replace(
+                    probability_estimate,
+                    scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+                ),
+                subject_id="account-123",
             )
 
     def test_investigation_budgets_are_validated(self) -> None:
@@ -160,8 +211,8 @@ class InvestigationContractTests(unittest.TestCase):
     def test_evidence_requires_structured_cutoff_safe_label_free_facts(self) -> None:
         evidence = EvidenceItem(
             evidence_id="evidence-1",
-            evidence_type="identity_reuse",
-            source="temporal_graph",
+            evidence_type=EvidenceType.SHARED_DEVICE,
+            source=EvidenceSource.TEMPORAL_GRAPH,
             observed_at=cutoff(),
             cutoff_time=cutoff(),
             subject_ids=("account-123", "device-456"),
@@ -171,8 +222,8 @@ class InvestigationContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "after cutoff_time"):
             _ = EvidenceItem(
                 evidence_id="evidence-1",
-                evidence_type="identity_reuse",
-                source="temporal_graph",
+                evidence_type=EvidenceType.SHARED_DEVICE,
+                source=EvidenceSource.TEMPORAL_GRAPH,
                 observed_at=datetime(2026, 5, 1, 12, 1, tzinfo=UTC),
                 cutoff_time=cutoff(),
                 subject_ids=("account-123",),
@@ -181,8 +232,8 @@ class InvestigationContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "evaluation-only label"):
             _ = EvidenceItem(
                 evidence_id="evidence-1",
-                evidence_type="identity_reuse",
-                source="temporal_graph",
+                evidence_type=EvidenceType.SHARED_DEVICE,
+                source=EvidenceSource.TEMPORAL_GRAPH,
                 observed_at=cutoff(),
                 cutoff_time=cutoff(),
                 subject_ids=("account-123",),
@@ -191,19 +242,37 @@ class InvestigationContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _ = EvidenceItem(
                 evidence_id="",
-                evidence_type="identity_reuse",
-                source="temporal_graph",
+                evidence_type=EvidenceType.SHARED_DEVICE,
+                source=EvidenceSource.TEMPORAL_GRAPH,
                 observed_at=cutoff(),
                 cutoff_time=cutoff(),
                 subject_ids=(),
                 facts={},
             )
+        with self.assertRaises(ValueError):
+            _ = EvidenceItem.model_validate(
+                {
+                    "evidence_id": "evidence-1",
+                    "evidence_type": "ARBITRARY_TYPE",
+                    "source": "ARBITRARY_SOURCE",
+                    "observed_at": cutoff().isoformat(),
+                    "cutoff_time": cutoff().isoformat(),
+                    "subject_ids": ["account-123"],
+                    "facts": {"shared_account_count": 3},
+                }
+            )
 
     def test_report_carries_input_action_and_only_evidence_referenced_claims(
         self,
     ) -> None:
+        probability_parent, probability_estimate, policy_decision = scored_decision(
+            0.05
+        )
         request = InvestigationRequest.from_policy_decision(
-            decision(0.05), subject_id="account-123", cutoff_time=cutoff()
+            policy_decision,
+            probability_parent,
+            probability_estimate,
+            subject_id="account-123",
         )
         report = InvestigationReport(
             request=request,

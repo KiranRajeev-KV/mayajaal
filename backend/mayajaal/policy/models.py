@@ -1,6 +1,7 @@
 """Validated, model-neutral cost-sensitive decision policy contracts."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from math import isfinite
 
@@ -114,6 +115,7 @@ class PolicyDecision:
     raw_model_score: float
     calibrated_fraud_probability: float
     scoring_context_id: str | None
+    scoring_cutoff: datetime
     context: DecisionContext
     chosen_action: PolicyAction
     expected_costs: tuple[ActionCost, ...]

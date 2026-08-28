@@ -465,16 +465,25 @@ calibration and merchant economics. `estimate_probability` accepts a raw model
 margin only through a verified `ProbabilityModel`, recomputes its calibrated
 probability, and creates `probability_estimate_id` from canonical semantics:
 the estimate contract version, base/probability model IDs, raw margin,
-calibrated probability, and optional scoring-context ID. The policy's normal
-API receives both the verified `ProbabilityModel` and this estimate, then calls
-`verify_probability_estimate` before calculating any expected cost. Therefore
-a self-consistent fake estimate cannot substitute a probability that the
-verified calibrator did not produce. It also reconstructs the expected
+calibrated probability, timezone-aware scoring cutoff, and optional
+scoring-context ID. The scoring cutoff is the fixed point-in-time view used to
+produce the raw score; it is required and cannot be changed without changing
+the estimate ID. The policy's normal API receives both the verified
+`ProbabilityModel` and this estimate, then calls `verify_probability_estimate`
+before calculating any expected cost. Therefore a self-consistent fake estimate
+cannot substitute a probability that the verified calibrator did not produce.
+It also reconstructs the expected
 `PolicyModel` from the probability lineage and validated economics before use.
 When both are present, `ProbabilityEstimate.scoring_context_id` must exactly
 match `DecisionContext.context_id`; this prevents a score tied to one order or
 account from being applied to another. Either identifier may remain `None` for
 generic/offline decisions.
+
+The scoring-cutoff addition is probability-estimate contract version 2 and
+decision contract version 2. It does not alter `probability_model_id` or
+calibration fitting, so existing held-out and calibration artifacts remain
+reusable. Pre-version-2 policy decisions must be regenerated from the reused
+calibration artifact with `--scoring-cutoff`.
 
 `policy_decision.json` stores its explicit decision-contract version, raw
 margin, estimate lineage, economics result, scenarios, and deterministic
@@ -494,9 +503,11 @@ then run:
 ```bash
 # Required: derive the probability estimate from a raw model margin through the
 # verified sigmoid artifact.
-just policy-decide --raw-model-score 0.12 --exposure-paise 250000
+just policy-decide --raw-model-score 0.12 --exposure-paise 250000 \
+  --scoring-cutoff 2026-04-01T00:00:00+00:00
 just policy-decide --calibration-dir artifacts/calibration-standard-10k-final \
-  --raw-model-score 0.12 --exposure-paise 250000 --context-id order-123
+  --raw-model-score 0.12 --exposure-paise 250000 --context-id order-123 \
+  --scoring-cutoff 2026-04-01T00:00:00+00:00
 ```
 
 The command does not generate a world, fit a model, refit calibration, read a
@@ -525,12 +536,18 @@ future bounded evidence collection
 future structured InvestigationReport
 ```
 
-`InvestigationRequest.from_policy_decision(...)` copies immutable decision,
-policy, and probability-estimate lineage together with a caller-supplied
-subject and timezone-aware cutoff. It does not recompute or modify the policy
+`InvestigationRequest.from_policy_decision(...)` verifies the supplied
+`ProbabilityEstimate` through its `ProbabilityModel`, then copies immutable
+decision, policy, and probability-estimate lineage. Its cutoff comes directly
+from the verified estimate's scoring cutoff—callers cannot supply a newer
+investigation cutoff. The initial typed subject is `ACCOUNT`; `subject_id` is
+the scored account, while optional `context_id` is the separate order,
+transaction, or decision context. It does not recompute or modify the policy
 decision. `EvidenceItem` is a structured factual observation whose
 `observed_at` cannot be later than its fixed cutoff; its machine-readable facts
-reject known evaluation-only label keys. Future report claims use evidence IDs,
+reject known evaluation-only label keys. Its source and type use closed
+`EvidenceSource` and `EvidenceType` vocabularies rather than arbitrary
+query/source identifiers. Future report claims use evidence IDs,
 and `InvestigationReport.policy_action` must exactly match the request action.
 There is intentionally no separate enforcement-action field: the policy stays
 the sole business-action authority.
