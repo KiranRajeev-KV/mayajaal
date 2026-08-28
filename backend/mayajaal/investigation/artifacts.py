@@ -12,6 +12,9 @@ from .ledger import (
     EvidenceLedgerSnapshot,
     InvestigationExecution,
     InvestigationToolTrace,
+    ModelFacingContextMetrics,
+    model_facing_context_metrics,
+    model_facing_tool_call_metrics,
 )
 from .models import (
     EvidenceItem,
@@ -86,6 +89,13 @@ def save_investigation_artifacts(
                 "tool_trace": [
                     item.model_dump(mode="json") for item in snapshot.tool_trace
                 ],
+                # Context metrics are retained for evaluation observability,
+                # never as an investigation/report provenance input.
+                "model_facing_context_metrics": (
+                    None
+                    if execution.model_facing_context_metrics is None
+                    else execution.model_facing_context_metrics.model_dump(mode="json")
+                ),
             }
         ),
         encoding="utf-8",
@@ -186,6 +196,26 @@ def load_investigation_artifacts(
         ),
     )
     snapshot = _verified_snapshot(request, snapshot)
+    persisted_context_metrics_value = evidence_document.get(
+        "model_facing_context_metrics"
+    )
+    persisted_context_metrics = (
+        None
+        if persisted_context_metrics_value is None
+        else cast(
+            ModelFacingContextMetrics,
+            _model(
+                ModelFacingContextMetrics,
+                persisted_context_metrics_value,
+                "model-facing context metrics",
+            ),
+        )
+    )
+    if (
+        persisted_context_metrics is not None
+        and persisted_context_metrics != model_facing_context_metrics(snapshot)
+    ):
+        raise ValueError("model-facing context metrics do not match tool trace")
     validate_report_grounding(report, request, snapshot)
     expected_provenance = investigation_provenance(
         request=request,
@@ -216,6 +246,12 @@ def load_investigation_artifacts(
         agent_model_id=agent_model_id,
         config=persisted_config,
         grounding_failure=grounding_failure,
+        model_facing_context_metrics=persisted_context_metrics,
+        model_facing_tool_call_metrics=(
+            ()
+            if persisted_context_metrics is None
+            else model_facing_tool_call_metrics(snapshot)
+        ),
     )
 
 

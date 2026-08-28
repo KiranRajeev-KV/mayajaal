@@ -7,6 +7,8 @@ from mayajaal.investigation import (
     EvaluationCase,
     InvestigationPattern,
     InvestigationStatus,
+    ModelFacingContextMetrics,
+    ModelFacingToolCallMetrics,
     score_comparison_run,
     summarize_model_comparison,
 )
@@ -59,6 +61,26 @@ class InvestigationComparisonScoringTests(unittest.TestCase):
         self.assertTrue(outcome.grounding_failure)
         self.assertIsNone(outcome.correct_pattern)
         self.assertIsNone(outcome.appropriate_ambiguity_handling)
+
+    def test_grounding_failure_requires_a_failed_report(self) -> None:
+        expected = case("promo", InvestigationPattern.PROMO_RING)
+        for status in (
+            None,
+            InvestigationStatus.COMPLETED,
+            InvestigationStatus.INSUFFICIENT_EVIDENCE,
+            InvestigationStatus.BUDGET_EXHAUSTED,
+        ):
+            with (
+                self.subTest(status=status),
+                self.assertRaisesRegex(ValueError, "requires a FAILED report"),
+            ):
+                score_comparison_run(
+                    model="fixture-model",
+                    case=expected,
+                    status=status,
+                    pattern=None,
+                    grounding_failure=True,
+                )
 
     def test_valid_correct_fraud_report_scores_as_end_to_end_success(self) -> None:
         outcome = score_comparison_run(
@@ -236,6 +258,68 @@ class InvestigationComparisonScoringTests(unittest.TestCase):
         self.assertEqual(summary.benign_system_failure_rate.value, 1.0)
         self.assertEqual(summary.obvious_abuse_reasoning_miss_rate.denominator, 1)
         self.assertEqual(summary.obvious_abuse_system_failure_rate.value, 0.0)
+
+    def test_context_metrics_are_preserved_per_run_and_aggregate_per_tool(self) -> None:
+        metrics = ModelFacingContextMetrics(
+            model_facing_evidence_count=3,
+            model_facing_alias_count=2,
+            model_facing_event_count=4,
+            model_facing_serialized_chars=120,
+            model_facing_serialized_bytes=124,
+        )
+        calls = (
+            ModelFacingToolCallMetrics(
+                call_index=1,
+                tool_name="case_timeline",
+                model_facing_evidence_count=1,
+                model_facing_alias_count=1,
+                model_facing_event_count=4,
+                model_facing_serialized_chars=70,
+                model_facing_serialized_bytes=72,
+            ),
+            ModelFacingToolCallMetrics(
+                call_index=2,
+                tool_name="related_activity",
+                model_facing_evidence_count=2,
+                model_facing_alias_count=1,
+                model_facing_event_count=0,
+                model_facing_serialized_chars=50,
+                model_facing_serialized_bytes=52,
+            ),
+        )
+        expected = case("promo", InvestigationPattern.PROMO_RING)
+        outcome = score_comparison_run(
+            model="fixture-model",
+            case=expected,
+            status=InvestigationStatus.COMPLETED,
+            pattern=InvestigationPattern.PROMO_RING,
+            model_facing_context_metrics=metrics,
+            model_facing_tool_call_metrics=calls,
+        )
+
+        self.assertEqual(outcome.model_facing_context_metrics, metrics)
+        self.assertEqual(outcome.model_facing_tool_call_metrics, calls)
+        serialized_outcome = outcome.model_dump(mode="json")
+        self.assertEqual(
+            serialized_outcome["model_facing_context_metrics"][
+                "model_facing_serialized_bytes"
+            ],
+            124,
+        )
+        self.assertNotIn("expected_pattern", serialized_outcome)
+        summary = summarize_model_comparison((outcome,), (expected,))
+        self.assertEqual(
+            summary.model_facing_context.total_model_facing_serialized_bytes, 124
+        )
+        self.assertEqual(summary.model_facing_context.mean_model_facing_event_count, 4)
+        self.assertEqual(summary.model_facing_context.largest_tool_payload_bytes, 72)
+        self.assertEqual(
+            tuple(
+                (item.tool_name, item.total_serialized_bytes)
+                for item in summary.model_facing_context.per_tool_payload_bytes
+            ),
+            (("case_timeline", 72), ("related_activity", 52)),
+        )
 
     def test_hidden_expectations_are_not_runtime_or_artifact_contracts(self) -> None:
         import mayajaal.investigation.agent as agent

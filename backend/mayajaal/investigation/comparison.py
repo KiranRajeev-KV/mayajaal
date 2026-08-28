@@ -14,6 +14,7 @@ from pydantic import Field
 
 from mayajaal.schemas.common import SchemaModel
 
+from .ledger import ModelFacingContextMetrics, ModelFacingToolCallMetrics
 from .models import InvestigationPattern, InvestigationStatus
 
 _ABUSE_PATTERNS = frozenset(
@@ -59,6 +60,8 @@ class ComparisonRunOutcome(SchemaModel):
     missed_obvious_abuse: bool | None
     appropriate_ambiguity_handling: bool | None
     end_to_end_success: bool
+    model_facing_context_metrics: ModelFacingContextMetrics | None = None
+    model_facing_tool_call_metrics: tuple[ModelFacingToolCallMetrics, ...] = ()
 
 
 class ConditionalRate(SchemaModel):
@@ -84,6 +87,30 @@ class ModelComparisonSummary(SchemaModel):
     benign_system_failure_rate: ConditionalRate
     obvious_abuse_reasoning_miss_rate: ConditionalRate
     obvious_abuse_system_failure_rate: ConditionalRate
+    model_facing_context: ModelFacingContextSummary
+
+
+class ToolPayloadBytes(SchemaModel):
+    """Raw per-tool context-size total for one model comparison."""
+
+    tool_name: str = Field(min_length=1)
+    call_count: int = Field(ge=0)
+    total_serialized_bytes: int = Field(ge=0)
+    largest_serialized_bytes: int = Field(ge=0)
+
+
+class ModelFacingContextSummary(SchemaModel):
+    """Non-authoritative aggregate of exact tool JSON supplied to a model."""
+
+    measured_run_count: int = Field(ge=0)
+    total_model_facing_serialized_bytes: int = Field(ge=0)
+    mean_model_facing_serialized_bytes: float | None
+    total_model_facing_evidence_count: int = Field(ge=0)
+    mean_model_facing_evidence_count: float | None
+    total_model_facing_event_count: int = Field(ge=0)
+    mean_model_facing_event_count: float | None
+    per_tool_payload_bytes: tuple[ToolPayloadBytes, ...]
+    largest_tool_payload_bytes: int = Field(ge=0)
 
 
 def score_comparison_run(
@@ -94,6 +121,8 @@ def score_comparison_run(
     pattern: InvestigationPattern | None,
     grounding_failure: bool = False,
     provider_request_failure: bool = False,
+    model_facing_context_metrics: ModelFacingContextMetrics | None = None,
+    model_facing_tool_call_metrics: tuple[ModelFacingToolCallMetrics, ...] = (),
 ) -> ComparisonRunOutcome:
     """Score one completed comparison run without granting system failures credit.
 
@@ -105,6 +134,8 @@ def score_comparison_run(
         raise ValueError("provider request failure cannot include a report")
     if provider_request_failure and grounding_failure:
         raise ValueError("provider request failure cannot be a grounding failure")
+    if grounding_failure and status is not InvestigationStatus.FAILED:
+        raise ValueError("grounding failure requires a FAILED report")
 
     budget_failure = status is InvestigationStatus.BUDGET_EXHAUSTED
     failed_report = status is InvestigationStatus.FAILED
@@ -129,6 +160,8 @@ def score_comparison_run(
             missed_obvious_abuse=None,
             appropriate_ambiguity_handling=None,
             end_to_end_success=False,
+            model_facing_context_metrics=model_facing_context_metrics,
+            model_facing_tool_call_metrics=model_facing_tool_call_metrics,
         )
     if pattern is None:
         raise ValueError("accepted analytical report requires a reported pattern")
@@ -161,6 +194,8 @@ def score_comparison_run(
         missed_obvious_abuse=expected_is_abuse and not correct_pattern,
         appropriate_ambiguity_handling=appropriate_ambiguity,
         end_to_end_success=correct_pattern or appropriate_ambiguity,
+        model_facing_context_metrics=model_facing_context_metrics,
+        model_facing_tool_call_metrics=model_facing_tool_call_metrics,
     )
 
 
@@ -246,6 +281,7 @@ def summarize_model_comparison(
             sum(not record.accepted_analytical_report for record in obvious_abuse),
             len(obvious_abuse),
         ),
+        model_facing_context=_context_summary(records),
     )
 
 
@@ -255,4 +291,49 @@ def _rate(numerator: int, denominator: int) -> ConditionalRate:
         numerator=numerator,
         denominator=denominator,
         value=None if denominator == 0 else numerator / denominator,
+    )
+
+
+def _context_summary(
+    records: tuple[ComparisonRunOutcome, ...],
+) -> ModelFacingContextSummary:
+    """Aggregate recorded payload measurements without fabricating missing data."""
+    metrics = tuple(
+        record.model_facing_context_metrics
+        for record in records
+        if record.model_facing_context_metrics is not None
+    )
+    tool_totals: dict[str, list[int]] = {}
+    for record in records:
+        for call in record.model_facing_tool_call_metrics:
+            values = tool_totals.setdefault(call.tool_name, [])
+            values.append(call.model_facing_serialized_bytes)
+    count = len(metrics)
+    total_bytes = sum(item.model_facing_serialized_bytes for item in metrics)
+    total_evidence = sum(item.model_facing_evidence_count for item in metrics)
+    total_events = sum(item.model_facing_event_count for item in metrics)
+    return ModelFacingContextSummary(
+        measured_run_count=count,
+        total_model_facing_serialized_bytes=total_bytes,
+        mean_model_facing_serialized_bytes=(
+            None if count == 0 else total_bytes / count
+        ),
+        total_model_facing_evidence_count=total_evidence,
+        mean_model_facing_evidence_count=(
+            None if count == 0 else total_evidence / count
+        ),
+        total_model_facing_event_count=total_events,
+        mean_model_facing_event_count=None if count == 0 else total_events / count,
+        per_tool_payload_bytes=tuple(
+            ToolPayloadBytes(
+                tool_name=name,
+                call_count=len(values),
+                total_serialized_bytes=sum(values),
+                largest_serialized_bytes=max(values),
+            )
+            for name, values in sorted(tool_totals.items())
+        ),
+        largest_tool_payload_bytes=max(
+            (value for values in tool_totals.values() for value in values), default=0
+        ),
     )

@@ -403,6 +403,41 @@ class InvestigationGroundingTests(unittest.TestCase):
             ),
         )
 
+    def test_context_metrics_do_not_change_investigation_or_report_identity(
+        self,
+    ) -> None:
+        ledger, shared, timeline = self.ledger()
+        snapshot = ledger.snapshot()
+        trace = snapshot.tool_trace[0]
+        assert trace.model_facing_metrics is not None
+        changed_metrics = trace.model_facing_metrics.model_copy(
+            update={"model_facing_serialized_bytes": 999_999}
+        )
+        measured_snapshot = EvidenceLedgerSnapshot(
+            evidence=snapshot.evidence,
+            tool_trace=(
+                trace.model_copy(update={"model_facing_metrics": changed_metrics}),
+                snapshot.tool_trace[1],
+            ),
+        )
+        report = self.report(shared, timeline)
+        config = InvestigationConfig()
+        original_id = investigation_id(
+            request=request(),
+            config=config,
+            agent_model_id="fixture-model",
+            snapshot=snapshot,
+        )
+        measured_id = investigation_id(
+            request=request(),
+            config=config,
+            agent_model_id="fixture-model",
+            snapshot=measured_snapshot,
+        )
+
+        self.assertEqual(measured_id, original_id)
+        self.assertEqual(report_id(measured_id, report), report_id(original_id, report))
+
     def test_artifacts_round_trip_and_reject_evidence_report_and_provenance_tampering(
         self,
     ) -> None:

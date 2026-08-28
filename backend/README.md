@@ -711,6 +711,18 @@ and records an ordered tool trace of call index, fixed tool name, and returned
 evidence IDs. Evidence merely available from `EvidenceService` but never
 returned by a tool is not eligible to ground a report.
 
+The same ledger measures the exact alias-substituted JSON returned by each
+tool, using deterministic UTF-8 serialization. Every trace records the
+model-facing evidence-item count, distinct alias count, detailed-event count,
+serialized character count, and serialized byte count. Event counts include
+only explicit detailed `events` records (for example timeline entries), never
+historical aggregate counters. These are debug/evaluation observability fields,
+not evidence facts or provenance: they do not affect `evidence_id`,
+`investigation_id`, `report_id`, or `diagnostic_id`. A completed
+`InvestigationExecution` exposes both totals and raw per-tool measurements for
+comparison artifacts. They are intentionally not converted to estimated token
+counts; provider token usage is model-dependent and remains a separate metric.
+
 Canonical evidence IDs remain SHA-256 provenance identifiers in the ledger and
 persisted artifacts. To keep structured model output practical, each newly
 admitted item also receives a deterministic run-local alias in admission order
@@ -808,6 +820,15 @@ its accepted-report numerator and denominator. Benign false-fraud rates use
 only accepted benign reports and expose benign system failures separately;
 obvious-abuse reasoning misses use accepted reports, while pre-conclusion
 system failures are reported as a separate rate.
+
+Comparison outcomes retain each run's raw model-facing context totals and
+per-tool payload measurements. Their per-model summary reports total and mean
+bytes, evidence items, and exposed detailed events, plus per-tool total/largest
+payload bytes and the largest individual tool payload. This is observability
+only: it contains no hidden expectations and does not influence quality scores
+or investigation provenance. An evaluator outcome with `grounding_failure=true`
+is valid only with application-owned `FAILED` status; impossible combinations
+are rejected rather than being counted as analytical reports.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

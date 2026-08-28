@@ -1,6 +1,7 @@
 """Focused tests for fixed, context-bound LangChain investigation tools."""
 
 import inspect
+import json
 import unittest
 from datetime import UTC, datetime
 from typing import cast
@@ -21,6 +22,8 @@ from mayajaal.investigation import (
     InvestigationToolContext,
     build_investigation_tools,
     evidence_id,
+    model_facing_context_metrics,
+    model_facing_tool_call_metrics,
 )
 from mayajaal.policy import PolicyAction
 from mayajaal.scoring import ScoreObservation
@@ -184,6 +187,105 @@ class InvestigationToolTests(unittest.TestCase):
         self.assertEqual(context.budget.used_tool_calls, 1)
         self.assertEqual(context.request.subject_id, "account-subject")
         self.assertEqual(context.request.cutoff_time, cutoff())
+        metrics = context.ledger.snapshot().tool_trace[0].model_facing_metrics
+        self.assertIsNotNone(metrics)
+        assert metrics is not None
+        serialized = json.dumps(
+            actual, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        self.assertEqual(metrics.model_facing_evidence_count, 1)
+        self.assertEqual(metrics.model_facing_alias_count, 1)
+        self.assertEqual(metrics.model_facing_event_count, 0)
+        self.assertEqual(metrics.model_facing_serialized_chars, len(serialized))
+        self.assertEqual(
+            metrics.model_facing_serialized_bytes, len(serialized.encode("utf-8"))
+        )
+
+    def test_context_metrics_count_only_detailed_events_and_are_deterministic(
+        self,
+    ) -> None:
+        context, service = self.context()
+        fixed_request = context.request
+        facts: dict[str, JsonValue] = {
+            "aggregate_event_count": 999,
+            "promotion_event_count": 500,
+            "events": [
+                {"event_id": "event-1", "event_type": "PROMOTION_REDEEMED"},
+                {"event_id": "event-2", "event_type": "REFUND_REQUESTED"},
+            ],
+        }
+        timeline_item = EvidenceItem.from_request(
+            fixed_request,
+            evidence_id=evidence_id(
+                fixed_request,
+                evidence_type=EvidenceType.TIMELINE_EVENT,
+                source=EvidenceSource.CASE_TIMELINE,
+                observed_at=cutoff(),
+                subject_ids=(fixed_request.subject_id,),
+                facts=facts,
+            ),
+            evidence_type=EvidenceType.TIMELINE_EVENT,
+            source=EvidenceSource.CASE_TIMELINE,
+            observed_at=cutoff(),
+            subject_ids=(fixed_request.subject_id,),
+            facts=facts,
+        )
+        service.get_case_timeline = lambda request: (timeline_item,)
+        tool = {
+            wrapped.name: wrapped for wrapped in build_investigation_tools(context)
+        }["case_timeline"]
+
+        payload = tool.invoke({})
+        metrics = context.ledger.snapshot().tool_trace[0].model_facing_metrics
+        self.assertIsNotNone(metrics)
+        assert metrics is not None
+        self.assertEqual(metrics.model_facing_event_count, 2)
+        self.assertEqual(metrics.model_facing_evidence_count, 1)
+        self.assertEqual(metrics.model_facing_alias_count, 1)
+        serialized = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        )
+        self.assertEqual(metrics.model_facing_serialized_chars, len(serialized))
+        self.assertEqual(
+            metrics.model_facing_serialized_bytes, len(serialized.encode("utf-8"))
+        )
+
+        second_context, second_service = self.context()
+        second_service.get_case_timeline = lambda request: (timeline_item,)
+        second_tool = {
+            wrapped.name: wrapped
+            for wrapped in build_investigation_tools(second_context)
+        }["case_timeline"]
+        self.assertEqual(payload, second_tool.invoke({}))
+        self.assertEqual(
+            metrics,
+            second_context.ledger.snapshot().tool_trace[0].model_facing_metrics,
+        )
+
+    def test_context_totals_equal_the_sum_of_raw_tool_call_metrics(self) -> None:
+        context, _ = self.context()
+        tools = {
+            wrapped.name: wrapped for wrapped in build_investigation_tools(context)
+        }
+        _ = tools["risk_explanation"].invoke({})
+        _ = tools["related_activity"].invoke({})
+
+        snapshot = context.ledger.snapshot()
+        totals = model_facing_context_metrics(snapshot)
+        calls = model_facing_tool_call_metrics(snapshot)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            totals.model_facing_serialized_bytes,
+            sum(call.model_facing_serialized_bytes for call in calls),
+        )
+        self.assertEqual(
+            totals.model_facing_serialized_chars,
+            sum(call.model_facing_serialized_chars for call in calls),
+        )
+        self.assertEqual(
+            totals.model_facing_evidence_count,
+            sum(call.model_facing_evidence_count for call in calls),
+        )
 
     def test_risk_wrapper_passes_only_the_trusted_score_observation(self) -> None:
         context, service = self.context()

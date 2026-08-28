@@ -18,7 +18,11 @@ from mayajaal.scoring import ScoreObservation
 
 from .errors import GroundingFailureCode, InvestigationGroundingError
 from .grounding import validate_report_grounding
-from .ledger import InvestigationExecution
+from .ledger import (
+    InvestigationExecution,
+    model_facing_context_metrics,
+    model_facing_tool_call_metrics,
+)
 from .models import (
     EvidenceFinding,
     GroundingFailureDiagnostic,
@@ -252,12 +256,15 @@ class InvestigationAgentService:
                 )
             else:
                 grounding_failure = None
+        snapshot = context.ledger.snapshot()
         return InvestigationExecution(
             report=report,
-            snapshot=context.ledger.snapshot(),
+            snapshot=snapshot,
             agent_model_id=run_agent_model_id,
             config=run_config,
             grounding_failure=grounding_failure,
+            model_facing_context_metrics=model_facing_context_metrics(snapshot),
+            model_facing_tool_call_metrics=model_facing_tool_call_metrics(snapshot),
         )
 
     def _agent_model_id(self) -> str:

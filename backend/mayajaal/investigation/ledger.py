@@ -1,9 +1,10 @@
 """Run-scoped records of the factual evidence actually returned to an agent."""
 
+import json
 import re
 from dataclasses import dataclass, field
 
-from pydantic import Field, field_validator
+from pydantic import Field, JsonValue, field_validator
 
 from mayajaal.schemas.common import SchemaModel
 
@@ -25,6 +26,7 @@ class InvestigationToolTrace(SchemaModel):
     call_index: int = Field(ge=1)
     tool_name: str = Field(min_length=1)
     returned_evidence_ids: tuple[str, ...]
+    model_facing_metrics: "ModelFacingContextMetrics | None" = None
 
     @field_validator("tool_name")
     @classmethod
@@ -33,6 +35,23 @@ class InvestigationToolTrace(SchemaModel):
         if value not in INVESTIGATION_TOOL_NAMES:
             raise ValueError("tool trace name is not in the fixed allowlist")
         return value
+
+
+class ModelFacingContextMetrics(SchemaModel):
+    """Exact, non-authoritative JSON payload measurements for one or more calls."""
+
+    model_facing_evidence_count: int = Field(ge=0)
+    model_facing_alias_count: int = Field(ge=0)
+    model_facing_event_count: int = Field(ge=0)
+    model_facing_serialized_chars: int = Field(ge=0)
+    model_facing_serialized_bytes: int = Field(ge=0)
+
+
+class ModelFacingToolCallMetrics(ModelFacingContextMetrics):
+    """Exact model-facing payload measurements for one approved tool call."""
+
+    call_index: int = Field(ge=1)
+    tool_name: str = Field(min_length=1)
 
 
 @dataclass(frozen=True)
@@ -52,6 +71,8 @@ class InvestigationExecution:
     agent_model_id: str
     config: InvestigationConfig
     grounding_failure: GroundingFailureDiagnostic | None = None
+    model_facing_context_metrics: ModelFacingContextMetrics | None = None
+    model_facing_tool_call_metrics: tuple[ModelFacingToolCallMetrics, ...] = ()
 
 
 @dataclass
@@ -63,8 +84,16 @@ class EvidenceLedger:
     _aliases: dict[str, str] = field(default_factory=dict, init=False)
     _trace: list[InvestigationToolTrace] = field(default_factory=list, init=False)
 
-    def record(self, tool_name: str, items: tuple[EvidenceItem, ...]) -> None:
-        """Verify and record exactly one approved tool result in call order."""
+    def record(
+        self, tool_name: str, items: tuple[EvidenceItem, ...]
+    ) -> tuple[dict[str, JsonValue], ...]:
+        """Verify, record, and serialize exactly one approved tool result.
+
+        The returned payload is the precise model-facing JSON value: canonical
+        evidence IDs have been replaced by the run-local aliases first, then
+        deterministic UTF-8 JSON measurements are taken.  The measurements are
+        observability metadata only and never enter evidence or run provenance.
+        """
         if tool_name not in INVESTIGATION_TOOL_NAMES:
             raise ValueError("evidence tool name is not in the fixed allowlist")
         returned_ids: list[str] = []
@@ -77,13 +106,16 @@ class EvidenceLedger:
                 self._items[item.evidence_id] = item
                 self._aliases[item.evidence_id] = _evidence_alias(len(self._items))
             returned_ids.append(item.evidence_id)
+        payload = tuple(_model_facing_evidence(self, item) for item in items)
         self._trace.append(
             InvestigationToolTrace(
                 call_index=len(self._trace) + 1,
                 tool_name=tool_name,
                 returned_evidence_ids=tuple(returned_ids),
+                model_facing_metrics=_payload_metrics(payload),
             )
         )
+        return payload
 
     def snapshot(self) -> EvidenceLedgerSnapshot:
         """Return deterministic evidence and trace records for one completed run."""
@@ -142,6 +174,13 @@ class EvidenceLedger:
                     raise ValueError("tool trace references missing evidence")
                 trace_items.append(item)
             ledger.record(trace.tool_name, tuple(trace_items))
+            reconstructed_trace = ledger._trace[-1]
+            if (
+                trace.model_facing_metrics is not None
+                and reconstructed_trace.model_facing_metrics
+                != trace.model_facing_metrics
+            ):
+                raise ValueError("persisted model-facing context metrics mismatch")
         if tuple(ledger.snapshot().evidence) != snapshot.evidence:
             raise ValueError("persisted evidence is not represented by its tool trace")
         return ledger
@@ -168,3 +207,88 @@ _EVIDENCE_ALIAS_PATTERN = re.compile(r"E[0-9]{3,}")
 def _evidence_alias(admission_index: int) -> str:
     """Return a stable, readable reference based only on ledger admission order."""
     return f"E{admission_index:03d}"
+
+
+def model_facing_context_metrics(
+    snapshot: EvidenceLedgerSnapshot,
+) -> ModelFacingContextMetrics:
+    """Aggregate recorded tool payload metrics without changing any lineage."""
+    metrics = tuple(
+        trace.model_facing_metrics
+        for trace in snapshot.tool_trace
+        if trace.model_facing_metrics is not None
+    )
+    return ModelFacingContextMetrics(
+        model_facing_evidence_count=sum(
+            item.model_facing_evidence_count for item in metrics
+        ),
+        model_facing_alias_count=sum(item.model_facing_alias_count for item in metrics),
+        model_facing_event_count=sum(item.model_facing_event_count for item in metrics),
+        model_facing_serialized_chars=sum(
+            item.model_facing_serialized_chars for item in metrics
+        ),
+        model_facing_serialized_bytes=sum(
+            item.model_facing_serialized_bytes for item in metrics
+        ),
+    )
+
+
+def model_facing_tool_call_metrics(
+    snapshot: EvidenceLedgerSnapshot,
+) -> tuple[ModelFacingToolCallMetrics, ...]:
+    """Expose raw call measurements without making them provenance inputs."""
+    return tuple(
+        ModelFacingToolCallMetrics(
+            call_index=trace.call_index,
+            tool_name=trace.tool_name,
+            **trace.model_facing_metrics.model_dump(),
+        )
+        for trace in snapshot.tool_trace
+        if trace.model_facing_metrics is not None
+    )
+
+
+def _model_facing_evidence(
+    ledger: EvidenceLedger, item: EvidenceItem
+) -> dict[str, JsonValue]:
+    """Serialize one fact with its short, admitted evidence reference."""
+    payload = item.model_dump(mode="json")
+    canonical_id = payload.pop("evidence_id")
+    if not isinstance(canonical_id, str):
+        raise AssertionError("EvidenceItem serialization must contain evidence_id")
+    payload["evidence_ref"] = ledger.alias_for(canonical_id)
+    return payload
+
+
+def _payload_metrics(
+    payload: tuple[dict[str, JsonValue], ...],
+) -> ModelFacingContextMetrics:
+    """Measure exact deterministic JSON, counting only detailed exposed events."""
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    aliases = {
+        value
+        for item in payload
+        if isinstance((value := item.get("evidence_ref")), str)
+    }
+    event_count = sum(_detailed_event_count(item) for item in payload)
+    return ModelFacingContextMetrics(
+        model_facing_evidence_count=len(payload),
+        model_facing_alias_count=len(aliases),
+        model_facing_event_count=event_count,
+        model_facing_serialized_chars=len(serialized),
+        model_facing_serialized_bytes=len(serialized.encode("utf-8")),
+    )
+
+
+def _detailed_event_count(payload: dict[str, JsonValue]) -> int:
+    """Count only explicit detailed event records, never aggregate counters."""
+    facts = payload.get("facts")
+    if not isinstance(facts, dict):
+        return 0
+    events = facts.get("events")
+    return len(events) if isinstance(events, list) else 0
