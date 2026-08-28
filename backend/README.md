@@ -418,16 +418,39 @@ least disruptive action only when expected costs are exactly equal.
 Every decision includes conditional cost breakdowns for all actions, expected
 cost deltas from the chosen action, its cost margin, the calibrated probability,
 and the given exposure/context. It also reports two declared sensitivity
-scenarios: `optimistic` and `stressed`. Each is the base calibrated probability
-plus the configured signed shift, bounded to `[0, 1]`, and is explicitly an
-assumption rather than a newly calibrated probability. Scenario outputs include
-their own minimum-cost action and margin; `decision_is_stable_across_scenarios`
-shows whether both agree with the base action.
+scenarios: `optimistic` and `stressed`. They use a merchant-configured relative
+odds multiplier, rather than an additive percentage-point shift:
+
+```text
+odds = p / (1 - p)
+scenario_odds = odds × odds_multiplier
+scenario_probability = scenario_odds / (1 + scenario_odds)
+```
+
+The defaults halve (`0.5`) and double (`2.0`) odds. For example, a 0.7% base
+probability becomes about 0.35% and 1.39%, rather than clipping to zero or
+jumping to 5.7% under a ±5-point shift. Exact 0 and 1 remain unchanged. These
+are stress assumptions—not recalibration, confidence intervals, or a fix for
+calibration drift. Scenario outputs include their own minimum-cost action and
+margin; `decision_is_stable_across_scenarios` shows whether both agree with the
+base action.
 
 The policy has independent deterministic provenance:
 
 ```text
-base_model_id → probability_model_id → policy_id
+base_model_id
+    ↓
+probability_model_id
+    ↓
+probability_estimate_id
+
+probability_model_id
+    ↓
+policy_id
+
+probability_estimate_id + policy_id + DecisionContext
+    ↓
+decision_id
 ```
 
 `policy_id` is SHA-256 over canonical JSON containing only the policy provenance
@@ -437,11 +460,28 @@ values, and JSON formatting. `build_policy_model` binds configuration to a
 verified `ProbabilityModel`; `load_policy_model` recomputes the contract and
 rejects tampering or a base/probability lineage mismatch.
 
+`ProbabilityEstimate` is the immutable, score-derived runtime contract between
+calibration and merchant economics. `estimate_probability` accepts a raw model
+margin only through a verified `ProbabilityModel`, recomputes its calibrated
+probability, and creates `probability_estimate_id` from canonical semantics:
+the estimate contract version, base/probability model IDs, raw margin,
+calibrated probability, and optional scoring-context ID. The policy's normal
+API consumes this contract rather than a naked probability float.
+
+`policy_decision.json` stores its explicit decision-contract version, raw
+margin, estimate lineage, economics result, scenarios, and deterministic
+`decision_id`. `load_policy_decision`
+accepts verified probability and policy models, recomputes the estimate through
+the calibrator, reconstructs the whole expected-cost decision, and rejects any
+lineage, probability, exposure, action, cost, scenario, stability, or ID
+mismatch. This is deterministic tamper evidence and lineage checking, not a
+digital signature or authentication mechanism.
+
 For a local, offline auditable decision, first create a calibration artifact,
 then run:
 
 ```bash
-# Recommended: derive the probability from a raw model margin through the
+# Required: derive the probability estimate from a raw model margin through the
 # verified sigmoid artifact.
 just policy-decide --raw-model-score 0.12 --exposure-paise 250000
 just policy-decide --calibration-dir artifacts/calibration-standard-10k-final \
@@ -450,9 +490,8 @@ just policy-decide --calibration-dir artifacts/calibration-standard-10k-final \
 
 The command does not generate a world, fit a model, refit calibration, read a
 held-out label, or choose a threshold. It verifies
-`sigmoid_calibrator.json` and transforms `--raw-model-score` through that
-artifact. `--calibrated-probability` remains available only for a probability
-already verified by an upstream model boundary. The command then writes `policy_model.json` and
+`sigmoid_calibrator.json`, turns `--raw-model-score` into a verified
+`ProbabilityEstimate`, then writes `policy_model.json` and
 `policy_decision.json` to `artifacts/synthetic-world/policy-decision` by default.
 These are designed as the hand-off for a later realtime/API layer or
 investigation agent; neither is implemented here.

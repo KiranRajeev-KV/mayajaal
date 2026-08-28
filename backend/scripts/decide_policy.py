@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from mayajaal.calibration import load_probability_model, predict_probability
+from mayajaal.calibration import estimate_probability, load_probability_model
 from mayajaal.policy import (
     DecisionContext,
     build_policy_model,
@@ -22,16 +22,11 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help="Defaults to <output.directory>/calibration-evaluation",
     )
-    probability_source = parser.add_mutually_exclusive_group(required=True)
-    probability_source.add_argument(
+    parser.add_argument(
         "--raw-model-score",
         type=float,
-        help="Recommended: transform this margin through the verified sigmoid artifact.",
-    )
-    probability_source.add_argument(
-        "--calibrated-probability",
-        type=float,
-        help="An already verified upstream calibrated probability.",
+        required=True,
+        help="Transform this margin through the verified sigmoid artifact.",
     )
     parser.add_argument("--exposure-paise", type=int, required=True)
     parser.add_argument("--context-id", type=str)
@@ -66,18 +61,14 @@ def main() -> int:
         calibration_directory / "sigmoid_calibrator.json"
     )
     policy_model = build_policy_model(probability_model, config.policy)
-    calibrated_probability = (
-        predict_probability(probability_model.calibrator, (arguments.raw_model_score,))[
-            0
-        ]
-        if arguments.raw_model_score is not None
-        else arguments.calibrated_probability
+    probability_estimate = estimate_probability(
+        probability_model,
+        arguments.raw_model_score,
+        scoring_context_id=arguments.context_id,
     )
-    if calibrated_probability is None:
-        raise ValueError("one calibrated probability source is required")
     decision = decide(
         policy_model,
-        calibrated_probability,
+        probability_estimate,
         DecisionContext(
             exposure_paise=arguments.exposure_paise,
             context_id=arguments.context_id,
@@ -86,6 +77,8 @@ def main() -> int:
     artifacts = save_policy_artifacts(output_directory, policy_model, decision)
     print(f"policy_id: {decision.policy_id}")
     print(f"probability_model_id: {decision.probability_model_id}")
+    print(f"probability_estimate_id: {decision.probability_estimate_id}")
+    print(f"decision_id: {decision.decision_id}")
     print(f"action: {decision.chosen_action.value}")
     print(f"decision margin (paise): {decision.decision_margin_paise:.6f}")
     print(f"policy model: {artifacts['policy_model']}")

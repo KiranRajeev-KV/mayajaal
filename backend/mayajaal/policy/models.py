@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from math import isfinite
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from mayajaal.schemas.common import SchemaModel
 
@@ -18,10 +18,17 @@ class PolicyAction(StrEnum):
 
 
 class ProbabilitySensitivityConfig(SchemaModel):
-    """Explicit non-calibration probability assumptions for decision review."""
+    """Explicit odds scenarios for review, never probability recalibration."""
 
-    optimistic_probability_shift: float = Field(default=-0.05, ge=-1.0, le=0.0)
-    stressed_probability_shift: float = Field(default=0.05, ge=0.0, le=1.0)
+    optimistic_odds_multiplier: float = Field(default=0.5, gt=0.0, le=1.0)
+    stressed_odds_multiplier: float = Field(default=2.0, ge=1.0)
+
+    @field_validator("optimistic_odds_multiplier", "stressed_odds_multiplier")
+    @staticmethod
+    def validate_finite_multiplier(value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("odds multiplier must be finite")
+        return value
 
 
 class PolicyConfig(SchemaModel):
@@ -88,7 +95,7 @@ class ScenarioDecision:
     """A declared probability assumption, not a newly calibrated probability."""
 
     scenario: str
-    probability_shift: float
+    odds_multiplier: float
     assumed_fraud_probability: float
     chosen_action: PolicyAction
     expected_costs: tuple[ActionCost, ...]
@@ -102,7 +109,11 @@ class PolicyDecision:
     policy_id: str
     base_model_id: str
     probability_model_id: str
+    probability_estimate_id: str
+    decision_id: str
+    raw_model_score: float
     calibrated_fraud_probability: float
+    scoring_context_id: str | None
     context: DecisionContext
     chosen_action: PolicyAction
     expected_costs: tuple[ActionCost, ...]

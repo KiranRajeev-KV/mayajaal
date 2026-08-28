@@ -6,9 +6,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import cast
 
-from .models import CalibrationConfig, CalibrationMethod, SigmoidCalibrator
+from .models import (
+    CalibrationConfig,
+    CalibrationMethod,
+    ProbabilityEstimate,
+    SigmoidCalibrator,
+)
 
 CALIBRATION_PROVENANCE_CONTRACT_VERSION = 1
+PROBABILITY_ESTIMATE_CONTRACT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,101 @@ def probability_model_id(
             calibrator_parameters=calibrator_parameters,
         )
     )
+
+
+def probability_estimate_semantics(
+    *,
+    base_model_id: str,
+    probability_model_id: str,
+    probability_estimate_contract_version: int,
+    raw_model_score: float,
+    calibrated_probability: float,
+    scoring_context_id: str | None,
+) -> dict[str, object]:
+    """Return canonical semantic inputs for one score-derived probability."""
+    return {
+        "probability_estimate_contract_version": probability_estimate_contract_version,
+        "base_model_id": base_model_id,
+        "probability_model_id": probability_model_id,
+        "raw_model_score": raw_model_score,
+        "calibrated_probability": calibrated_probability,
+        "scoring_context_id": scoring_context_id,
+    }
+
+
+def probability_estimate_id(
+    *,
+    base_model_id: str,
+    probability_model_id: str,
+    probability_estimate_contract_version: int,
+    raw_model_score: float,
+    calibrated_probability: float,
+    scoring_context_id: str | None,
+) -> str:
+    """Hash the semantic score-to-probability result, not its storage location."""
+    return canonical_hash(
+        probability_estimate_semantics(
+            base_model_id=base_model_id,
+            probability_model_id=probability_model_id,
+            probability_estimate_contract_version=probability_estimate_contract_version,
+            raw_model_score=raw_model_score,
+            calibrated_probability=calibrated_probability,
+            scoring_context_id=scoring_context_id,
+        )
+    )
+
+
+def estimate_probability(
+    probability_model: ProbabilityModel,
+    raw_model_score: float,
+    *,
+    scoring_context_id: str | None = None,
+) -> ProbabilityEstimate:
+    """Derive one probability only through a previously verified mapping."""
+    from .service import predict_probability
+
+    calibrated_probability = predict_probability(
+        probability_model.calibrator, (raw_model_score,)
+    )[0]
+    return ProbabilityEstimate(
+        base_model_id=probability_model.base_model_id,
+        probability_model_id=probability_model.probability_model_id,
+        probability_estimate_id=probability_estimate_id(
+            base_model_id=probability_model.base_model_id,
+            probability_model_id=probability_model.probability_model_id,
+            probability_estimate_contract_version=PROBABILITY_ESTIMATE_CONTRACT_VERSION,
+            raw_model_score=raw_model_score,
+            calibrated_probability=calibrated_probability,
+            scoring_context_id=scoring_context_id,
+        ),
+        raw_model_score=raw_model_score,
+        calibrated_probability=calibrated_probability,
+        scoring_context_id=scoring_context_id,
+    )
+
+
+def verify_probability_estimate(
+    estimate: ProbabilityEstimate, probability_model: ProbabilityModel
+) -> ProbabilityEstimate:
+    """Recompute an estimate through trusted calibration and reject tampering."""
+    if estimate.base_model_id != probability_model.base_model_id:
+        raise ValueError(
+            "probability estimate base_model_id does not match verified lineage"
+        )
+    if estimate.probability_model_id != probability_model.probability_model_id:
+        raise ValueError(
+            "probability estimate probability_model_id does not match verified lineage"
+        )
+    expected = estimate_probability(
+        probability_model,
+        estimate.raw_model_score,
+        scoring_context_id=estimate.scoring_context_id,
+    )
+    if estimate != expected:
+        raise ValueError(
+            "probability estimate semantics or calibrated probability mismatch"
+        )
+    return expected
 
 
 def load_probability_model(

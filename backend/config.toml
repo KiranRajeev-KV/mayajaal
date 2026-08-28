@@ -132,11 +132,10 @@ block_fraud_residual_loss_fraction = 0.01
 tie_break_order = ["ALLOW", "REVIEW", "BLOCK"]
 
 [policy.sensitivity]
-# These are explicit decision scenarios, not recalibrated probabilities. The
-# reported scenario probability is base calibrated probability plus this shift,
-# bounded to [0, 1].
-optimistic_probability_shift = -0.05
-stressed_probability_shift = 0.05
+# These are merchant-defined odds scenarios, not recalibration or confidence
+# intervals. A 0.5 multiplier halves calibrated fraud odds; 2.0 doubles them.
+optimistic_odds_multiplier = 0.5
+stressed_odds_multiplier = 2.0
 
 [synthetic_world.difficulty_profiles.easy]
 persona_weight_temperature = 0.80

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from math import isfinite
 
 from pydantic import Field
 
@@ -38,6 +39,39 @@ class SigmoidCalibrator:
     coefficient: float
     intercept: float
     method: CalibrationMethod = CalibrationMethod.SIGMOID
+
+
+@dataclass(frozen=True)
+class ProbabilityEstimate:
+    """One verified score-to-probability result with runtime lineage.
+
+    This is intentionally distinct from :class:`ProbabilityModel`: a model is
+    a reusable mapping, while an estimate identifies one semantic scoring
+    input and the probability it produced.
+    """
+
+    base_model_id: str
+    probability_model_id: str
+    probability_estimate_id: str
+    raw_model_score: float
+    calibrated_probability: float
+    scoring_context_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.base_model_id or not self.probability_model_id:
+            raise ValueError("probability estimate requires non-empty model lineage")
+        if not self.probability_estimate_id:
+            raise ValueError("probability estimate requires probability_estimate_id")
+        if not isfinite(self.raw_model_score):
+            raise ValueError("raw model score must be finite")
+        if (
+            not isfinite(self.calibrated_probability)
+            or self.calibrated_probability < 0.0
+            or self.calibrated_probability > 1.0
+        ):
+            raise ValueError("calibrated probability must be finite and within [0, 1]")
+        if self.scoring_context_id == "":
+            raise ValueError("scoring_context_id must be non-empty when provided")
 
 
 @dataclass(frozen=True)

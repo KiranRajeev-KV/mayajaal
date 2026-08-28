@@ -53,7 +53,7 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.calibration.method, "sigmoid")
         self.assertEqual(config.calibration.quantile_bin_count, 10)
         self.assertEqual(config.policy.review_operational_cost_paise, 1500)
-        self.assertEqual(config.policy.sensitivity.stressed_probability_shift, 0.05)
+        self.assertEqual(config.policy.sensitivity.stressed_odds_multiplier, 2.0)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
         with self.assertRaises(ValueError):

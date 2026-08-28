@@ -8,9 +8,10 @@ from typing import cast
 
 from mayajaal.calibration import ProbabilityModel
 
-from .models import PolicyConfig
+from .models import ActionCost, DecisionContext, PolicyConfig, ScenarioDecision
 
-POLICY_PROVENANCE_CONTRACT_VERSION = 1
+POLICY_PROVENANCE_CONTRACT_VERSION = 2
+DECISION_PROVENANCE_CONTRACT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,63 @@ def policy_provenance(
         ),
         "base_model_id": probability_model.base_model_id,
     }
+
+
+def _cost_semantics(cost: ActionCost) -> dict[str, object]:
+    return {
+        "action": cost.action.value,
+        "fraud_cost_paise": cost.fraud_cost_paise,
+        "legitimate_cost_paise": cost.legitimate_cost_paise,
+        "expected_cost_paise": cost.expected_cost_paise,
+        "delta_from_chosen_paise": cost.delta_from_chosen_paise,
+    }
+
+
+def _scenario_semantics(scenario: ScenarioDecision) -> dict[str, object]:
+    return {
+        "scenario": scenario.scenario,
+        "odds_multiplier": scenario.odds_multiplier,
+        "assumed_fraud_probability": scenario.assumed_fraud_probability,
+        "chosen_action": scenario.chosen_action.value,
+        "expected_costs": [_cost_semantics(cost) for cost in scenario.expected_costs],
+        "decision_margin_paise": scenario.decision_margin_paise,
+    }
+
+
+def decision_semantics(
+    *,
+    base_model_id: str,
+    probability_model_id: str,
+    probability_estimate_id: str,
+    policy_id: str,
+    calibrated_fraud_probability: float,
+    context: DecisionContext,
+    chosen_action: str,
+    expected_costs: tuple[ActionCost, ...],
+    decision_margin_paise: float,
+    scenarios: tuple[ScenarioDecision, ...],
+    decision_is_stable_across_scenarios: bool,
+) -> dict[str, object]:
+    """Return all semantics of one runtime business decision."""
+    return {
+        "decision_contract_version": DECISION_PROVENANCE_CONTRACT_VERSION,
+        "base_model_id": base_model_id,
+        "probability_model_id": probability_model_id,
+        "probability_estimate_id": probability_estimate_id,
+        "policy_id": policy_id,
+        "calibrated_fraud_probability": calibrated_fraud_probability,
+        "context": context.model_dump(mode="json"),
+        "chosen_action": chosen_action,
+        "expected_costs": [_cost_semantics(cost) for cost in expected_costs],
+        "decision_margin_paise": decision_margin_paise,
+        "scenarios": [_scenario_semantics(scenario) for scenario in scenarios],
+        "decision_is_stable_across_scenarios": decision_is_stable_across_scenarios,
+    }
+
+
+def decision_id(**semantics: object) -> str:
+    """Hash an auditable runtime decision independently of JSON presentation."""
+    return canonical_hash(semantics)
 
 
 def build_policy_model(
