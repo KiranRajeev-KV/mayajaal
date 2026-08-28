@@ -8,6 +8,14 @@ from .agent import (
     InvestigationAgentStatus,
 )
 from .artifacts import load_investigation_artifacts, save_investigation_artifacts
+from .comparison import (
+    ComparisonRunOutcome,
+    ConditionalRate,
+    EvaluationCase,
+    ModelComparisonSummary,
+    score_comparison_run,
+    summarize_model_comparison,
+)
 from .errors import GroundingFailureCode, InvestigationGroundingError
 from .grounding import validate_report_grounding
 from .ledger import (
@@ -64,6 +72,9 @@ __all__ = [
     "INVESTIGATION_PROVENANCE_CONTRACT_VERSION",
     "INVESTIGATION_TOOL_NAMES",
     "REPORT_PROVENANCE_CONTRACT_VERSION",
+    "ComparisonRunOutcome",
+    "ConditionalRate",
+    "EvaluationCase",
     "EvidenceFinding",
     "EvidenceItem",
     "EvidenceLedger",
@@ -94,6 +105,7 @@ __all__ = [
     "InvestigationTriggerConfig",
     "InvestigationTriggerReason",
     "InvestigationUsage",
+    "ModelComparisonSummary",
     "ReasoningEffort",
     "RelatedEntity",
     "build_investigation_tools",
@@ -104,6 +116,8 @@ __all__ = [
     "load_investigation_artifacts",
     "report_id",
     "save_investigation_artifacts",
+    "score_comparison_run",
     "should_investigate",
+    "summarize_model_comparison",
     "validate_report_grounding",
 ]

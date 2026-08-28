@@ -782,6 +782,27 @@ their canonical evidence IDs—and therefore dependent investigation/report
 artifacts—must be regenerated. This is an explicit evidence-contract change;
 model, probability, policy, and score lineage are unaffected.
 
+### Investigation-model comparison scoring
+
+`mayajaal.investigation.comparison` is an evaluator-only scoring boundary for
+fixed-case model comparisons. Hidden synthetic expectations may enter this
+module only after an investigation run completes; they never enter an
+`InvestigationRequest`, prompt, tool, `EvidenceItem`, or persisted
+investigation artifact. A run is analytically eligible only when it has no
+grounding failure and its status is `COMPLETED` or `INSUFFICIENT_EVIDENCE`.
+`FAILED`, `BUDGET_EXHAUSTED`, provider/request failures, and invalid structured
+output have `null` quality flags, so their fallback `INCONCLUSIVE` pattern is
+never credited as correct reasoning.
+
+Comparison summaries separate system reliability (`accepted_report_rate`,
+grounding/budget/failed-report/provider failure rates, and
+`end_to_end_success_rate`) from
+conditional analytical quality. `conditional_pattern_accuracy` always carries
+its accepted-report numerator and denominator. Benign false-fraud rates use
+only accepted benign reports and expose benign system failures separately;
+obvious-abuse reasoning misses use accepted reports, while pre-conclusion
+system failures are reported as a separate rate.
+
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and
 late-arrival semantics are intentionally not interpreted by this offline slice.
