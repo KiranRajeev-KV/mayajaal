@@ -88,7 +88,7 @@ class InvestigationToolContext:
             request=request,
             evidence_service=evidence_service,
             score_observation=score_observation,
-            config=config,
+            config=config.model_copy(deep=True),
             budget=InvestigationToolBudget(max_tool_calls=config.max_tool_calls),
             ledger=EvidenceLedger(request),
         )

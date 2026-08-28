@@ -100,14 +100,16 @@ class InvestigationAgentService:
         config: InvestigationConfig,
         model: BaseChatModel | None = None,
     ) -> None:
-        self._config = config
+        # Do not retain application-owned mutable configuration. This snapshot
+        # defines both the provider construction and every run's provenance.
+        self._config = config.model_copy(deep=True)
         self._uses_injected_model = model is not None
-        self._model = model if model is not None else _build_openai_model(config)
+        self._model = model if model is not None else _build_openai_model(self._config)
 
     @property
     def config(self) -> InvestigationConfig:
-        """Return the exact config instance used to create run-scoped tools."""
-        return self._config
+        """Return a value snapshot without exposing mutable runtime configuration."""
+        return self._config.model_copy(deep=True)
 
     def run(
         self,
@@ -137,12 +139,11 @@ class InvestigationAgentService:
         score_observation: ScoreObservation,
     ) -> InvestigationExecution:
         """Run one case and retain only evidence actually returned by tools."""
-        if evidence_service.config is not self._config:
+        if evidence_service.config != self._config:
             raise ValueError(
-                "evidence service and investigation agent must share one config instance"
+                "evidence service and investigation agent must use equal configuration"
             )
-        # Preserve the validated values that governed this run even if a caller
-        # later mutates its reusable Pydantic configuration object.
+        # Preserve the exact internal values that governed this run.
         run_config = self._config.model_copy(deep=True)
         run_agent_model_id = self._agent_model_id()
         context = InvestigationToolContext.create(

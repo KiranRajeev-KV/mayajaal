@@ -57,7 +57,7 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.policy.sensitivity.stressed_odds_multiplier, 2.0)
         self.assertEqual(config.investigation.max_tool_calls, 8)
         self.assertEqual(config.investigation.max_risk_drivers, 5)
-        self.assertIsNone(config.investigation.model_name)
+        self.assertEqual(config.investigation.model_name, "gpt-5.4-mini")
         self.assertIs(config.investigation.reasoning_effort, ReasoningEffort.MEDIUM)
         self.assertTrue(config.investigation.triggers.investigate_review)
 

@@ -420,6 +420,22 @@ class EvidenceServiceTests(unittest.TestCase):
             all(item.facts["related_account_ids"] == [PEER_ID] for item in first)
         )
 
+    def test_service_freezes_external_limits_at_construction(self) -> None:
+        config = InvestigationConfig(max_events_per_tool=1, max_related_accounts=1)
+        service = EvidenceService(
+            projection=self.projection,
+            events=self.events,
+            feature_service=FeatureService(self.projection),
+            frozen_evaluation=self.frozen,
+            config=config,
+        )
+        config.max_events_per_tool = 100
+        config.max_related_accounts = 100
+        self.assertEqual(service.config.max_events_per_tool, 1)
+        self.assertEqual(service.config.max_related_accounts, 1)
+        activity = service.get_related_activity(request())
+        self.assertEqual(activity[0].facts["returned_event_count"], 1)
+
     def test_tool_wrapper_preserves_real_evidence_ids_and_service_bounds(self) -> None:
         service = self.service(max_related_accounts=1)
         score = ScoreObservation(

@@ -91,15 +91,17 @@ class EvidenceService:
         )
         self._feature_service = feature_service
         self._frozen_evaluation = frozen_evaluation
-        self._config = config
+        # Evidence limits are fixed when the service is built; later caller
+        # mutation must not alter a running investigation or its provenance.
+        self._config = config.model_copy(deep=True)
         self._nodes = {
             (node.node_type, node.canonical_id): node for node in projection.nodes
         }
 
     @property
     def config(self) -> InvestigationConfig:
-        """Return the exact validated limits supplied by trusted application code."""
-        return self._config
+        """Return a value snapshot without exposing mutable runtime limits."""
+        return self._config.model_copy(deep=True)
 
     def get_risk_explanation(
         self,

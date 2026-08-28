@@ -721,15 +721,20 @@ ScoreObservation
 → report_id
 ```
 
-`InvestigationExecution` snapshots the exact validated configuration that
-governed the run; artifact saving derives configuration only from that execution
-and loading checks it against the trusted expected configuration. Every trace
-entry must name one of the fixed five tools. A production-created `ChatOpenAI`
+`InvestigationAgentService` and `EvidenceService` each deep-copy validated
+configuration at construction. Their internal snapshots govern model creation,
+reasoning effort, model/tool budgets, graph/event bounds, and provenance; later
+mutation of the caller's configuration cannot affect a run. They accept equal
+configuration values rather than requiring the same mutable object instance.
+`InvestigationExecution` carries the exact runtime snapshot; artifact saving
+derives configuration only from that execution and loading checks it against the
+trusted expected configuration. Every trace entry must name one of the fixed
+five tools. A production-created `ChatOpenAI`
 records its configured model name; an injected/test model records an explicit
 `injected:<module>.<type>` identity instead, so provenance never claims an
 OpenAI model ran when it did not.
 
-`investigation_id` is SHA-256 over canonical JSON for the request/decision
+`investigation_id` (provenance contract v2) is SHA-256 over canonical JSON for the request/decision
 lineage, validated investigation configuration (including reasoning effort),
 non-secret actual agent model identity, fixed tool allowlist, prompt-contract
 version, deterministic tool trace, and returned evidence IDs. It intentionally
@@ -739,8 +744,9 @@ complete grounded report. `save_investigation_artifacts(...)` writes
 `investigation_report.json` only after reconstructing the ledger and grounding
 the report. `load_investigation_artifacts(...)` revalidates schemas, evidence
 identities and request/cutoff bindings, grounding, and both IDs without another
-model call. API keys, paths, and retrieval timestamps are never provenance
-inputs or persisted.
+model call. The v2 contract deliberately rejects older investigation artifacts;
+regenerate only those artifacts after upgrading. API keys, paths, and retrieval
+timestamps are never provenance inputs or persisted.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

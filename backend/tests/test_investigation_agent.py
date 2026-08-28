@@ -96,7 +96,7 @@ class RecordingEvidenceService:
     """Read-only service double used by context-bound tool calls."""
 
     def __init__(self, config: InvestigationConfig) -> None:
-        self.config = config
+        self.config = config.model_copy(deep=True)
         self.calls: list[str] = []
         self.last_request: InvestigationRequest | None = None
 
@@ -363,8 +363,8 @@ class InvestigationAgentTests(unittest.TestCase):
 
     def test_agent_rejects_config_drift_before_building_tools(self) -> None:
         service, _ = self.service_and_evidence()
-        other_service = RecordingEvidenceService(InvestigationConfig())
-        with self.assertRaisesRegex(ValueError, "share one config instance"):
+        other_service = RecordingEvidenceService(InvestigationConfig(max_tool_calls=9))
+        with self.assertRaisesRegex(ValueError, "equal configuration"):
             _ = service.run(
                 request=request(),
                 evidence_service=other_service,  # type: ignore[arg-type]
@@ -385,7 +385,9 @@ class InvestigationAgentTests(unittest.TestCase):
                 }
             }
         )
-        with patch.object(investigation_agent, "create_agent", return_value=fake_agent):
+        with patch.object(
+            investigation_agent, "create_agent", return_value=fake_agent
+        ) as factory:
             execution = service.run_execution(
                 request=request(),
                 evidence_service=evidence_service,  # type: ignore[arg-type]
@@ -393,8 +395,86 @@ class InvestigationAgentTests(unittest.TestCase):
             )
         self.assertEqual(execution.config, config)
         self.assertIsNot(execution.config, config)
+        middleware = factory.call_args.kwargs["middleware"]
+        self.assertEqual(middleware[0].run_limit, 4)
         config.max_tool_calls = 4
         self.assertEqual(execution.config.max_tool_calls, 3)
+
+    def test_equal_config_snapshots_work_after_original_mutation(self) -> None:
+        config = InvestigationConfig(max_tool_calls=1, max_iterations=2)
+        service = InvestigationAgentService(config=config, model=FakeChatModel())
+        evidence_service = RecordingEvidenceService(config)
+        config.max_tool_calls = 8
+        config.max_iterations = 7
+        fake_agent = FakeAgent(
+            state={
+                "structured_response": {
+                    "status": "INSUFFICIENT_EVIDENCE",
+                    "summary": "No evidence was retrieved.",
+                }
+            }
+        )
+        with patch.object(
+            investigation_agent, "create_agent", return_value=fake_agent
+        ) as factory:
+            execution = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        self.assertEqual(execution.config.max_tool_calls, 1)
+        self.assertEqual(execution.config.max_iterations, 2)
+        middleware = factory.call_args.kwargs["middleware"]
+        self.assertEqual(middleware[0].run_limit, 2)
+
+    def test_external_tool_limit_mutation_cannot_expand_run_budget(self) -> None:
+        config = InvestigationConfig(max_tool_calls=1)
+        service = InvestigationAgentService(config=config, model=FakeChatModel())
+        evidence_service = RecordingEvidenceService(config)
+        config.max_tool_calls = 8
+
+        class ToolCallingAgent(FakeAgent):
+            def invoke(self, value: dict[str, object]) -> dict[str, object]:
+                del value
+                tools = cast_tools(factory.call_args.kwargs["tools"])
+                _ = tools[0].invoke({})
+                _ = tools[1].invoke({})
+                raise AssertionError("second tool call should have failed")
+
+        fake_agent = ToolCallingAgent()
+        with patch.object(
+            investigation_agent, "create_agent", return_value=fake_agent
+        ) as factory:
+            report = service.run(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        self.assertIs(report.status, InvestigationStatus.BUDGET_EXHAUSTED)
+        self.assertEqual(report.usage.tool_calls, 1)
+
+    def test_original_model_settings_cannot_change_runtime_identity(self) -> None:
+        config = InvestigationConfig(
+            model_name="configured-before-construction",
+            reasoning_effort=ReasoningEffort.HIGH,
+        )
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch.object(investigation_agent, "ChatOpenAI") as factory,
+        ):
+            service = InvestigationAgentService(config=config)
+            config.model_name = "mutated-after-construction"
+            config.reasoning_effort = ReasoningEffort.LOW
+        self.assertEqual(service.config.model_name, "configured-before-construction")
+        self.assertIs(service.config.reasoning_effort, ReasoningEffort.HIGH)
+        self.assertEqual(
+            service._agent_model_id(),  # pyright: ignore[reportPrivateUsage]
+            "configured-before-construction",
+        )
+        factory.assert_called_once_with(
+            model="configured-before-construction",
+            reasoning_effort=ReasoningEffort.HIGH,
+        )
 
     def test_injected_model_identity_never_claims_configured_openai_model(self) -> None:
         service = InvestigationAgentService(

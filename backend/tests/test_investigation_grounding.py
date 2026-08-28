@@ -11,6 +11,7 @@ from pydantic import JsonValue
 
 import mayajaal.investigation.artifacts as investigation_artifacts
 from mayajaal.investigation import (
+    INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
     EvidenceFinding,
     EvidenceItem,
     EvidenceLedger,
@@ -269,6 +270,7 @@ class InvestigationGroundingTests(unittest.TestCase):
     def test_provenance_is_run_deterministic_while_report_identity_binds_prose(
         self,
     ) -> None:
+        self.assertEqual(INVESTIGATION_PROVENANCE_CONTRACT_VERSION, 2)
         ledger, shared, timeline = self.ledger()
         snapshot = ledger.snapshot()
         config = InvestigationConfig()
@@ -384,6 +386,18 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(),
                     agent_model_id="fixture-model",
                 )
+            _ = save_investigation_artifacts(output, execution)
+            document = json.loads(evidence_path.read_text(encoding="utf-8"))
+            document["investigation_provenance_contract_version"] = 1
+            evidence_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "investigation lineage"):
+                load_investigation_artifacts(
+                    output,
+                    request(),
+                    InvestigationConfig(),
+                    agent_model_id="fixture-model",
+                )
+
             _ = save_investigation_artifacts(output, execution)
             trace_document = json.loads(evidence_path.read_text(encoding="utf-8"))
             trace_document["tool_trace"][0]["tool_name"] = "custom_query"
