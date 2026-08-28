@@ -359,7 +359,11 @@ class InvestigationContractTests(unittest.TestCase):
                 ),
             ),
             related_entities=(
-                RelatedEntity(entity_id="promotion-1", entity_type="promotion"),
+                RelatedEntity(
+                    entity_id="promotion-1",
+                    entity_type="promotion",
+                    evidence_ids=("evidence-1",),
+                ),
             ),
             evidence_ids=("evidence-1",),
             summary="Evidence supports additional review.",

@@ -5,6 +5,14 @@ from .agent import (
     InvestigationAgentService,
     InvestigationAgentStatus,
 )
+from .artifacts import load_investigation_artifacts, save_investigation_artifacts
+from .grounding import InvestigationGroundingError, validate_report_grounding
+from .ledger import (
+    EvidenceLedger,
+    EvidenceLedgerSnapshot,
+    InvestigationExecution,
+    InvestigationToolTrace,
+)
 from .models import (
     EvidenceFinding,
     EvidenceItem,
@@ -22,7 +30,16 @@ from .models import (
     InvestigationUsage,
     RelatedEntity,
 )
-from .provenance import EVIDENCE_CONTRACT_VERSION, evidence_id
+from .provenance import (
+    AGENT_PROMPT_CONTRACT_VERSION,
+    EVIDENCE_CONTRACT_VERSION,
+    INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
+    REPORT_PROVENANCE_CONTRACT_VERSION,
+    evidence_id,
+    investigation_id,
+    investigation_provenance,
+    report_id,
+)
 from .service import EvidenceService
 from .tools import (
     INVESTIGATION_TOOL_NAMES,
@@ -34,10 +51,15 @@ from .tools import (
 from .triggers import should_investigate
 
 __all__ = [
+    "AGENT_PROMPT_CONTRACT_VERSION",
     "EVIDENCE_CONTRACT_VERSION",
+    "INVESTIGATION_PROVENANCE_CONTRACT_VERSION",
     "INVESTIGATION_TOOL_NAMES",
+    "REPORT_PROVENANCE_CONTRACT_VERSION",
     "EvidenceFinding",
     "EvidenceItem",
+    "EvidenceLedger",
+    "EvidenceLedgerSnapshot",
     "EvidenceService",
     "EvidenceSource",
     "EvidenceType",
@@ -45,6 +67,8 @@ __all__ = [
     "InvestigationAgentService",
     "InvestigationAgentStatus",
     "InvestigationConfig",
+    "InvestigationExecution",
+    "InvestigationGroundingError",
     "InvestigationPattern",
     "InvestigationReport",
     "InvestigationRequest",
@@ -53,6 +77,7 @@ __all__ = [
     "InvestigationToolBudget",
     "InvestigationToolBudgetExhausted",
     "InvestigationToolContext",
+    "InvestigationToolTrace",
     "InvestigationTrigger",
     "InvestigationTriggerConfig",
     "InvestigationTriggerReason",
@@ -60,5 +85,11 @@ __all__ = [
     "RelatedEntity",
     "build_investigation_tools",
     "evidence_id",
+    "investigation_id",
+    "investigation_provenance",
+    "load_investigation_artifacts",
+    "report_id",
+    "save_investigation_artifacts",
     "should_investigate",
+    "validate_report_grounding",
 ]

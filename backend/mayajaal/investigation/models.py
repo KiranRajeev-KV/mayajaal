@@ -237,10 +237,11 @@ class EvidenceFinding(SchemaModel):
 
 
 class RelatedEntity(SchemaModel):
-    """A related entity named by an investigation report."""
+    """A related entity named by a report and bound to factual evidence."""
 
     entity_id: NonEmptyId
     entity_type: NonEmptyId
+    evidence_ids: tuple[NonEmptyId, ...] = Field(min_length=1)
 
 
 class InvestigationUsage(SchemaModel):
@@ -284,6 +285,17 @@ class InvestigationReport(SchemaModel):
         } | set(self.timeline_evidence_ids)
         if not referenced_ids.issubset(declared_ids):
             raise ValueError("report findings must reference declared evidence_ids")
+        if self.status in {
+            InvestigationStatus.BUDGET_EXHAUSTED,
+            InvestigationStatus.FAILED,
+        } and (
+            self.key_findings
+            or self.counterevidence
+            or self.timeline_evidence_ids
+            or self.related_entities
+            or self.evidence_ids
+        ):
+            raise ValueError("operational investigation reports cannot retain claims")
         return self
 
 

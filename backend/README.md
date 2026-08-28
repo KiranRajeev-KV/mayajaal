@@ -672,8 +672,9 @@ remain exclusively inside the trusted, context-bound evidence tools.
 `max_iterations` now means the hard LangChain run-level model-call cap, enforced
 outside the prompt by `ModelCallLimitMiddleware(..., exit_behavior="error")`.
 Either exhausted budget returns a typed `BUDGET_EXHAUSTED` report with no model
-claims. Other provider and structured-output errors propagate rather than
-being disguised as evidence-based reports.
+claims. Provider failures propagate rather than being disguised as
+evidence-based reports; invalid model report references fail closed as a
+claim-free application-owned `FAILED` result.
 
 The optional non-secret `[investigation].model_name` must be explicitly set
 for a live run; Mayajaal deliberately supplies no default model because that is
@@ -684,6 +685,51 @@ call. [`.env.example`](.env.example) is a shell template only (copy it to the
 gitignored `.env` and `source .env`); Mayajaal does not auto-load dotenv files.
 This slice uses LangChain's agent runtime only through `create_agent`;
 Mayajaal contains no direct LangGraph orchestration code.
+
+### Grounded investigation records and verified artifacts
+
+Every LangChain tool result is first admitted to an application-owned
+`EvidenceLedger`. The ledger verifies the exact request/cutoff binding and the
+semantic `evidence_id`, deduplicates only evidence with identical full contents,
+and records an ordered tool trace of call index, fixed tool name, and returned
+evidence IDs. Evidence merely available from `EvidenceService` but never
+returned by a tool is not eligible to ground a report.
+
+After structured model output, Mayajaal deterministically verifies that every
+declared report, finding, counterevidence, timeline, and related-entity
+evidence reference exists in this run's ledger. Timeline references must cite
+`TIMELINE_EVENT` evidence, and related entities carry explicit supporting
+evidence IDs. This is referential grounding, not semantic truth detection: it
+does not claim that free-form model prose is correct. Failed grounding produces
+an application-owned `FAILED` report without model claims; an empty
+`BUDGET_EXHAUSTED` report remains valid.
+
+The final trust chain is:
+
+```text
+ScoreObservation
+→ ProbabilityEstimate
+→ PolicyDecision
+→ InvestigationRequest
+→ bounded evidence tools
+→ EvidenceLedger
+→ grounded InvestigationReport
+→ investigation_id
+→ report_id
+```
+
+`investigation_id` is SHA-256 over canonical JSON for the request/decision
+lineage, validated investigation configuration, non-secret agent model
+identity, fixed tool allowlist, prompt-contract version, deterministic tool
+trace, and returned evidence IDs. It intentionally excludes nondeterministic
+report wording. `report_id` separately hashes `investigation_id` and the
+complete grounded report. `save_investigation_artifacts(...)` writes
+`investigation_provenance.json`, `evidence.json`, and
+`investigation_report.json` only after reconstructing the ledger and grounding
+the report. `load_investigation_artifacts(...)` revalidates schemas, evidence
+identities and request/cutoff bindings, grounding, and both IDs without another
+model call. API keys, paths, and retrieval timestamps are never provenance
+inputs or persisted.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

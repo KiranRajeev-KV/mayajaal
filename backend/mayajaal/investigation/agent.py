@@ -15,6 +15,8 @@ from pydantic import Field
 from mayajaal.schemas.common import SchemaModel
 from mayajaal.scoring import ScoreObservation
 
+from .grounding import InvestigationGroundingError, validate_report_grounding
+from .ledger import InvestigationExecution
 from .models import (
     EvidenceFinding,
     InvestigationConfig,
@@ -115,10 +117,25 @@ class InvestigationAgentService:
     ) -> InvestigationReport:
         """Run the fixed task and return a trusted-field-bound report.
 
-        Model and tool limits become a typed ``BUDGET_EXHAUSTED`` report. Other
-        provider or structured-output errors are deliberately propagated: they
-        are not evidence-based reports and must not be mistaken for one.
+        Model and tool limits become a typed ``BUDGET_EXHAUSTED`` report. A
+        model report that cannot satisfy its structured grounding contract
+        fails closed as an application-owned ``FAILED`` report; provider
+        errors still propagate rather than being mistaken for evidence.
         """
+        return self.run_execution(
+            request=request,
+            evidence_service=evidence_service,
+            score_observation=score_observation,
+        ).report
+
+    def run_execution(
+        self,
+        *,
+        request: InvestigationRequest,
+        evidence_service: EvidenceService,
+        score_observation: ScoreObservation,
+    ) -> InvestigationExecution:
+        """Run one case and retain only evidence actually returned by tools."""
         if evidence_service.config is not self._config:
             raise ValueError(
                 "evidence service and investigation agent must share one config instance"
@@ -150,20 +167,45 @@ class InvestigationAgentService:
                 {"messages": [{"role": "user", "content": _task(request)}]}
             )
         except ModelCallLimitExceededError as error:
-            return _budget_exhausted_report(
+            report = _budget_exhausted_report(
                 request,
                 context,
                 iterations=error.run_count,
                 limitation="model-call budget exhausted",
             )
         except InvestigationToolBudgetExhausted:
-            return _budget_exhausted_report(
+            report = _budget_exhausted_report(
                 request,
                 context,
                 iterations=0,
                 limitation="tool-call budget exhausted",
             )
-        return _report_from_state(request, context, state)
+        else:
+            try:
+                candidate = _report_from_state(request, context, state)
+                report = validate_report_grounding(
+                    candidate, request, context.ledger.snapshot()
+                )
+            except (InvestigationGroundingError, ValueError):
+                report = _grounding_failed_report(
+                    request,
+                    InvestigationUsage(
+                        tool_calls=context.budget.used_tool_calls,
+                        iterations=_state_run_model_call_count(state),
+                    ),
+                )
+        return InvestigationExecution(
+            report=report,
+            snapshot=context.ledger.snapshot(),
+            agent_model_id=self._agent_model_id(),
+        )
+
+    def _agent_model_id(self) -> str:
+        """Return non-secret configured model identity for run provenance."""
+        if self._config.model_name is not None:
+            return self._config.model_name
+        model_type = type(self._model)
+        return f"injected:{model_type.__module__}.{model_type.__qualname__}"
 
 
 def _build_openai_model(config: InvestigationConfig) -> ChatOpenAI:
@@ -242,6 +284,20 @@ def _budget_exhausted_report(
             tool_calls=context.budget.used_tool_calls,
             iterations=iterations,
         ),
+    )
+
+
+def _grounding_failed_report(
+    request: InvestigationRequest, usage: InvestigationUsage
+) -> InvestigationReport:
+    """Fail closed without retaining claims when referential grounding rejects them."""
+    return InvestigationReport(
+        request=request,
+        policy_action=request.policy_action,
+        status=InvestigationStatus.FAILED,
+        pattern=InvestigationPattern.INCONCLUSIVE,
+        limitations=("report grounding validation failed",),
+        usage=usage,
     )
 
 

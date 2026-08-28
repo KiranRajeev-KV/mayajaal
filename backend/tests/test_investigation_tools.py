@@ -5,7 +5,7 @@ import unittest
 from datetime import UTC, datetime
 from typing import cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 import mayajaal.investigation.tools as investigation_tools
 from mayajaal.investigation import (
@@ -20,6 +20,7 @@ from mayajaal.investigation import (
     InvestigationToolBudgetExhausted,
     InvestigationToolContext,
     build_investigation_tools,
+    evidence_id,
 )
 from mayajaal.policy import PolicyAction
 from mayajaal.scoring import ScoreObservation
@@ -63,14 +64,23 @@ def item(
     evidence_type: EvidenceType = EvidenceType.RELATED_ACCOUNT_ACTIVITY,
 ) -> EvidenceItem:
     """Return one serializable, cutoff-safe evidence item."""
+    fixed_request = request()
+    facts: dict[str, JsonValue] = {"returned_event_count": 1, "truncated": False}
     return EvidenceItem.from_request(
-        request(),
-        evidence_id="evidence-fixture",
+        fixed_request,
+        evidence_id=evidence_id(
+            fixed_request,
+            evidence_type=evidence_type,
+            source=EvidenceSource.EVENT_HISTORY,
+            observed_at=cutoff(),
+            subject_ids=("account-subject",),
+            facts=facts,
+        ),
         evidence_type=evidence_type,
         source=EvidenceSource.EVENT_HISTORY,
         observed_at=cutoff(),
         subject_ids=("account-subject",),
-        facts={"returned_event_count": 1, "truncated": False},
+        facts=facts,
     )
 
 
@@ -231,6 +241,21 @@ class InvestigationToolTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertFalse(first[0]["facts"]["truncated"])
         self.assertNotIn("synthetic", str(first).casefold())
+
+    def test_only_tool_returned_evidence_enters_the_runtime_ledger(self) -> None:
+        context, _ = self.context()
+        tools = {tool.name: tool for tool in build_investigation_tools(context)}
+        returned = tools["shared_identity_summary"].invoke({})
+        snapshot = context.ledger.snapshot()
+        self.assertEqual(len(snapshot.evidence), 1)
+        self.assertEqual(snapshot.evidence[0].evidence_id, returned[0]["evidence_id"])
+        self.assertEqual(len(snapshot.tool_trace), 1)
+        self.assertEqual(snapshot.tool_trace[0].call_index, 1)
+        self.assertEqual(snapshot.tool_trace[0].tool_name, "shared_identity_summary")
+        self.assertEqual(
+            snapshot.tool_trace[0].returned_evidence_ids,
+            (str(returned[0]["evidence_id"]),),
+        )
 
     def test_adapter_exposes_no_openai_or_arbitrary_execution_interfaces(self) -> None:
         source = inspect.getsource(investigation_tools).casefold()

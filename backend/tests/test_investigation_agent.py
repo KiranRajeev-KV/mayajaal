@@ -15,6 +15,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool
+from pydantic import JsonValue
 
 import mayajaal.investigation.agent as investigation_agent
 from mayajaal.investigation import (
@@ -30,6 +31,7 @@ from mayajaal.investigation import (
     InvestigationRequest,
     InvestigationStatus,
     InvestigationSubjectType,
+    evidence_id,
 )
 from mayajaal.policy import PolicyAction
 from mayajaal.scoring import ScoreObservation
@@ -99,14 +101,25 @@ class RecordingEvidenceService:
 
     def _item(self, request: InvestigationRequest) -> EvidenceItem:
         self.last_request = request
+        facts: dict[str, JsonValue] = {
+            "returned_event_count": 1,
+            "truncated": False,
+        }
         return EvidenceItem.from_request(
             request,
-            evidence_id="evidence-fixture",
+            evidence_id=evidence_id(
+                request,
+                evidence_type=EvidenceType.RELATED_ACCOUNT_ACTIVITY,
+                source=EvidenceSource.EVENT_HISTORY,
+                observed_at=request.cutoff_time,
+                subject_ids=(request.subject_id,),
+                facts=facts,
+            ),
             evidence_type=EvidenceType.RELATED_ACCOUNT_ACTIVITY,
             source=EvidenceSource.EVENT_HISTORY,
             observed_at=request.cutoff_time,
             subject_ids=(request.subject_id,),
-            facts={"returned_event_count": 1, "truncated": False},
+            facts=facts,
         )
 
     def get_risk_explanation(
@@ -292,6 +305,31 @@ class InvestigationAgentTests(unittest.TestCase):
         self.assertIs(report.status, InvestigationStatus.BUDGET_EXHAUSTED)
         self.assertEqual(report.usage.iterations, 2)
         self.assertEqual(report.limitations, ("model-call budget exhausted",))
+
+    def test_invented_model_evidence_fails_closed_without_claims(self) -> None:
+        service, evidence_service = self.service_and_evidence()
+        fake_agent = FakeAgent(
+            state={
+                "structured_response": {
+                    "status": "COMPLETED",
+                    "evidence_ids": ["invented-evidence"],
+                    "summary": "Unsupported conclusion.",
+                }
+            }
+        )
+        with patch.object(investigation_agent, "create_agent", return_value=fake_agent):
+            execution = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        self.assertIs(execution.report.status, InvestigationStatus.FAILED)
+        self.assertEqual(execution.report.evidence_ids, ())
+        self.assertEqual(execution.report.key_findings, ())
+        self.assertEqual(execution.report.counterevidence, ())
+        self.assertEqual(
+            execution.report.limitations, ("report grounding validation failed",)
+        )
 
     def test_shared_tool_budget_remains_enforced_and_fails_closed(self) -> None:
         service, evidence_service = self.service_and_evidence(max_tool_calls=1)

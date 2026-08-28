@@ -15,6 +15,7 @@ from pydantic import JsonValue
 
 from mayajaal.scoring import ScoreObservation
 
+from .ledger import EvidenceLedger
 from .models import InvestigationConfig, InvestigationRequest
 from .service import EvidenceService
 
@@ -70,6 +71,7 @@ class InvestigationToolContext:
     score_observation: ScoreObservation
     config: InvestigationConfig
     budget: InvestigationToolBudget = field(repr=False)
+    ledger: EvidenceLedger = field(repr=False)
 
     @classmethod
     def create(
@@ -94,6 +96,7 @@ class InvestigationToolContext:
             score_observation=score_observation,
             config=config,
             budget=InvestigationToolBudget(max_tool_calls=config.max_tool_calls),
+            ledger=EvidenceLedger(request),
         )
 
 
@@ -160,4 +163,5 @@ def _invoke(
         items = service.get_case_timeline(context.request)
     else:
         raise ValueError(f"unsupported investigation capability: {capability}")
+    context.ledger.record(capability, items)
     return [item.model_dump(mode="json") for item in items]
