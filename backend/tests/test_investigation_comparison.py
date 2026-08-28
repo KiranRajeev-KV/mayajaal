@@ -321,6 +321,67 @@ class InvestigationComparisonScoringTests(unittest.TestCase):
             (("case_timeline", 72), ("related_activity", 52)),
         )
 
+    def test_comparison_context_metrics_must_reconcile_exactly(self) -> None:
+        expected = case("promo", InvestigationPattern.PROMO_RING)
+        total = ModelFacingContextMetrics(
+            model_facing_evidence_count=1,
+            model_facing_alias_count=1,
+            model_facing_event_count=0,
+            model_facing_serialized_chars=10,
+            model_facing_serialized_bytes=10,
+        )
+        call = ModelFacingToolCallMetrics(
+            call_index=1,
+            tool_name="risk_explanation",
+            **total.model_dump(),
+        )
+        with self.assertRaisesRegex(ValueError, "require total"):
+            score_comparison_run(
+                model="fixture-model",
+                case=expected,
+                status=InvestigationStatus.COMPLETED,
+                pattern=InvestigationPattern.PROMO_RING,
+                model_facing_tool_call_metrics=(call,),
+            )
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            score_comparison_run(
+                model="fixture-model",
+                case=expected,
+                status=InvestigationStatus.COMPLETED,
+                pattern=InvestigationPattern.PROMO_RING,
+                model_facing_context_metrics=total.model_copy(
+                    update={"model_facing_serialized_bytes": 11}
+                ),
+                model_facing_tool_call_metrics=(call,),
+            )
+        duplicate_index = call.model_copy(update={"call_index": 1})
+        with self.assertRaisesRegex(ValueError, "indexes must be consecutive"):
+            score_comparison_run(
+                model="fixture-model",
+                case=expected,
+                status=InvestigationStatus.COMPLETED,
+                pattern=InvestigationPattern.PROMO_RING,
+                model_facing_context_metrics=total.model_copy(
+                    update={
+                        "model_facing_evidence_count": 2,
+                        "model_facing_alias_count": 2,
+                        "model_facing_serialized_chars": 20,
+                        "model_facing_serialized_bytes": 20,
+                    }
+                ),
+                model_facing_tool_call_metrics=(call, duplicate_index),
+            )
+        skipped_index = call.model_copy(update={"call_index": 2})
+        with self.assertRaisesRegex(ValueError, "indexes must be consecutive"):
+            score_comparison_run(
+                model="fixture-model",
+                case=expected,
+                status=InvestigationStatus.COMPLETED,
+                pattern=InvestigationPattern.PROMO_RING,
+                model_facing_context_metrics=total,
+                model_facing_tool_call_metrics=(skipped_index,),
+            )
+
     def test_hidden_expectations_are_not_runtime_or_artifact_contracts(self) -> None:
         import mayajaal.investigation.agent as agent
         import mayajaal.investigation.artifacts as artifacts

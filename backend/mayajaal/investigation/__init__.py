@@ -29,6 +29,7 @@ from .ledger import (
     ModelFacingToolCallMetrics,
     model_facing_context_metrics,
     model_facing_tool_call_metrics,
+    reconcile_model_facing_metrics,
 )
 from .models import (
     EvidenceFinding,
@@ -126,6 +127,7 @@ __all__ = [
     "load_investigation_artifacts",
     "model_facing_context_metrics",
     "model_facing_tool_call_metrics",
+    "reconcile_model_facing_metrics",
     "report_id",
     "save_investigation_artifacts",
     "score_comparison_run",

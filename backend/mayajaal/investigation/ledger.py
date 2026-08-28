@@ -74,6 +74,27 @@ class InvestigationExecution:
     model_facing_context_metrics: ModelFacingContextMetrics | None = None
     model_facing_tool_call_metrics: tuple[ModelFacingToolCallMetrics, ...] = ()
 
+    def __post_init__(self) -> None:
+        """Populate omitted observability from the immutable run snapshot.
+
+        Explicit values remain untouched here so the artifact boundary can fail
+        closed on caller tampering rather than silently replacing it.
+        """
+        if (
+            self.model_facing_context_metrics is None
+            and not self.model_facing_tool_call_metrics
+        ):
+            object.__setattr__(
+                self,
+                "model_facing_context_metrics",
+                model_facing_context_metrics(self.snapshot),
+            )
+            object.__setattr__(
+                self,
+                "model_facing_tool_call_metrics",
+                model_facing_tool_call_metrics(self.snapshot),
+            )
+
 
 @dataclass
 class EvidenceLedger:
@@ -246,6 +267,39 @@ def model_facing_tool_call_metrics(
         for trace in snapshot.tool_trace
         if trace.model_facing_metrics is not None
     )
+
+
+def reconcile_model_facing_metrics(
+    total: ModelFacingContextMetrics | None,
+    tool_calls: tuple[ModelFacingToolCallMetrics, ...],
+) -> None:
+    """Reject contradictory context telemetry at a consumer boundary."""
+    if tool_calls and total is None:
+        raise ValueError("tool-call metrics require total context metrics")
+    call_indexes = tuple(call.call_index for call in tool_calls)
+    if call_indexes != tuple(range(1, len(tool_calls) + 1)):
+        raise ValueError("tool-call metric indexes must be consecutive from one")
+    if total is None:
+        return
+    expected = ModelFacingContextMetrics(
+        model_facing_evidence_count=sum(
+            call.model_facing_evidence_count for call in tool_calls
+        ),
+        model_facing_alias_count=sum(
+            call.model_facing_alias_count for call in tool_calls
+        ),
+        model_facing_event_count=sum(
+            call.model_facing_event_count for call in tool_calls
+        ),
+        model_facing_serialized_chars=sum(
+            call.model_facing_serialized_chars for call in tool_calls
+        ),
+        model_facing_serialized_bytes=sum(
+            call.model_facing_serialized_bytes for call in tool_calls
+        ),
+    )
+    if total != expected:
+        raise ValueError("total context metrics do not match tool-call metrics")
 
 
 def _model_facing_evidence(

@@ -3,6 +3,7 @@
 import inspect
 import json
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -466,6 +467,7 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(max_tool_calls=9),
                     agent_model_id="fixture-model",
                 )
+
             with self.assertRaisesRegex(ValueError, "trusted request"):
                 load_investigation_artifacts(
                     output,
@@ -484,6 +486,7 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(),
                     agent_model_id="fixture-model",
                 )
+
             _ = save_investigation_artifacts(output, execution)
             document = json.loads(evidence_path.read_text(encoding="utf-8"))
             document["investigation_provenance_contract_version"] = 1
@@ -534,6 +537,40 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(),
                     agent_model_id="fixture-model",
                 )
+
+    def test_save_rejects_context_metric_tampering_before_writing(self) -> None:
+        ledger, shared, timeline = self.ledger()
+        execution = InvestigationExecution(
+            report=self.report(shared, timeline),
+            snapshot=ledger.snapshot(),
+            agent_model_id="fixture-model",
+            config=InvestigationConfig(),
+        )
+        assert execution.model_facing_context_metrics is not None
+        assert execution.model_facing_tool_call_metrics
+        tampered_total = replace(
+            execution,
+            model_facing_context_metrics=execution.model_facing_context_metrics.model_copy(
+                update={"model_facing_serialized_bytes": 999}
+            ),
+        )
+        tampered_calls = replace(
+            execution,
+            model_facing_tool_call_metrics=(
+                execution.model_facing_tool_call_metrics[0].model_copy(
+                    update={"model_facing_serialized_chars": 999}
+                ),
+                *execution.model_facing_tool_call_metrics[1:],
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "must-not-exist"
+            with self.assertRaisesRegex(ValueError, "total context metrics"):
+                save_investigation_artifacts(output, tampered_total)
+            self.assertFalse(output.exists())
+            with self.assertRaisesRegex(ValueError, "tool-call metrics"):
+                save_investigation_artifacts(output, tampered_calls)
+            self.assertFalse(output.exists())
 
     def test_rejected_candidate_diagnostic_is_non_authoritative_and_round_trips(
         self,

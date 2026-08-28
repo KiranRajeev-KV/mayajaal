@@ -10,11 +10,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from mayajaal.schemas.common import SchemaModel
 
-from .ledger import ModelFacingContextMetrics, ModelFacingToolCallMetrics
+from .ledger import (
+    ModelFacingContextMetrics,
+    ModelFacingToolCallMetrics,
+    reconcile_model_facing_metrics,
+)
 from .models import InvestigationPattern, InvestigationStatus
 
 _ABUSE_PATTERNS = frozenset(
@@ -62,6 +66,15 @@ class ComparisonRunOutcome(SchemaModel):
     end_to_end_success: bool
     model_facing_context_metrics: ModelFacingContextMetrics | None = None
     model_facing_tool_call_metrics: tuple[ModelFacingToolCallMetrics, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_context_metric_reconciliation(self) -> ComparisonRunOutcome:
+        """Ensure aggregate comparison telemetry cannot contradict raw calls."""
+        reconcile_model_facing_metrics(
+            self.model_facing_context_metrics,
+            self.model_facing_tool_call_metrics,
+        )
+        return self
 
 
 class ConditionalRate(SchemaModel):

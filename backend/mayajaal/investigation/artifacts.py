@@ -15,6 +15,7 @@ from .ledger import (
     ModelFacingContextMetrics,
     model_facing_context_metrics,
     model_facing_tool_call_metrics,
+    reconcile_model_facing_metrics,
 )
 from .models import (
     EvidenceItem,
@@ -40,6 +41,13 @@ def save_investigation_artifacts(
     """Verify a run from trusted contents before writing any report artifacts."""
     request = execution.report.request
     snapshot = _verified_snapshot(request, execution.snapshot)
+    recomputed_context_metrics = model_facing_context_metrics(snapshot)
+    recomputed_tool_metrics = model_facing_tool_call_metrics(snapshot)
+    reconcile_model_facing_metrics(recomputed_context_metrics, recomputed_tool_metrics)
+    if execution.model_facing_context_metrics != recomputed_context_metrics:
+        raise ValueError("execution total context metrics do not match its snapshot")
+    if execution.model_facing_tool_call_metrics != recomputed_tool_metrics:
+        raise ValueError("execution tool-call metrics do not match its snapshot")
     validate_report_grounding(execution.report, request, snapshot)
     provenance = investigation_provenance(
         request=request,

@@ -722,6 +722,10 @@ not evidence facts or provenance: they do not affect `evidence_id`,
 `InvestigationExecution` exposes both totals and raw per-tool measurements for
 comparison artifacts. They are intentionally not converted to estimated token
 counts; provider token usage is model-dependent and remains a separate metric.
+Before persistence and again at the evaluator outcome boundary, the run total
+must equal the exact sum of its consecutive (starting at 1) per-tool metrics;
+contradictory observability records are rejected. This validation still does
+not make the metrics provenance inputs.
 
 Canonical evidence IDs remain SHA-256 provenance identifiers in the ledger and
 persisted artifacts. To keep structured model output practical, each newly
