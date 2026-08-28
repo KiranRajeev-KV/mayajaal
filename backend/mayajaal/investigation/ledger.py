@@ -1,5 +1,6 @@
 """Run-scoped records of the factual evidence actually returned to an agent."""
 
+import re
 from dataclasses import dataclass, field
 
 from pydantic import Field, field_validator
@@ -56,6 +57,7 @@ class EvidenceLedger:
 
     request: InvestigationRequest
     _items: dict[str, EvidenceItem] = field(default_factory=dict, init=False)
+    _aliases: dict[str, str] = field(default_factory=dict, init=False)
     _trace: list[InvestigationToolTrace] = field(default_factory=list, init=False)
 
     def record(self, tool_name: str, items: tuple[EvidenceItem, ...]) -> None:
@@ -68,7 +70,9 @@ class EvidenceLedger:
             existing = self._items.get(item.evidence_id)
             if existing is not None and existing != item:
                 raise ValueError("conflicting duplicate evidence_id returned by tools")
-            self._items.setdefault(item.evidence_id, item)
+            if existing is None:
+                self._items[item.evidence_id] = item
+                self._aliases[item.evidence_id] = _evidence_alias(len(self._items))
             returned_ids.append(item.evidence_id)
         self._trace.append(
             InvestigationToolTrace(
@@ -83,6 +87,28 @@ class EvidenceLedger:
         return EvidenceLedgerSnapshot(
             evidence=tuple(self._items.values()), tool_trace=tuple(self._trace)
         )
+
+    def alias_for(self, canonical_evidence_id: str) -> str:
+        """Return the deterministic model-facing reference for admitted evidence."""
+        try:
+            return self._aliases[canonical_evidence_id]
+        except KeyError as error:
+            raise ValueError(
+                "evidence_id has not been admitted to this ledger"
+            ) from error
+
+    def resolve_alias(self, alias: str) -> str:
+        """Resolve one strict, run-local evidence alias to its canonical ID."""
+        if not _EVIDENCE_ALIAS_PATTERN.fullmatch(alias):
+            raise ValueError("evidence reference must use the E001 alias format")
+        for canonical_id, admitted_alias in self._aliases.items():
+            if admitted_alias == alias:
+                return canonical_id
+        raise ValueError("evidence reference is not admitted to this investigation")
+
+    def resolve_aliases(self, aliases: tuple[str, ...]) -> tuple[str, ...]:
+        """Resolve ordered model references without any fuzzy matching."""
+        return tuple(self.resolve_alias(alias) for alias in aliases)
 
     @classmethod
     def from_snapshot(
@@ -125,3 +151,11 @@ def _verify_evidence(item: EvidenceItem, request: InvestigationRequest) -> None:
     )
     if item.evidence_id != expected_id:
         raise ValueError("evidence_id does not match deterministic evidence semantics")
+
+
+_EVIDENCE_ALIAS_PATTERN = re.compile(r"E[0-9]{3,}")
+
+
+def _evidence_alias(admission_index: int) -> str:
+    """Return a stable, readable reference based only on ledger admission order."""
+    return f"E{admission_index:03d}"

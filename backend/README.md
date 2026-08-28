@@ -700,6 +700,14 @@ and records an ordered tool trace of call index, fixed tool name, and returned
 evidence IDs. Evidence merely available from `EvidenceService` but never
 returned by a tool is not eligible to ground a report.
 
+Canonical evidence IDs remain SHA-256 provenance identifiers in the ledger and
+persisted artifacts. To keep structured model output practical, each newly
+admitted item also receives a deterministic run-local alias in admission order
+(`E001`, `E002`, ...); repeated evidence keeps its original alias. Tools expose
+only this short `evidence_ref` to the model. Before grounding, Mayajaal resolves
+every strict alias against the current ledger, rejects malformed or unknown
+references, and constructs the trusted report with canonical evidence IDs.
+
 After structured model output, Mayajaal deterministically verifies that every
 declared report, finding, counterevidence, timeline, and related-entity
 evidence reference exists in this run's ledger. Timeline references must cite

@@ -16,7 +16,7 @@ from mayajaal.scoring import ScoreObservation
 
 from .allowlist import INVESTIGATION_TOOL_NAMES as _INVESTIGATION_TOOL_NAMES
 from .ledger import EvidenceLedger
-from .models import InvestigationConfig, InvestigationRequest
+from .models import EvidenceItem, InvestigationConfig, InvestigationRequest
 from .service import EvidenceService
 
 INVESTIGATION_TOOL_NAMES = _INVESTIGATION_TOOL_NAMES
@@ -158,4 +158,18 @@ def _invoke(
     else:
         raise ValueError(f"unsupported investigation capability: {capability}")
     context.ledger.record(capability, items)
-    return [item.model_dump(mode="json") for item in items]
+    return [_model_facing_evidence(context, item) for item in items]
+
+
+def _model_facing_evidence(
+    context: InvestigationToolContext, item: EvidenceItem
+) -> dict[str, JsonValue]:
+    """Serialize evidence for the model without exposing a long canonical hash."""
+    # ``EvidenceItem`` is intentionally kept canonical in the ledger and all
+    # persisted artifacts. The alias is a run-local presentation reference.
+    payload = item.model_dump(mode="json")
+    canonical_id = payload.pop("evidence_id")
+    if not isinstance(canonical_id, str):
+        raise AssertionError("EvidenceItem serialization must contain evidence_id")
+    payload["evidence_ref"] = context.ledger.alias_for(canonical_id)
+    return payload

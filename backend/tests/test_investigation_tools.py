@@ -165,15 +165,21 @@ class InvestigationToolTests(unittest.TestCase):
                 forbidden_parameters.isdisjoint(schema.get("properties", {}))
             )
 
-    def test_each_wrapper_returns_existing_evidence_semantics(self) -> None:
+    def test_each_wrapper_returns_model_facing_alias_and_preserves_evidence(
+        self,
+    ) -> None:
         context, service = self.context()
         tools = {
             wrapped_tool.name: wrapped_tool
             for wrapped_tool in build_investigation_tools(context)
         }
         expected = item().model_dump(mode="json")
+        canonical_id = expected.pop("evidence_id")
+        expected["evidence_ref"] = "E001"
         actual = tools["related_activity"].invoke({})
         self.assertEqual(actual, [expected])
+        self.assertNotIn("evidence_id", actual[0])
+        self.assertEqual(context.ledger.alias_for(str(canonical_id)), "E001")
         self.assertEqual(service.calls, [("related_activity", context.request)])
         self.assertEqual(context.budget.used_tool_calls, 1)
         self.assertEqual(context.request.subject_id, "account-subject")
@@ -248,14 +254,41 @@ class InvestigationToolTests(unittest.TestCase):
         returned = tools["shared_identity_summary"].invoke({})
         snapshot = context.ledger.snapshot()
         self.assertEqual(len(snapshot.evidence), 1)
-        self.assertEqual(snapshot.evidence[0].evidence_id, returned[0]["evidence_id"])
+        self.assertEqual(returned[0]["evidence_ref"], "E001")
+        self.assertNotIn("evidence_id", returned[0])
+        self.assertEqual(
+            context.ledger.resolve_alias("E001"), snapshot.evidence[0].evidence_id
+        )
         self.assertEqual(len(snapshot.tool_trace), 1)
         self.assertEqual(snapshot.tool_trace[0].call_index, 1)
         self.assertEqual(snapshot.tool_trace[0].tool_name, "shared_identity_summary")
         self.assertEqual(
             snapshot.tool_trace[0].returned_evidence_ids,
-            (str(returned[0]["evidence_id"]),),
+            (snapshot.evidence[0].evidence_id,),
         )
+
+    def test_aliases_follow_first_admission_and_repeated_evidence_keeps_alias(
+        self,
+    ) -> None:
+        context, _ = self.context()
+        tools = {tool.name: tool for tool in build_investigation_tools(context)}
+        first = tools["risk_explanation"].invoke({})
+        repeated = tools["risk_explanation"].invoke({})
+        self.assertEqual(first[0]["evidence_ref"], "E001")
+        self.assertEqual(repeated[0]["evidence_ref"], "E001")
+        self.assertEqual(len(context.ledger.snapshot().evidence), 1)
+        with self.assertRaisesRegex(ValueError, "E001 alias format"):
+            _ = context.ledger.resolve_alias("not-an-alias")
+
+        other_context, _ = self.context()
+        other_tools = {
+            tool.name: tool for tool in build_investigation_tools(other_context)
+        }
+        _ = other_tools["risk_explanation"].invoke({})
+        other_alias = other_tools["related_activity"].invoke({})[0]["evidence_ref"]
+        self.assertEqual(other_alias, "E002")
+        with self.assertRaisesRegex(ValueError, "not admitted"):
+            _ = context.ledger.resolve_alias(str(other_alias))
 
     def test_adapter_exposes_no_openai_or_arbitrary_execution_interfaces(self) -> None:
         source = inspect.getsource(investigation_tools).casefold()

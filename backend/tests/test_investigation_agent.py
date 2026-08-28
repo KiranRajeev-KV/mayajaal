@@ -313,7 +313,7 @@ class InvestigationAgentTests(unittest.TestCase):
             state={
                 "structured_response": {
                     "status": "COMPLETED",
-                    "evidence_ids": ["invented-evidence"],
+                    "evidence_refs": ["E999"],
                     "summary": "Unsupported conclusion.",
                 }
             }
@@ -331,6 +331,52 @@ class InvestigationAgentTests(unittest.TestCase):
         self.assertEqual(
             execution.report.limitations, ("report grounding validation failed",)
         )
+
+    def test_model_aliases_resolve_to_canonical_evidence_before_grounding(self) -> None:
+        service, evidence_service = self.service_and_evidence()
+        test_case = self
+
+        class ToolCallingAgent(FakeAgent):
+            def invoke(self, value: dict[str, object]) -> dict[str, object]:
+                del value
+                wrapped = cast_tools(factory.call_args.kwargs["tools"])
+                returned = wrapped[0].invoke({})
+                test_case.assertNotIn("evidence_id", returned[0])
+                test_case.assertEqual(returned[0]["evidence_ref"], "E001")
+                return {
+                    "structured_response": {
+                        "status": "COMPLETED",
+                        "key_findings": [
+                            {
+                                "claim": "The returned observation is relevant.",
+                                "evidence_refs": ["E001"],
+                            }
+                        ],
+                        "evidence_refs": ["E001"],
+                        "summary": "Grounded through a short evidence reference.",
+                    }
+                }
+
+        fake_agent = ToolCallingAgent()
+        with patch.object(
+            investigation_agent, "create_agent", return_value=fake_agent
+        ) as factory:
+            execution = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        canonical_id = execution.snapshot.evidence[0].evidence_id
+        self.assertEqual(execution.report.evidence_ids, (canonical_id,))
+        self.assertEqual(execution.report.key_findings[0].evidence_ids, (canonical_id,))
+
+    def test_model_schema_requires_short_aliases_not_canonical_evidence_ids(
+        self,
+    ) -> None:
+        with self.assertRaises(ValueError):
+            _ = InvestigationAgentOutput.model_validate(
+                {"status": "COMPLETED", "evidence_refs": ["a" * 64]}
+            )
 
     def test_shared_tool_budget_remains_enforced_and_fails_closed(self) -> None:
         service, evidence_service = self.service_and_evidence(max_tool_calls=1)

@@ -3,7 +3,7 @@
 import os
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Protocol, cast
+from typing import Annotated, Protocol, cast
 
 from langchain.agents import create_agent  # pyright: ignore[reportUnknownVariableType]
 from langchain.agents.middleware import ModelCallLimitMiddleware
@@ -43,16 +43,34 @@ class InvestigationAgentStatus(StrEnum):
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
 
 
+EvidenceReference = Annotated[str, Field(pattern=r"^E[0-9]{3,}$")]
+
+
+class InvestigationAgentFinding(SchemaModel):
+    """A model claim supported by short, run-local evidence references."""
+
+    claim: str = Field(min_length=1)
+    evidence_refs: tuple[EvidenceReference, ...] = Field(min_length=1)
+
+
+class InvestigationAgentRelatedEntity(SchemaModel):
+    """A model-named entity with short evidence references for grounding."""
+
+    entity_id: str = Field(min_length=1)
+    entity_type: str = Field(min_length=1)
+    evidence_refs: tuple[EvidenceReference, ...] = Field(min_length=1)
+
+
 class InvestigationAgentOutput(SchemaModel):
     """Only the bounded factual-analysis fields an investigation model may set."""
 
     status: InvestigationAgentStatus
     pattern: InvestigationPattern = InvestigationPattern.INCONCLUSIVE
-    key_findings: tuple[EvidenceFinding, ...] = ()
-    counterevidence: tuple[EvidenceFinding, ...] = ()
-    timeline_evidence_ids: tuple[str, ...] = ()
-    related_entities: tuple[RelatedEntity, ...] = ()
-    evidence_ids: tuple[str, ...] = ()
+    key_findings: tuple[InvestigationAgentFinding, ...] = ()
+    counterevidence: tuple[InvestigationAgentFinding, ...] = ()
+    timeline_evidence_refs: tuple[EvidenceReference, ...] = ()
+    related_entities: tuple[InvestigationAgentRelatedEntity, ...] = ()
+    evidence_refs: tuple[EvidenceReference, ...] = ()
     summary: str | None = Field(default=None, min_length=1)
     limitations: tuple[str, ...] = ()
 
@@ -62,7 +80,7 @@ Investigate coordinated abuse only from evidence returned by the approved tools.
 
 Rules:
 - Treat TreeSHAP risk drivers as model explanations, never factual proof.
-- Cite evidence IDs for every factual finding and actively seek benign or
+- Cite short evidence references for every factual finding and actively seek benign or
   counterevidence. Shared IPs, addresses, devices, or payment identities alone
   never prove fraud.
 - Report uncertainty and missing evidence. Use INCONCLUSIVE or
@@ -73,6 +91,8 @@ Rules:
 - You can use only the provided read-only evidence tools. Do not attempt to
   access databases, files, networks, shell commands, web tools, or any other
   capability.
+- Tool results expose short evidence references such as E001. Cite those exact
+  references in the structured output; never invent an evidence reference.
 """
 
 
@@ -268,11 +288,32 @@ def _report_from_state(
         policy_action=request.policy_action,
         status=InvestigationStatus(output.status.value),
         pattern=output.pattern,
-        key_findings=output.key_findings,
-        counterevidence=output.counterevidence,
-        timeline_evidence_ids=output.timeline_evidence_ids,
-        related_entities=output.related_entities,
-        evidence_ids=output.evidence_ids,
+        key_findings=tuple(
+            EvidenceFinding(
+                claim=finding.claim,
+                evidence_ids=context.ledger.resolve_aliases(finding.evidence_refs),
+            )
+            for finding in output.key_findings
+        ),
+        counterevidence=tuple(
+            EvidenceFinding(
+                claim=finding.claim,
+                evidence_ids=context.ledger.resolve_aliases(finding.evidence_refs),
+            )
+            for finding in output.counterevidence
+        ),
+        timeline_evidence_ids=context.ledger.resolve_aliases(
+            output.timeline_evidence_refs
+        ),
+        related_entities=tuple(
+            RelatedEntity(
+                entity_id=related.entity_id,
+                entity_type=related.entity_type,
+                evidence_ids=context.ledger.resolve_aliases(related.evidence_refs),
+            )
+            for related in output.related_entities
+        ),
+        evidence_ids=context.ledger.resolve_aliases(output.evidence_refs),
         summary=output.summary,
         limitations=output.limitations,
         usage=InvestigationUsage(

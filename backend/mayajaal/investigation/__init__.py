@@ -1,7 +1,9 @@
 """Read-only investigation contracts and deterministic trigger rules."""
 
 from .agent import (
+    InvestigationAgentFinding,
     InvestigationAgentOutput,
+    InvestigationAgentRelatedEntity,
     InvestigationAgentService,
     InvestigationAgentStatus,
 )
@@ -64,7 +66,9 @@ __all__ = [
     "EvidenceService",
     "EvidenceSource",
     "EvidenceType",
+    "InvestigationAgentFinding",
     "InvestigationAgentOutput",
+    "InvestigationAgentRelatedEntity",
     "InvestigationAgentService",
     "InvestigationAgentStatus",
     "InvestigationConfig",

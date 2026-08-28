@@ -436,7 +436,7 @@ class EvidenceServiceTests(unittest.TestCase):
         activity = service.get_related_activity(request())
         self.assertEqual(activity[0].facts["returned_event_count"], 1)
 
-    def test_tool_wrapper_preserves_real_evidence_ids_and_service_bounds(self) -> None:
+    def test_tool_wrapper_exposes_aliases_and_preserves_service_bounds(self) -> None:
         service = self.service(max_related_accounts=1)
         score = ScoreObservation(
             score_id="score-fixture",
@@ -457,12 +457,17 @@ class EvidenceServiceTests(unittest.TestCase):
         ]
         direct = service.get_shared_identity_summary(request())
         returned = wrapped.invoke({})
+        self.assertEqual(len(returned), len(direct))
         self.assertEqual(
-            returned,
-            [item.model_dump(mode="json") for item in direct],
+            [item["evidence_ref"] for item in returned],
+            [f"E{index:03d}" for index in range(1, len(direct) + 1)],
         )
+        self.assertTrue(all("evidence_id" not in item for item in returned))
         self.assertEqual(
-            [item["evidence_id"] for item in returned],
+            [
+                context.ledger.resolve_alias(str(item["evidence_ref"]))
+                for item in returned
+            ],
             [item.evidence_id for item in direct],
         )
         self.assertTrue(
