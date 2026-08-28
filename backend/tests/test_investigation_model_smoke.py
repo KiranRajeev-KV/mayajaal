@@ -2,6 +2,8 @@
 
 import unittest
 
+from openai import OpenAIError
+
 from mayajaal.investigation import (
     InvestigationConfig,
     InvestigationPattern,
@@ -10,6 +12,9 @@ from mayajaal.investigation import (
 from scripts.run_investigation_model_smoke import (
     MODELS,
     SMOKE_CASE,
+    CaptureHandler,
+    _failed_run,  # pyright: ignore[reportPrivateUsage]
+    _is_provider_request_failure,  # pyright: ignore[reportPrivateUsage]
     build_model_config,
     build_smoke_summary,
     render_smoke_summary,
@@ -66,7 +71,8 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
         self.assertEqual(summary["completed_run_count"], 0)
         self.assertEqual(summary["provider_failure_count"], 3)
         self.assertIn("REQUEST_FAILED", markdown)
-        self.assertIn("Aliases resolved", markdown)
+        self.assertIn("Alias refs valid", markdown)
+        self.assertIn("Grounding failure", markdown)
         self.assertIn("Context reconciled", markdown)
 
     def test_summary_requires_all_three_fixed_models(self) -> None:
@@ -78,6 +84,24 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "exactly one run"):
             build_smoke_summary("fixture-run", ({"model": MODELS[0]},), (outcome,))
+
+    def test_provider_and_harness_failures_are_classified_separately(self) -> None:
+        self.assertTrue(_is_provider_request_failure(OpenAIError("provider")))
+        self.assertFalse(_is_provider_request_failure(RuntimeError("local")))
+
+        record, outcome = _failed_run(
+            record={"model": MODELS[0]},
+            model_name=MODELS[0],
+            callback=CaptureHandler(),
+            started_clock=0.0,
+            error=RuntimeError("local artifact verification failed"),
+            provider_request_failure=False,
+        )
+
+        self.assertTrue(outcome.harness_failure)
+        self.assertFalse(outcome.provider_request_failure)
+        self.assertIn("harness_failure", record)
+        self.assertNotIn("provider_request_failure", record)
 
     def test_token_summary_keeps_provider_cache_and_reasoning_metadata(self) -> None:
         summary = token_summary(

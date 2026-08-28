@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
+from openai import OpenAIError
 
 from mayajaal.calibration import estimate_probability, load_probability_model
 from mayajaal.evaluation import load_frozen_full_evaluation
@@ -246,16 +247,7 @@ def _run_one_model(
     graph_projection = cast(GraphProjection, projection)
     synthetic_world = cast(SyntheticWorld, world)
     decision_cutoff = cast(AwareDatetime, cutoff)
-    run_config = build_model_config(investigation_config, model_name)
-    evidence_service = EvidenceService(
-        projection=graph_projection,
-        events=cast(tuple[Any, ...], events),
-        feature_service=feature_service,
-        frozen_evaluation=frozen_evaluation,
-        config=run_config,
-    )
     run_directory = output_directory / "runs" / model_name
-    run_directory.mkdir(parents=True, exist_ok=True)
     callback = CaptureHandler()
     started_at = datetime.now(UTC)
     started_clock = time.perf_counter()
@@ -268,6 +260,15 @@ def _run_one_model(
         "started_at": started_at.isoformat(),
     }
     try:
+        run_config = build_model_config(investigation_config, model_name)
+        run_directory.mkdir(parents=True, exist_ok=True)
+        evidence_service = EvidenceService(
+            projection=graph_projection,
+            events=cast(tuple[Any, ...], events),
+            feature_service=feature_service,
+            frozen_evaluation=frozen_evaluation,
+            config=run_config,
+        )
         vector = feature_service.extract(SMOKE_ACCOUNT_ID, decision_cutoff)
         score = score_feature_vector(frozen_evaluation, vector)
         probability = estimate_probability(
@@ -294,15 +295,38 @@ def _run_one_model(
             score,
             probability,
         )
-        execution = InvestigationAgentService(
+        agent_service = InvestigationAgentService(
             config=run_config,
             callbacks=(callback,),
             max_retries=0,
-        ).run_execution(
+        )
+    except Exception as error:
+        return _failed_run(
+            record=record,
+            model_name=model_name,
+            callback=callback,
+            started_clock=started_clock,
+            error=error,
+            provider_request_failure=False,
+        )
+
+    try:
+        execution = agent_service.run_execution(
             request=request,
             evidence_service=evidence_service,
             score_observation=score,
         )
+    except Exception as error:
+        return _failed_run(
+            record=record,
+            model_name=model_name,
+            callback=callback,
+            started_clock=started_clock,
+            error=error,
+            provider_request_failure=_is_provider_request_failure(error),
+        )
+
+    try:
         paths = save_investigation_artifacts(run_directory, execution)
         # Re-loading without another model call proves the exact artifacts produced
         # by this run remain grounded, cutoff-bound, and provenance-valid.
@@ -342,29 +366,63 @@ def _run_one_model(
             )
         )
     except Exception as error:
-        ended_at = datetime.now(UTC)
-        outcome = score_comparison_run(
-            model=model_name,
-            case=SMOKE_CASE,
-            status=None,
-            pattern=None,
-            provider_request_failure=True,
-        )
-        record.update(
-            {
-                "success": False,
-                "ended_at": ended_at.isoformat(),
-                "latency_seconds": time.perf_counter() - started_clock,
-                "request_provider_failure": {
-                    "type": type(error).__name__,
-                    "message": str(error),
-                },
-                "model_responses": callback.calls,
-                "token_usage": token_summary(callback.calls),
-                "comparison_outcome": outcome.model_dump(mode="json"),
-            }
+        return _failed_run(
+            record=record,
+            model_name=model_name,
+            callback=callback,
+            started_clock=started_clock,
+            error=error,
+            provider_request_failure=False,
         )
     return record, outcome
+
+
+def _failed_run(
+    *,
+    record: dict[str, object],
+    model_name: str,
+    callback: CaptureHandler,
+    started_clock: float,
+    error: Exception,
+    provider_request_failure: bool,
+) -> tuple[dict[str, object], ComparisonRunOutcome]:
+    """Persist one explicit provider or local-harness failure outcome."""
+    outcome = score_comparison_run(
+        model=model_name,
+        case=SMOKE_CASE,
+        status=None,
+        pattern=None,
+        provider_request_failure=provider_request_failure,
+        harness_failure=not provider_request_failure,
+    )
+    failure_key = (
+        "provider_request_failure" if provider_request_failure else "harness_failure"
+    )
+    record.update(
+        {
+            "success": False,
+            "ended_at": datetime.now(UTC).isoformat(),
+            "latency_seconds": time.perf_counter() - started_clock,
+            failure_key: {
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+            "model_responses": callback.calls,
+            "token_usage": token_summary(callback.calls),
+            "comparison_outcome": outcome.model_dump(mode="json"),
+        }
+    )
+    return record, outcome
+
+
+def _is_provider_request_failure(error: Exception) -> bool:
+    """Classify only an OpenAI SDK error (including a chained cause) as provider-side."""
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, OpenAIError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _successful_record(
@@ -407,9 +465,13 @@ def _successful_record(
         ),
         "accepted_analytical_report": outcome.accepted_analytical_report,
         "end_to_end_success": outcome.end_to_end_success,
-        # A trusted report can only be produced after short aliases resolve to
-        # canonical evidence IDs and the comparison boundary reconciles metrics.
-        "aliases_resolved": run.grounding_failure is None,
+        # Alias resolution is a narrower concern than all grounding/protocol
+        # validation. For example, a wrong timeline evidence type can fail
+        # grounding after every alias resolved correctly.
+        "aliases_resolved": _aliases_resolved(run.grounding_failure),
+        "grounding_failure_code": (
+            None if run.grounding_failure is None else run.grounding_failure.code.value
+        ),
         "context_metrics_reconciled": True,
         "comparison_outcome": outcome.model_dump(mode="json"),
         "model_calls": run.report.usage.iterations,
@@ -438,6 +500,18 @@ def _successful_record(
             name: str(path.relative_to(output_directory))
             for name, path in artifact_paths.items()
         },
+    }
+
+
+def _aliases_resolved(grounding_failure: object) -> bool:
+    """Report only actual malformed/unknown alias failures as unresolved."""
+    from mayajaal.investigation import GroundingFailureDiagnostic
+    from mayajaal.investigation.errors import GroundingFailureCode
+
+    diagnostic = cast(GroundingFailureDiagnostic | None, grounding_failure)
+    return diagnostic is None or diagnostic.code not in {
+        GroundingFailureCode.MALFORMED_EVIDENCE_REFERENCE,
+        GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
     }
 
 
@@ -473,6 +547,9 @@ def build_smoke_summary(
         "provider_failure_count": sum(
             outcome.provider_request_failure for outcome in outcomes_by_model.values()
         ),
+        "harness_failure_count": sum(
+            outcome.harness_failure for outcome in outcomes_by_model.values()
+        ),
         "billing_reconciliation": "not queried by this smoke script",
         "per_model": per_model,
     }
@@ -486,8 +563,8 @@ def render_smoke_summary(summary: Mapping[str, object]) -> str:
         "",
         "Admin Usage and Costs APIs were **not queried**.",
         "",
-        "| Model | Status | Pattern | Grounded | Aliases resolved | Context reconciled | Artifact verified | Expected PROMO_RING | Tool calls | Input | Output | Reasoning | Context bytes |",
-        "|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|",
+        "| Model | Status | Pattern | Grounded | Alias refs valid | Grounding failure | Context reconciled | Artifact verified | Expected PROMO_RING | Tool calls | Input | Output | Reasoning | Context bytes |",
+        "|---|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for model in MODELS:
         run = per_model[model]["run"]
@@ -500,7 +577,7 @@ def render_smoke_summary(summary: Mapping[str, object]) -> str:
             run.get("grounding_diagnostic") is None and run.get("success") is True
         )
         lines.append(
-            "| {model} | {status} | {pattern} | {grounded} | {aliases} | {metrics} | "
+            "| {model} | {status} | {pattern} | {grounded} | {aliases} | {failure} | {metrics} | "
             "{verified} | {expected} | {tool_calls} | {input_tokens} | {output_tokens} | "
             "{reasoning_tokens} | {bytes} |".format(
                 model=model,
@@ -508,6 +585,7 @@ def render_smoke_summary(summary: Mapping[str, object]) -> str:
                 pattern=run.get("reported_pattern", "—"),
                 grounded="yes" if grounded else "no",
                 aliases="yes" if run.get("aliases_resolved") else "no",
+                failure=run.get("grounding_failure_code", "—"),
                 metrics="yes" if run.get("context_metrics_reconciled") else "no",
                 verified="yes" if run.get("artifacts_verified") else "no",
                 expected="yes" if expected else "no",

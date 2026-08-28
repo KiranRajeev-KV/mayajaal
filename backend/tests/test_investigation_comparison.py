@@ -175,19 +175,40 @@ class InvestigationComparisonScoringTests(unittest.TestCase):
         self.assertFalse(outcome.end_to_end_success)
 
     def test_provider_failure_cannot_carry_a_status_or_pattern(self) -> None:
-        expected = case("promo", InvestigationPattern.PROMO_RING)
         with self.assertRaisesRegex(ValueError, "cannot include a report"):
             score_comparison_run(
                 model="fixture-model",
-                case=expected,
+                case=case("promo", InvestigationPattern.PROMO_RING),
                 status=InvestigationStatus.FAILED,
                 pattern=None,
                 provider_request_failure=True,
             )
+
+    def test_harness_failure_is_separate_from_provider_failure(self) -> None:
+        outcome = score_comparison_run(
+            model="fixture-model",
+            case=case("promo", InvestigationPattern.PROMO_RING),
+            status=None,
+            pattern=None,
+            harness_failure=True,
+        )
+
+        self.assertTrue(outcome.harness_failure)
+        self.assertFalse(outcome.provider_request_failure)
+        self.assertFalse(outcome.accepted_analytical_report)
+        with self.assertRaisesRegex(ValueError, "both provider and harness"):
+            score_comparison_run(
+                model="fixture-model",
+                case=case("promo", InvestigationPattern.PROMO_RING),
+                status=None,
+                pattern=None,
+                provider_request_failure=True,
+                harness_failure=True,
+            )
         with self.assertRaisesRegex(ValueError, "cannot include a report"):
             score_comparison_run(
                 model="fixture-model",
-                case=expected,
+                case=case("promo", InvestigationPattern.PROMO_RING),
                 status=None,
                 pattern=InvestigationPattern.INCONCLUSIVE,
                 provider_request_failure=True,

@@ -86,7 +86,6 @@ class InvestigationAgentOutput(SchemaModel):
         ),
     )
     related_entities: tuple[InvestigationAgentRelatedEntity, ...] = ()
-    evidence_refs: tuple[EvidenceReference, ...] = ()
     summary: str | None = Field(default=None, min_length=1)
     limitations: tuple[str, ...] = ()
 
@@ -112,8 +111,8 @@ Rules:
 - `timeline_evidence_refs` is special: use only aliases returned by the
   `case_timeline` tool that explicitly have `timeline_reference_eligible=true`.
   Do not put identity, activity, or model-explanation refs in that field.
-- `pattern` is the sole structured classification. If it is INCONCLUSIVE, do
-  not declare PROMO_RING, REFUND_RING, or MIXED_ABUSE in the summary.
+- `pattern` is the sole structured classification. Keep the prose summary
+  consistent with it, but the structured value remains authoritative.
 """
 
 
@@ -438,9 +437,8 @@ def _report_from_output(
     *,
     iterations: int,
 ) -> InvestigationReport:
-    """Attach immutable request/action fields after strict alias declaration checks."""
-    _verify_pattern_summary_consistency(output)
-    _verify_declared_aliases(output)
+    """Attach immutable fields after resolving the factual alias union."""
+    cited_aliases = _cited_aliases(output)
     return InvestigationReport(
         request=request,
         policy_action=request.policy_action,
@@ -471,7 +469,7 @@ def _report_from_output(
             )
             for related in output.related_entities
         ),
-        evidence_ids=context.ledger.resolve_aliases(output.evidence_refs),
+        evidence_ids=context.ledger.resolve_aliases(cited_aliases),
         summary=output.summary,
         limitations=output.limitations,
         usage=InvestigationUsage(
@@ -481,53 +479,28 @@ def _report_from_output(
     )
 
 
-def _verify_declared_aliases(output: InvestigationAgentOutput) -> None:
-    """Require each factual model reference to also be declared by the report."""
-    declared = set(output.evidence_refs)
-    referenced = (
-        {
-            evidence_ref
-            for finding in (*output.key_findings, *output.counterevidence)
-            for evidence_ref in finding.evidence_refs
-        }
-        | set(output.timeline_evidence_refs)
-        | {
-            evidence_ref
-            for related in output.related_entities
-            for evidence_ref in related.evidence_refs
-        }
-    )
-    if not referenced.issubset(declared):
-        raise InvestigationGroundingError(
-            GroundingFailureCode.UNDECLARED_EVIDENCE_REFERENCE,
-            "model finding references an undeclared evidence reference",
-        )
+def _cited_aliases(output: InvestigationAgentOutput) -> tuple[EvidenceReference, ...]:
+    """Return a first-seen, deduplicated union of every factual citation.
 
-
-def _verify_pattern_summary_consistency(output: InvestigationAgentOutput) -> None:
-    """Reject an inconclusive structured pattern paired with an abuse declaration.
-
-    This is protocol consistency, not semantic claim validation: a model may
-    describe uncertainty in prose, but the taxonomy value is its authoritative
-    classification. Exact taxonomy declarations in an INCONCLUSIVE summary are
-    rejected rather than silently scored as an inconclusive conclusion.
+    The model only cites aliases where it uses them.  Application code derives
+    the trusted report-level evidence set, so a redundant declaration cannot
+    accidentally omit an otherwise grounded finding.
     """
-    if (
-        output.pattern is not InvestigationPattern.INCONCLUSIVE
-        or output.summary is None
-    ):
-        return
-    normalized_summary = re.sub(r"[^a-z0-9]+", "", output.summary.casefold())
-    declared_abuse_patterns = (
-        "promoring",
-        "refundring",
-        "mixedabuse",
+    aliases = (
+        alias
+        for finding in (*output.key_findings, *output.counterevidence)
+        for alias in finding.evidence_refs
     )
-    if any(pattern in normalized_summary for pattern in declared_abuse_patterns):
-        raise InvestigationGroundingError(
-            GroundingFailureCode.PATTERN_SUMMARY_CONTRADICTION,
-            "INCONCLUSIVE pattern cannot declare an abuse-ring taxonomy in summary",
-        )
+    aliases = (*aliases, *output.timeline_evidence_refs)
+    aliases = (
+        *aliases,
+        *(
+            alias
+            for entity in output.related_entities
+            for alias in entity.evidence_refs
+        ),
+    )
+    return tuple(dict.fromkeys(aliases))
 
 
 _SECRET_VALUE_PATTERN = re.compile(

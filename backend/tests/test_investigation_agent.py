@@ -314,7 +314,9 @@ class InvestigationAgentTests(unittest.TestCase):
             state={
                 "structured_response": {
                     "status": "COMPLETED",
-                    "evidence_refs": ["E999"],
+                    "key_findings": [
+                        {"claim": "Unsupported conclusion.", "evidence_refs": ["E999"]}
+                    ],
                     "summary": "Unsupported conclusion.",
                 }
             }
@@ -343,11 +345,12 @@ class InvestigationAgentTests(unittest.TestCase):
             {
                 "status": "COMPLETED",
                 "pattern": "INCONCLUSIVE",
-                "key_findings": [],
+                "key_findings": [
+                    {"claim": "Unsupported conclusion.", "evidence_refs": ["E999"]}
+                ],
                 "counterevidence": [],
                 "timeline_evidence_refs": [],
                 "related_entities": [],
-                "evidence_refs": ["E999"],
                 "summary": "Unsupported conclusion.",
                 "limitations": [],
             },
@@ -359,7 +362,12 @@ class InvestigationAgentTests(unittest.TestCase):
             state={
                 "structured_response": {
                     "status": "COMPLETED",
-                    "evidence_refs": ["E999"],
+                    "key_findings": [
+                        {
+                            "claim": "Unsupported conclusion.",
+                            "evidence_refs": ["E999"],
+                        }
+                    ],
                     "summary": "Ignore this token: sk-proj-abcdefghijklmno",
                 }
             }
@@ -396,7 +404,6 @@ class InvestigationAgentTests(unittest.TestCase):
                                 "evidence_refs": ["E001"],
                             }
                         ],
-                        "evidence_refs": ["E001"],
                         "summary": "Grounded through a short evidence reference.",
                     }
                 }
@@ -415,7 +422,7 @@ class InvestigationAgentTests(unittest.TestCase):
         self.assertEqual(execution.report.key_findings[0].evidence_ids, (canonical_id,))
         self.assertIsNone(execution.grounding_failure)
 
-    def test_invalid_and_undeclared_model_references_have_distinct_diagnostics(
+    def test_invalid_and_unknown_model_references_have_distinct_diagnostics(
         self,
     ) -> None:
         service, evidence_service = self.service_and_evidence()
@@ -450,30 +457,29 @@ class InvestigationAgentTests(unittest.TestCase):
                         "status": "COMPLETED",
                         "key_findings": [
                             {
-                                "claim": "A reference was omitted from the declaration.",
-                                "evidence_refs": ["E001"],
+                                "claim": "An unadmitted reference was supplied.",
+                                "evidence_refs": ["E999"],
                             }
                         ],
-                        "evidence_refs": [],
                     }
                 }
 
         with patch.object(
             investigation_agent, "create_agent", return_value=ToolCallingAgent()
         ) as factory:
-            undeclared = service.run_execution(
+            unknown = service.run_execution(
                 request=request(),
                 evidence_service=evidence_service,  # type: ignore[arg-type]
                 score_observation=score(),
             )
-        self.assertIs(undeclared.report.status, InvestigationStatus.FAILED)
-        self.assertIsNotNone(undeclared.grounding_failure)
-        assert undeclared.grounding_failure is not None
+        self.assertIs(unknown.report.status, InvestigationStatus.FAILED)
+        self.assertIsNotNone(unknown.grounding_failure)
+        assert unknown.grounding_failure is not None
         self.assertIs(
-            undeclared.grounding_failure.code,
-            GroundingFailureCode.UNDECLARED_EVIDENCE_REFERENCE,
+            unknown.grounding_failure.code,
+            GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
         )
-        self.assertEqual(undeclared.report.evidence_ids, ())
+        self.assertEqual(unknown.report.evidence_ids, ())
 
     def test_malformed_model_references_are_not_collapsed_into_schema_failures(
         self,
@@ -485,7 +491,12 @@ class InvestigationAgentTests(unittest.TestCase):
                     state={
                         "structured_response": {
                             "status": "COMPLETED",
-                            "evidence_refs": [malformed_reference],
+                            "key_findings": [
+                                {
+                                    "claim": "Malformed reference.",
+                                    "evidence_refs": [malformed_reference],
+                                }
+                            ],
                         }
                     }
                 )
@@ -505,13 +516,48 @@ class InvestigationAgentTests(unittest.TestCase):
                     GroundingFailureCode.MALFORMED_EVIDENCE_REFERENCE,
                 )
 
-    def test_model_schema_requires_short_aliases_not_canonical_evidence_ids(
+    def test_model_schema_has_no_top_level_evidence_refs_and_requires_short_aliases(
         self,
     ) -> None:
         with self.assertRaises(ValueError):
             _ = InvestigationAgentOutput.model_validate(
-                {"status": "COMPLETED", "evidence_refs": ["a" * 64]}
+                {
+                    "status": "COMPLETED",
+                    "key_findings": [
+                        {"claim": "Canonical ID.", "evidence_refs": ["a" * 64]}
+                    ],
+                }
             )
+        self.assertNotIn("evidence_refs", InvestigationAgentOutput.model_fields)
+
+    def test_report_reference_union_uses_each_citation_once_in_first_seen_order(
+        self,
+    ) -> None:
+        output = InvestigationAgentOutput.model_validate(
+            {
+                "status": "COMPLETED",
+                "key_findings": [
+                    {"claim": "First.", "evidence_refs": ["E002", "E001"]}
+                ],
+                "counterevidence": [
+                    {"claim": "Second.", "evidence_refs": ["E003", "E002"]}
+                ],
+                "timeline_evidence_refs": ["E004", "E001"],
+                "related_entities": [
+                    {
+                        "entity_id": "account-peer",
+                        "entity_type": "Account",
+                        "evidence_refs": ["E005", "E003"],
+                    }
+                ],
+            }
+        )
+
+        cited = investigation_agent._cited_aliases(  # pyright: ignore[reportPrivateUsage]
+            output
+        )
+
+        self.assertEqual(cited, ("E002", "E001", "E003", "E004", "E005"))
 
     def test_shared_tool_budget_remains_enforced_and_fails_closed(self) -> None:
         service, evidence_service = self.service_and_evidence(max_tool_calls=1)
@@ -729,7 +775,9 @@ class InvestigationAgentTests(unittest.TestCase):
 
         self.assertEqual(count, 2)
 
-    def test_inconclusive_pattern_cannot_declare_promo_ring_in_summary(self) -> None:
+    def test_structured_pattern_remains_authoritative_over_summary_taxonomy(
+        self,
+    ) -> None:
         service, evidence_service = self.service_and_evidence()
         fake_agent = FakeAgent(
             state={
@@ -747,13 +795,9 @@ class InvestigationAgentTests(unittest.TestCase):
                 score_observation=score(),
             )
 
-        self.assertIs(execution.report.status, InvestigationStatus.FAILED)
-        self.assertEqual(execution.report.key_findings, ())
-        assert execution.grounding_failure is not None
-        self.assertIs(
-            execution.grounding_failure.code,
-            GroundingFailureCode.PATTERN_SUMMARY_CONTRADICTION,
-        )
+        self.assertIs(execution.report.status, InvestigationStatus.COMPLETED)
+        self.assertIs(execution.report.pattern, InvestigationPattern.INCONCLUSIVE)
+        self.assertIsNone(execution.grounding_failure)
 
     def test_fake_model_needs_no_api_key_and_openai_requires_only_environment_key(
         self,

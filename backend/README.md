@@ -735,9 +735,11 @@ only this short `evidence_ref` to the model. Before grounding, Mayajaal resolves
 every strict alias against the current ledger, rejects malformed or unknown
 references, and constructs the trusted report with canonical evidence IDs.
 
-After structured model output, Mayajaal deterministically verifies that every
-declared report, finding, counterevidence, timeline, and related-entity
-evidence reference exists in this run's ledger. Timeline references must cite
+After structured model output, Mayajaal deterministically derives the stable,
+deduplicated report-level evidence list from citations on findings,
+counterevidence, timeline entries, and related entities, then verifies every
+one against this run's ledger. The model has no redundant top-level evidence
+declaration to keep in sync. Timeline references must cite
 `TIMELINE_EVENT` evidence, and related entities carry explicit supporting
 evidence IDs. This is referential grounding, not semantic truth detection: it
 does not claim that free-form model prose is correct. Failed grounding produces
@@ -779,7 +781,7 @@ records its configured model name; an injected/test model records an explicit
 `injected:<module>.<type>` identity instead, so provenance never claims an
 OpenAI model ran when it did not.
 
-`investigation_id` (provenance contract v2, agent prompt/interface v3) is SHA-256 over canonical JSON for the request/decision
+`investigation_id` (provenance contract v2, agent prompt/interface v4) is SHA-256 over canonical JSON for the request/decision
 lineage, validated investigation configuration (including reasoning effort),
 non-secret actual agent model identity, fixed tool allowlist, prompt-contract
 version, deterministic tool trace, and returned evidence IDs. It intentionally
@@ -797,9 +799,8 @@ Model-facing timeline payloads explicitly mark their short references with
 `timeline_reference_eligible=true`; only those aliases may appear in the
 structured `timeline_evidence_refs` field. The canonical evidence type remains
 the final enforcement check. The structured `pattern` is the sole taxonomy
-classification: an `INCONCLUSIVE` report that declares an abuse-ring taxonomy
-in its summary fails closed with a typed diagnostic rather than silently
-receiving inconclusive analytical credit. Investigation usage records completed
+classification; summary prose is guidance rather than a lexical grounding rule.
+Investigation usage records completed
 provider model calls from an application-owned callback when available, falling
 back to LangChain's optional state only for injected/test models.
 
@@ -827,7 +828,7 @@ fixed case, including an explicit provider/system-failure outcome for a missing
 run.
 
 Comparison summaries separate system reliability (`accepted_report_rate`,
-grounding/budget/failed-report/provider failure rates, and
+grounding/budget/failed-report/provider/harness failure rates, and
 `end_to_end_success_rate`) from
 conditional analytical quality. `conditional_pattern_accuracy` always carries
 its accepted-report numerator and denominator. Benign false-fraud rates use
@@ -862,6 +863,9 @@ acceptance, grounding diagnostics, artifact verification, context totals and
 per-tool metrics, provider-reported token metadata, latency, and the
 evaluator-only expected `PROMO_RING` result. `OPENAI_API_KEY` may be supplied
 by the environment or `backend/.env`; it is never written to these artifacts.
+Only OpenAI SDK request errors become provider failures. Local preparation,
+artifact verification, scoring, or summary failures are explicitly recorded as
+harness failures instead of being attributed to a model provider.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

@@ -57,6 +57,7 @@ class ComparisonRunOutcome(SchemaModel):
     budget_failure: bool
     failed_report: bool
     provider_request_failure: bool
+    harness_failure: bool = False
     reported_status: InvestigationStatus | None = None
     reported_pattern: InvestigationPattern | None = None
     correct_pattern: bool | None
@@ -95,6 +96,7 @@ class ModelComparisonSummary(SchemaModel):
     budget_failure_rate: ConditionalRate
     failed_report_rate: ConditionalRate
     provider_failure_rate: ConditionalRate
+    harness_failure_rate: ConditionalRate
     conditional_pattern_accuracy: ConditionalRate
     benign_false_fraud_accusation_rate: ConditionalRate
     benign_system_failure_rate: ConditionalRate
@@ -134,6 +136,7 @@ def score_comparison_run(
     pattern: InvestigationPattern | None,
     grounding_failure: bool = False,
     provider_request_failure: bool = False,
+    harness_failure: bool = False,
     model_facing_context_metrics: ModelFacingContextMetrics | None = None,
     model_facing_tool_call_metrics: tuple[ModelFacingToolCallMetrics, ...] = (),
 ) -> ComparisonRunOutcome:
@@ -145,6 +148,10 @@ def score_comparison_run(
     """
     if provider_request_failure and (status is not None or pattern is not None):
         raise ValueError("provider request failure cannot include a report")
+    if harness_failure and (status is not None or pattern is not None):
+        raise ValueError("harness failure cannot include a report")
+    if provider_request_failure and harness_failure:
+        raise ValueError("failure cannot be both provider and harness")
     if provider_request_failure and grounding_failure:
         raise ValueError("provider request failure cannot be a grounding failure")
     if grounding_failure and status is not InvestigationStatus.FAILED:
@@ -154,6 +161,7 @@ def score_comparison_run(
     failed_report = status is InvestigationStatus.FAILED
     accepted = (
         not provider_request_failure
+        and not harness_failure
         and not grounding_failure
         and status in _ANALYTICAL_STATUSES
     )
@@ -166,6 +174,7 @@ def score_comparison_run(
             budget_failure=budget_failure,
             failed_report=failed_report,
             provider_request_failure=provider_request_failure,
+            harness_failure=harness_failure,
             reported_status=status,
             reported_pattern=pattern,
             correct_pattern=None,
@@ -200,6 +209,7 @@ def score_comparison_run(
         budget_failure=False,
         failed_report=False,
         provider_request_failure=False,
+        harness_failure=False,
         reported_status=status,
         reported_pattern=pattern,
         correct_pattern=correct_pattern,
@@ -270,6 +280,9 @@ def summarize_model_comparison(
         ),
         provider_failure_rate=_rate(
             sum(record.provider_request_failure for record in records), total
+        ),
+        harness_failure_rate=_rate(
+            sum(record.harness_failure for record in records), total
         ),
         conditional_pattern_accuracy=_rate(len(correct_accepted), len(accepted)),
         benign_false_fraud_accusation_rate=_rate(
