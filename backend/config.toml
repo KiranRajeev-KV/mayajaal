@@ -148,6 +148,9 @@ max_graph_hops = 2
 max_graph_nodes = 200
 max_graph_edges = 500
 max_related_accounts = 50
+# Maximum detailed, high-signal events shown by the timeline tool. Event
+# retrieval remains independently bounded by max_events_per_tool.
+max_timeline_events = 20
 max_events_per_tool = 100
 # Maximum positive and negative raw-score TreeSHAP drivers per explanation.
 max_risk_drivers = 5

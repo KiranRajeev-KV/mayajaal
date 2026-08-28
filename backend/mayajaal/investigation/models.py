@@ -107,6 +107,7 @@ class InvestigationConfig(SchemaModel):
     max_graph_edges: int = Field(default=500, ge=1)
     max_related_accounts: int = Field(default=50, ge=1)
     max_events_per_tool: int = Field(default=100, ge=1)
+    max_timeline_events: int = Field(default=20, ge=1)
     max_risk_drivers: int = Field(default=5, ge=1)
     model_name: str | None = Field(default=None, min_length=1)
     reasoning_effort: ReasoningEffort = ReasoningEffort.MEDIUM

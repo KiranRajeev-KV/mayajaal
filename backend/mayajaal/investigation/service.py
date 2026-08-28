@@ -65,6 +65,16 @@ _EVIDENCE_TYPE_BY_IDENTITY = {
     GraphNodeType.ADDRESS: EvidenceType.SHARED_ADDRESS,
 }
 
+_TIMELINE_EVENT_TYPES = frozenset(
+    {
+        EventType.PAYMENT_ATTACHED,
+        EventType.ORDER_PLACED,
+        EventType.PROMOTION_REDEEMED,
+        EventType.REFUND_REQUESTED,
+        EventType.REFUND_RESOLVED,
+    }
+)
+
 
 class EvidenceService:
     """Expose fixed-cutoff evidence through narrow, parameter-free read methods.
@@ -244,28 +254,59 @@ class EvidenceService:
     def get_related_activity(
         self, request: InvestigationRequest
     ) -> tuple[EvidenceItem, ...]:
-        """Return bounded, sanitized historical activity for subject and peers."""
+        """Return compact, cutoff-safe activity aggregates for subject and peers."""
         (
-            events,
+            all_events,
+            retrieved_events,
             total_event_count,
             selected_related,
             total_related_count,
         ) = self._activity_events(request)
+        event_counts = _event_counts(all_events)
+        event_counts_facts: dict[str, JsonValue] = {}
+        for event_type, count in event_counts.items():
+            event_counts_facts[event_type] = count
         metadata: dict[str, JsonValue] = {
             "subject_id": request.subject_id,
             "related_account_ids": [account.account_id for account in selected_related],
-            "returned_event_count": len(events),
+            "returned_event_count": len(retrieved_events),
             "total_event_count": total_event_count,
             "max_events_per_tool": self._config.max_events_per_tool,
-            "truncated": total_event_count > len(events),
-            "event_selection": "most_recent_n_then_chronological_presentation",
+            "truncated": total_event_count > len(retrieved_events),
+            "representation": "aggregate_activity_summary",
+            "event_selection": "most_recent_n_for_bounded_retrieval",
+            "event_counts_by_type": event_counts_facts,
+            "promotion_event_count": event_counts.get(
+                EventType.PROMOTION_REDEEMED.value, 0
+            ),
+            "refund_event_count": sum(
+                event_counts.get(event_type.value, 0)
+                for event_type in (
+                    EventType.REFUND_REQUESTED,
+                    EventType.REFUND_RESOLVED,
+                )
+            ),
+            "order_event_count": event_counts.get(EventType.ORDER_PLACED.value, 0),
+            "payment_attachment_count": event_counts.get(
+                EventType.PAYMENT_ATTACHED.value, 0
+            ),
+            "participating_account_count": len(
+                {str(event.account_id) for event in all_events}
+            ),
+            "first_activity_at": (
+                all_events[0].occurred_at.isoformat() if all_events else None
+            ),
+            "last_activity_at": (
+                all_events[-1].occurred_at.isoformat() if all_events else None
+            ),
+            "amounts_paise": self._activity_amounts(all_events),
             **_related_account_metadata(
                 selected_related,
                 total_related_count,
                 self._config.max_related_accounts,
             ),
         }
-        result = [
+        return (
             self._evidence(
                 request,
                 evidence_type=EvidenceType.RELATED_ACCOUNT_ACTIVITY,
@@ -273,46 +314,52 @@ class EvidenceService:
                 observed_at=request.cutoff_time,
                 subject_ids=(request.subject_id,),
                 facts=metadata,
-            )
-        ]
-        for event in events:
-            result.append(
-                self._evidence(
-                    request,
-                    evidence_type=_event_evidence_type(event.event_type),
-                    source=EvidenceSource.EVENT_HISTORY,
-                    observed_at=event.occurred_at,
-                    subject_ids=(str(event.account_id),),
-                    facts=_event_facts(
-                        event,
-                        self._event_canonical_ids(event, request.cutoff_time),
-                    ),
-                )
-            )
-        return tuple(result)
+            ),
+        )
 
     def get_case_timeline(
         self, request: InvestigationRequest
     ) -> tuple[EvidenceItem, ...]:
         """Return one chronologically ordered, cutoff-safe case timeline fact."""
         (
-            events,
+            _all_events,
+            retrieved_events,
             total_event_count,
             selected_related,
             total_related_count,
         ) = self._activity_events(request)
+        high_signal_events = tuple(
+            event
+            for event in retrieved_events
+            if event.event_type in _TIMELINE_EVENT_TYPES
+        )
+        selected_events = high_signal_events[-self._config.max_timeline_events :]
         timeline: list[JsonValue] = [
             _event_facts(event, self._event_canonical_ids(event, request.cutoff_time))
-            for event in events
+            for event in selected_events
         ]
+        high_signal_event_types: list[JsonValue] = []
+        for event_type in sorted(_TIMELINE_EVENT_TYPES, key=lambda item: item.value):
+            high_signal_event_types.append(event_type.value)
         facts: dict[str, JsonValue] = {
             "subject_id": request.subject_id,
             "related_account_ids": [account.account_id for account in selected_related],
             "returned_event_count": len(timeline),
             "total_event_count": total_event_count,
             "max_events_per_tool": self._config.max_events_per_tool,
-            "truncated": total_event_count > len(timeline),
-            "event_selection": "most_recent_n_then_chronological_presentation",
+            "max_timeline_events": self._config.max_timeline_events,
+            "retrieved_event_count": len(retrieved_events),
+            "high_signal_candidate_count": len(high_signal_events),
+            "truncated": (
+                total_event_count > len(retrieved_events)
+                or len(high_signal_events) > len(selected_events)
+            ),
+            "retrieval_truncated": total_event_count > len(retrieved_events),
+            "presentation_truncated": len(high_signal_events) > len(selected_events),
+            "event_selection": (
+                "most_recent_high_signal_n_then_chronological_presentation"
+            ),
+            "high_signal_event_types": high_signal_event_types,
             "events": timeline,
             **_related_account_metadata(
                 selected_related,
@@ -320,7 +367,9 @@ class EvidenceService:
                 self._config.max_related_accounts,
             ),
         }
-        observed_at = events[-1].occurred_at if events else request.cutoff_time
+        observed_at = (
+            selected_events[-1].occurred_at if selected_events else request.cutoff_time
+        )
         return (
             self._evidence(
                 request,
@@ -439,7 +488,13 @@ class EvidenceService:
 
     def _activity_events(
         self, request: InvestigationRequest
-    ) -> tuple[tuple[Event, ...], int, tuple[_RankedRelatedAccount, ...], int]:
+    ) -> tuple[
+        tuple[Event, ...],
+        tuple[Event, ...],
+        int,
+        tuple[_RankedRelatedAccount, ...],
+        int,
+    ]:
         """Return chronological sanitized-source events within account/event budgets."""
         links = self._links_at(request.cutoff_time)
         identity_links = _identity_links(links)
@@ -460,7 +515,51 @@ class EvidenceService:
             and str(event.account_id) in allowed_accounts
         )
         selected_events = all_events[-self._config.max_events_per_tool :]
-        return selected_events, len(all_events), selected_related, len(ranked_related)
+        return (
+            all_events,
+            selected_events,
+            len(all_events),
+            selected_related,
+            len(ranked_related),
+        )
+
+    def _activity_amounts(self, events: Iterable[Event]) -> dict[str, JsonValue]:
+        """Aggregate order/refund amounts without exposing another event payload."""
+        order_ids = {
+            str(event.order_id)
+            for event in events
+            if event.event_type is EventType.ORDER_PLACED and event.order_id is not None
+        }
+        refund_ids = {
+            str(event.refund_id)
+            for event in events
+            if event.event_type is EventType.REFUND_REQUESTED
+            and event.refund_id is not None
+        }
+        orders = [
+            self._nodes[(GraphNodeType.ORDER, order_id)].properties
+            for order_id in sorted(order_ids)
+            if (GraphNodeType.ORDER, order_id) in self._nodes
+        ]
+        refunds = [
+            self._nodes[(GraphNodeType.REFUND, refund_id)].properties
+            for refund_id in sorted(refund_ids)
+            if (GraphNodeType.REFUND, refund_id) in self._nodes
+        ]
+        return {
+            "order_subtotal_total_paise": sum(
+                int(order.get("subtotal_paise", 0)) for order in orders
+            ),
+            "order_discount_total_paise": sum(
+                int(order.get("discount_paise", 0)) for order in orders
+            ),
+            "order_total_total_paise": sum(
+                int(order.get("total_paise", 0)) for order in orders
+            ),
+            "refund_amount_total_paise": sum(
+                int(refund.get("amount_paise", 0)) for refund in refunds
+            ),
+        }
 
     def _event_canonical_ids(self, event: Event, cutoff: datetime) -> dict[str, str]:
         """Map event-owned graph endpoints to resolved IDs without labels."""
@@ -676,12 +775,12 @@ def _link_fact(link: _IdentityLink) -> dict[str, JsonValue]:
     }
 
 
-def _event_evidence_type(event_type: EventType) -> EvidenceType:
-    if event_type is EventType.PROMOTION_REDEEMED:
-        return EvidenceType.PROMOTION_ACTIVITY
-    if event_type in {EventType.REFUND_REQUESTED, EventType.REFUND_RESOLVED}:
-        return EvidenceType.REFUND_ACTIVITY
-    return EvidenceType.RELATED_ACCOUNT_ACTIVITY
+def _event_counts(events: Iterable[Event]) -> dict[str, int]:
+    """Return compact deterministic counts rather than a second event payload."""
+    counts: defaultdict[str, int] = defaultdict(int)
+    for event in events:
+        counts[event.event_type.value] += 1
+    return {event_type: counts[event_type] for event_type in sorted(counts)}
 
 
 def _event_facts(event: Event, canonical_ids: dict[str, str]) -> dict[str, JsonValue]:

@@ -585,9 +585,17 @@ by this configuration, and unable to override `ALLOW` / `REVIEW` / `BLOCK`.
 accepts only an already-resolved immutable `GraphProjection`, public event
 facts, a `FeatureService`, and a verified frozen model. Its narrow methods
 expose TreeSHAP raw-score drivers, an account/device/IP/payment/address
-neighbourhood, shared-identity summaries, sanitized related activity, and a
-chronological case timeline. It has no graph driver, query-string, or write
-interface. Every method begins with `InvestigationRequest.subject_id` and its
+neighbourhood, shared-identity summaries, compact related-activity aggregates,
+and a chronological high-signal case timeline. `related_activity` reports
+bounded retrieval metadata, counts by event type, promo/refund/order/payment
+signals, aggregate known order/refund amounts, participating accounts, and the
+activity window; it never repeats a detailed event list. `case_timeline` alone
+shows detailed events, selecting the most recent high-signal events from the
+independently bounded retrieval set and presenting them chronologically.
+`max_events_per_tool` bounds retrieval, while
+`max_timeline_events` separately bounds detailed model-facing timeline context.
+It has no graph driver, query-string, or write interface. Every method begins
+with `InvestigationRequest.subject_id` and its
 fixed cutoff; it accepts no alternate subject, cutoff, SQL, Cypher, shell, or
 web parameter. Graph hops/nodes/edges, related accounts, event records, and
 positive/negative TreeSHAP drivers are bounded by `[investigation]`, with

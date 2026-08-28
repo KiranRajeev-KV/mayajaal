@@ -553,31 +553,32 @@ class EvidenceServiceTests(unittest.TestCase):
         )
         self.assertTrue(bool(timeline.facts["truncated"]))
 
-    def test_event_limit_keeps_recent_promo_refund_activity_and_timeline_matches(
+    def test_activity_is_aggregate_and_timeline_keeps_recent_high_signal_events(
         self,
     ) -> None:
-        service = self.service(max_events_per_tool=4)
+        service = self.service(max_events_per_tool=4, max_timeline_events=2)
         activity = service.get_related_activity(request())
-        activity_events = [
-            cast(dict[str, object], item.facts)["event_type"] for item in activity[1:]
-        ]
-        self.assertEqual(
-            activity_events,
-            [
-                EventType.ORDER_PLACED.value,
-                EventType.PROMOTION_REDEEMED.value,
-                EventType.REFUND_REQUESTED.value,
-                EventType.REFUND_RESOLVED.value,
-            ],
+        self.assertEqual(len(activity), 1)
+        self.assertNotIn("events", activity[0].facts)
+        activity_counts = cast(
+            dict[str, int], activity[0].facts["event_counts_by_type"]
         )
-        self.assertNotIn(EventType.ACCOUNT_CREATED.value, activity_events)
+        self.assertEqual(activity_counts[EventType.PROMOTION_REDEEMED.value], 1)
+        self.assertEqual(activity[0].facts["refund_event_count"], 2)
+        self.assertEqual(activity[0].facts["order_event_count"], 1)
+        self.assertEqual(activity[0].facts["payment_attachment_count"], 1)
         self.assertTrue(bool(activity[0].facts["truncated"]))
         timeline = service.get_case_timeline(request())[0]
         timeline_events = cast(list[dict[str, object]], timeline.facts["events"])
         self.assertEqual(
             [item["event_id"] for item in timeline_events],
-            [cast(dict[str, object], item.facts)["event_id"] for item in activity[1:]],
+            [
+                str(identifier("event:refund-request")),
+                str(identifier("event:refund-resolved")),
+            ],
         )
+        self.assertTrue(bool(timeline.facts["presentation_truncated"]))
+        self.assertNotEqual(activity[0].facts, timeline.facts)
 
     def test_related_accounts_rank_by_overlap_recency_then_identifier(self) -> None:
         projection = ranking_projection()
@@ -647,9 +648,11 @@ class EvidenceServiceTests(unittest.TestCase):
     def test_activity_exposes_promotion_and_refund_without_labels(self) -> None:
         service = self.service(max_events_per_tool=20)
         activity = service.get_related_activity(request())
-        evidence_types = {item.evidence_type for item in activity}
-        self.assertIn(EvidenceType.PROMOTION_ACTIVITY, evidence_types)
-        self.assertIn(EvidenceType.REFUND_ACTIVITY, evidence_types)
+        self.assertEqual(len(activity), 1)
+        self.assertEqual(activity[0].facts["promotion_event_count"], 1)
+        self.assertEqual(activity[0].facts["refund_event_count"], 2)
+        self.assertEqual(activity[0].facts["order_event_count"], 1)
+        self.assertEqual(activity[0].facts["payment_attachment_count"], 1)
         self.assertTrue(
             all("synthetic" not in str(item.facts).casefold() for item in activity)
         )

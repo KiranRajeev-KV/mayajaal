@@ -57,6 +57,7 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.policy.sensitivity.stressed_odds_multiplier, 2.0)
         self.assertEqual(config.investigation.max_tool_calls, 8)
         self.assertEqual(config.investigation.max_risk_drivers, 5)
+        self.assertEqual(config.investigation.max_timeline_events, 20)
         self.assertEqual(config.investigation.model_name, "gpt-5.4-mini")
         self.assertIs(config.investigation.reasoning_effort, ReasoningEffort.MEDIUM)
         self.assertTrue(config.investigation.triggers.investigate_review)
@@ -78,6 +79,8 @@ class SyntheticConfigTests(unittest.TestCase):
             _ = InvestigationConfig(max_related_accounts=0)
         with self.assertRaises(ValueError):
             _ = InvestigationConfig(max_risk_drivers=0)
+        with self.assertRaises(ValueError):
+            _ = InvestigationConfig(max_timeline_events=0)
         with self.assertRaises(ValueError):
             _ = InvestigationConfig(model_name="")
         with self.assertRaises(ValueError):

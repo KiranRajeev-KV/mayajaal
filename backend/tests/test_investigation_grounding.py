@@ -11,6 +11,7 @@ from pydantic import JsonValue
 
 import mayajaal.investigation.artifacts as investigation_artifacts
 from mayajaal.investigation import (
+    AGENT_PROMPT_CONTRACT_VERSION,
     INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
     EvidenceFinding,
     EvidenceItem,
@@ -271,6 +272,7 @@ class InvestigationGroundingTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(INVESTIGATION_PROVENANCE_CONTRACT_VERSION, 2)
+        self.assertEqual(AGENT_PROMPT_CONTRACT_VERSION, 2)
         ledger, shared, timeline = self.ledger()
         snapshot = ledger.snapshot()
         config = InvestigationConfig()
