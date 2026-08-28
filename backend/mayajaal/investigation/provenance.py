@@ -12,6 +12,7 @@ from .allowlist import INVESTIGATION_TOOL_NAMES
 from .models import (
     EvidenceSource,
     EvidenceType,
+    GroundingFailureDiagnostic,
     InvestigationConfig,
     InvestigationReport,
     InvestigationRequest,
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
 EVIDENCE_CONTRACT_VERSION = 2
 INVESTIGATION_PROVENANCE_CONTRACT_VERSION = 2
 REPORT_PROVENANCE_CONTRACT_VERSION = 1
+# Diagnostics are debug-only and deliberately excluded from investigation and
+# report identities, but persisted diagnostics still need independent integrity.
+DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION = 1
 AGENT_PROMPT_CONTRACT_VERSION = 2
 
 
@@ -121,6 +125,19 @@ def report_id(investigation_id: str, report: InvestigationReport) -> str:
             "report_provenance_contract_version": REPORT_PROVENANCE_CONTRACT_VERSION,
             "investigation_id": investigation_id,
             "investigation_report": report.model_dump(mode="json"),
+        }
+    )
+
+
+def diagnostic_id(investigation_id: str, diagnostic: GroundingFailureDiagnostic) -> str:
+    """Hash debug diagnostic content without changing trusted report identity."""
+    if not investigation_id:
+        raise ValueError("investigation_id must be non-empty")
+    return canonical_hash(
+        {
+            "diagnostic_provenance_contract_version": DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION,
+            "investigation_id": investigation_id,
+            "grounding_failure": diagnostic.model_dump(mode="json"),
         }
     )
 

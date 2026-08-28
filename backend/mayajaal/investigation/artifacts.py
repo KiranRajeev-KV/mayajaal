@@ -21,8 +21,10 @@ from .models import (
     InvestigationRequest,
 )
 from .provenance import (
+    DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION,
     INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
     REPORT_PROVENANCE_CONTRACT_VERSION,
+    diagnostic_id,
     investigation_provenance,
     report_id,
 )
@@ -44,27 +46,33 @@ def save_investigation_artifacts(
     )
     investigation_id = str(provenance["investigation_id"])
     report_identity = report_id(investigation_id, execution.report)
+    grounding_failure = execution.grounding_failure
+    if grounding_failure is not None and execution.report.status.value != "FAILED":
+        raise ValueError("grounding failure diagnostic requires a FAILED report")
     output_directory.mkdir(parents=True, exist_ok=True)
     paths = {
         "provenance": output_directory / "investigation_provenance.json",
         "evidence": output_directory / "evidence.json",
         "report": output_directory / "investigation_report.json",
     }
-    paths["provenance"].write_text(
-        _document(
+    provenance_document: dict[str, object] = {
+        "status": "VALID",
+        "provenance": provenance,
+    }
+    if grounding_failure is not None:
+        # Debug-only rejected-candidate data is intentionally outside the
+        # deterministic investigation/report hashes and is never a trusted
+        # report claim. Its independent hash makes persisted diagnostics
+        # tamper-evident without granting them report authority.
+        provenance_document.update(
             {
-                "status": "VALID",
-                "provenance": provenance,
-                # Debug-only rejected-candidate data is intentionally outside
-                # the deterministic provenance/report hashes and is never a
-                # trusted report claim.
-                "grounding_failure": (
-                    execution.grounding_failure.model_dump(mode="json")
-                    if execution.grounding_failure is not None
-                    else None
-                ),
+                "diagnostic_provenance_contract_version": DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION,
+                "diagnostic_id": diagnostic_id(investigation_id, grounding_failure),
+                "grounding_failure": grounding_failure.model_dump(mode="json"),
             }
-        ),
+        )
+    paths["provenance"].write_text(
+        _document(provenance_document),
         encoding="utf-8",
     )
     paths["evidence"].write_text(
@@ -143,8 +151,27 @@ def load_investigation_artifacts(
             ),
         )
     )
-    if grounding_failure is not None and report.status.value != "FAILED":
-        raise ValueError("grounding failure diagnostic requires a FAILED report")
+    persisted_diagnostic_id = provenance_document.get("diagnostic_id")
+    persisted_diagnostic_version = provenance_document.get(
+        "diagnostic_provenance_contract_version"
+    )
+    if grounding_failure is None:
+        if (
+            persisted_diagnostic_id is not None
+            or persisted_diagnostic_version is not None
+        ):
+            raise ValueError("diagnostic_id requires a grounding failure diagnostic")
+    else:
+        if report.status.value != "FAILED":
+            raise ValueError("grounding failure diagnostic requires a FAILED report")
+        if (
+            persisted_diagnostic_version != DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION
+            or persisted_diagnostic_id
+            != diagnostic_id(
+                str(provenance.get("investigation_id", "")), grounding_failure
+            )
+        ):
+            raise ValueError("grounding failure diagnostic identity mismatch")
     snapshot = EvidenceLedgerSnapshot(
         evidence=tuple(
             cast(EvidenceItem, _model(EvidenceItem, value, "evidence"))

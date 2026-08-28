@@ -730,7 +730,11 @@ an application-owned `FAILED` report without model claims; an empty
 closed, application-owned diagnostic code (and, when structurally valid, the
 rejected candidate) on `InvestigationExecution` for local evaluation. That
 diagnostic is explicitly non-authoritative: it is not report content and does
-not participate in `report_id`.
+not participate in `report_id`. When persisted, it has a separate deterministic
+`diagnostic_id` (diagnostic contract v1), hashing the `investigation_id` and the
+complete diagnostic. Load verification rejects any changed code, detail, or
+rejected candidate, while a diagnostic never changes `investigation_id` or
+`report_id`.
 
 The final trust chain is:
 

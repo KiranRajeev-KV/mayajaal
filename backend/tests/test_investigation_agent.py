@@ -475,6 +475,36 @@ class InvestigationAgentTests(unittest.TestCase):
         )
         self.assertEqual(undeclared.report.evidence_ids, ())
 
+    def test_malformed_model_references_are_not_collapsed_into_schema_failures(
+        self,
+    ) -> None:
+        service, evidence_service = self.service_and_evidence()
+        for malformed_reference in ("X12", "E1", "arbitrary text"):
+            with self.subTest(reference=malformed_reference):
+                fake_agent = FakeAgent(
+                    state={
+                        "structured_response": {
+                            "status": "COMPLETED",
+                            "evidence_refs": [malformed_reference],
+                        }
+                    }
+                )
+                with patch.object(
+                    investigation_agent, "create_agent", return_value=fake_agent
+                ):
+                    execution = service.run_execution(
+                        request=request(),
+                        evidence_service=evidence_service,  # type: ignore[arg-type]
+                        score_observation=score(),
+                    )
+                self.assertIs(execution.report.status, InvestigationStatus.FAILED)
+                self.assertIsNotNone(execution.grounding_failure)
+                assert execution.grounding_failure is not None
+                self.assertIs(
+                    execution.grounding_failure.code,
+                    GroundingFailureCode.MALFORMED_EVIDENCE_REFERENCE,
+                )
+
     def test_model_schema_requires_short_aliases_not_canonical_evidence_ids(
         self,
     ) -> None:

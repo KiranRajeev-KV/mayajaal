@@ -12,6 +12,7 @@ from pydantic import JsonValue
 import mayajaal.investigation.artifacts as investigation_artifacts
 from mayajaal.investigation import (
     AGENT_PROMPT_CONTRACT_VERSION,
+    DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION,
     EVIDENCE_CONTRACT_VERSION,
     INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
     EvidenceFinding,
@@ -33,6 +34,7 @@ from mayajaal.investigation import (
     InvestigationToolTrace,
     ReasoningEffort,
     RelatedEntity,
+    diagnostic_id,
     evidence_id,
     investigation_id,
     load_investigation_artifacts,
@@ -535,7 +537,169 @@ class InvestigationGroundingTests(unittest.TestCase):
             self.assertEqual(
                 provenance["grounding_failure"]["code"], "UNKNOWN_EVIDENCE_REFERENCE"
             )
+            self.assertEqual(
+                provenance["diagnostic_provenance_contract_version"],
+                DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION,
+            )
+            self.assertEqual(
+                provenance["diagnostic_id"],
+                diagnostic_id(provenance["provenance"]["investigation_id"], diagnostic),
+            )
             self.assertNotIn("grounding_failure", provenance["provenance"])
+
+    def test_grounding_diagnostic_is_deterministic_tamper_evident_and_not_report_identity(
+        self,
+    ) -> None:
+        report = InvestigationReport(
+            request=request(),
+            policy_action=PolicyAction.REVIEW,
+            status=InvestigationStatus.FAILED,
+            limitations=("report grounding validation failed",),
+        )
+        diagnostic = GroundingFailureDiagnostic(
+            code=GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
+            detail="evidence reference is not admitted to this investigation",
+            rejected_candidate={"status": "COMPLETED", "evidence_refs": ["E999"]},
+        )
+        execution = InvestigationExecution(
+            report=report,
+            snapshot=EvidenceLedgerSnapshot(evidence=(), tool_trace=()),
+            agent_model_id="fixture-model",
+            config=InvestigationConfig(),
+            grounding_failure=diagnostic,
+        )
+        without_diagnostic = InvestigationExecution(
+            report=report,
+            snapshot=execution.snapshot,
+            agent_model_id=execution.agent_model_id,
+            config=execution.config,
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            diagnostic_output = root / "with-diagnostic"
+            baseline_output = root / "without-diagnostic"
+            _ = save_investigation_artifacts(diagnostic_output, execution)
+            _ = save_investigation_artifacts(baseline_output, without_diagnostic)
+            diagnostic_document = json.loads(
+                (diagnostic_output / "investigation_provenance.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            baseline_report = json.loads(
+                (baseline_output / "investigation_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            diagnostic_report = json.loads(
+                (diagnostic_output / "investigation_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                diagnostic_report["report_id"], baseline_report["report_id"]
+            )
+            self.assertNotIn(
+                "diagnostic_id",
+                json.loads(
+                    (baseline_output / "investigation_provenance.json").read_text(
+                        encoding="utf-8"
+                    )
+                ),
+            )
+            original_id = diagnostic_document["diagnostic_id"]
+            self.assertEqual(
+                original_id,
+                diagnostic_id(
+                    diagnostic_document["provenance"]["investigation_id"], diagnostic
+                ),
+            )
+            for field, value in (
+                ("code", "MALFORMED_EVIDENCE_REFERENCE"),
+                ("detail", "tampered detail"),
+                ("rejected_candidate", {"status": "tampered"}),
+            ):
+                with self.subTest(field=field):
+                    document = json.loads(json.dumps(diagnostic_document))
+                    document["grounding_failure"][field] = value
+                    (diagnostic_output / "investigation_provenance.json").write_text(
+                        json.dumps(document), encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(ValueError, "diagnostic"):
+                        load_investigation_artifacts(
+                            diagnostic_output,
+                            request(),
+                            InvestigationConfig(),
+                            agent_model_id="fixture-model",
+                        )
+            document = json.loads(json.dumps(diagnostic_document))
+            document["diagnostic_id"] = "tampered"
+            (diagnostic_output / "investigation_provenance.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "diagnostic"):
+                load_investigation_artifacts(
+                    diagnostic_output,
+                    request(),
+                    InvestigationConfig(),
+                    agent_model_id="fixture-model",
+                )
+            document = json.loads(json.dumps(diagnostic_document))
+            document.pop("grounding_failure")
+            (diagnostic_output / "investigation_provenance.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "diagnostic_id"):
+                load_investigation_artifacts(
+                    diagnostic_output,
+                    request(),
+                    InvestigationConfig(),
+                    agent_model_id="fixture-model",
+                )
+
+    def test_only_failed_reports_may_persist_a_grounding_diagnostic(self) -> None:
+        valid_report = InvestigationReport(
+            request=request(),
+            policy_action=PolicyAction.REVIEW,
+            status=InvestigationStatus.COMPLETED,
+        )
+        diagnostic = GroundingFailureDiagnostic(
+            code=GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+            detail="invalid structured output",
+        )
+        valid_execution = InvestigationExecution(
+            report=valid_report,
+            snapshot=EvidenceLedgerSnapshot(evidence=(), tool_trace=()),
+            agent_model_id="fixture-model",
+            config=InvestigationConfig(),
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            _ = save_investigation_artifacts(output, valid_execution)
+            document = json.loads(
+                (output / "investigation_provenance.json").read_text(encoding="utf-8")
+            )
+            self.assertNotIn("grounding_failure", document)
+            self.assertNotIn("diagnostic_id", document)
+            self.assertEqual(
+                load_investigation_artifacts(
+                    output,
+                    request(),
+                    InvestigationConfig(),
+                    agent_model_id="fixture-model",
+                ),
+                valid_execution,
+            )
+            with self.assertRaisesRegex(ValueError, "FAILED"):
+                _ = save_investigation_artifacts(
+                    output,
+                    InvestigationExecution(
+                        report=valid_report,
+                        snapshot=valid_execution.snapshot,
+                        agent_model_id=valid_execution.agent_model_id,
+                        config=valid_execution.config,
+                        grounding_failure=diagnostic,
+                    ),
+                )
 
     def test_artifact_verification_has_no_agent_or_model_call_boundary(self) -> None:
         source = inspect.getsource(investigation_artifacts)

@@ -11,7 +11,7 @@ from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, ValidationError
 
 from mayajaal.schemas.common import SchemaModel
 from mayajaal.scoring import ScoreObservation
@@ -316,11 +316,32 @@ def _output_from_state(state: Mapping[str, object]) -> InvestigationAgentOutput:
             if isinstance(value, InvestigationAgentOutput)
             else InvestigationAgentOutput.model_validate(value)
         )
+    except ValidationError as error:
+        raise _structured_output_validation_error(error) from error
     except ValueError as error:
         raise InvestigationGroundingError(
             GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
             "investigation agent returned invalid structured output",
         ) from error
+
+
+def _structured_output_validation_error(
+    error: ValidationError,
+) -> InvestigationGroundingError:
+    """Preserve strict Pydantic validation while classifying bad aliases."""
+    for validation_error in error.errors():
+        location = validation_error.get("loc", ())
+        if validation_error.get("type") == "string_pattern_mismatch" and any(
+            part in {"evidence_refs", "timeline_evidence_refs"} for part in location
+        ):
+            return InvestigationGroundingError(
+                GroundingFailureCode.MALFORMED_EVIDENCE_REFERENCE,
+                "evidence reference must use the E001 alias format",
+            )
+    return InvestigationGroundingError(
+        GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+        "investigation agent returned invalid structured output",
+    )
 
 
 def _report_from_output(

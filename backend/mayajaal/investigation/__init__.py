@@ -37,9 +37,11 @@ from .models import (
 )
 from .provenance import (
     AGENT_PROMPT_CONTRACT_VERSION,
+    DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION,
     EVIDENCE_CONTRACT_VERSION,
     INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
     REPORT_PROVENANCE_CONTRACT_VERSION,
+    diagnostic_id,
     evidence_id,
     investigation_id,
     investigation_provenance,
@@ -57,6 +59,7 @@ from .triggers import should_investigate
 
 __all__ = [
     "AGENT_PROMPT_CONTRACT_VERSION",
+    "DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION",
     "EVIDENCE_CONTRACT_VERSION",
     "INVESTIGATION_PROVENANCE_CONTRACT_VERSION",
     "INVESTIGATION_TOOL_NAMES",
@@ -94,6 +97,7 @@ __all__ = [
     "ReasoningEffort",
     "RelatedEntity",
     "build_investigation_tools",
+    "diagnostic_id",
     "evidence_id",
     "investigation_id",
     "investigation_provenance",
