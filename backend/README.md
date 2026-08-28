@@ -681,7 +681,9 @@ for a live run; Mayajaal deliberately supplies no default model because that is
 a deployment cost/quality decision. `[investigation].reasoning_effort` defaults
 to `"medium"` and accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 or `max`; OpenAI model support is provider/model-dependent, so compatibility is
-validated by the provider rather than guessed by Mayajaal. `ChatOpenAI` reads `OPENAI_API_KEY` only
+validated by the provider rather than guessed by Mayajaal. Live bounded tool
+agents explicitly use the OpenAI Responses API, which supports reasoning-aware
+function calling; `ChatOpenAI` reads `OPENAI_API_KEY` only
 from the process environment. Keys are never stored in TOML, artifacts, logs,
 prompts, or source. Unit tests inject a fake chat model and make no OpenAI
 call. [`.env.example`](.env.example) is a shell template only (copy it to the

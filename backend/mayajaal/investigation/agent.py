@@ -228,6 +228,10 @@ def _build_openai_model(config: InvestigationConfig) -> ChatOpenAI:
     return ChatOpenAI(
         model=config.model_name,
         reasoning_effort=config.reasoning_effort,
+        # Reasoning-effort function calling is supported through Responses.
+        # Keeping this explicit prevents endpoint inference from falling back
+        # to Chat Completions for the bounded tool agent.
+        use_responses_api=True,
     )
 
 

@@ -474,6 +474,7 @@ class InvestigationAgentTests(unittest.TestCase):
         factory.assert_called_once_with(
             model="configured-before-construction",
             reasoning_effort=ReasoningEffort.HIGH,
+            use_responses_api=True,
         )
 
     def test_injected_model_identity_never_claims_configured_openai_model(self) -> None:
@@ -500,6 +501,7 @@ class InvestigationAgentTests(unittest.TestCase):
         factory.assert_called_once_with(
             model="approved-openai-model",
             reasoning_effort="medium",
+            use_responses_api=True,
         )
 
     def test_fake_model_needs_no_api_key_and_openai_requires_only_environment_key(
