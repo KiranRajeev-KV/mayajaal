@@ -101,8 +101,8 @@ def score_comparison_run(
     report exists.  This prevents a failed run's fallback ``INCONCLUSIVE``
     pattern from becoming apparent analytical correctness.
     """
-    if provider_request_failure and status is not None:
-        raise ValueError("provider request failure cannot include a report status")
+    if provider_request_failure and (status is not None or pattern is not None):
+        raise ValueError("provider request failure cannot include a report")
     if provider_request_failure and grounding_failure:
         raise ValueError("provider request failure cannot be a grounding failure")
 
@@ -140,7 +140,10 @@ def score_comparison_run(
         case.expected_pattern is InvestigationPattern.INCONCLUSIVE
         and (
             pattern is InvestigationPattern.INCONCLUSIVE
-            or status is InvestigationStatus.INSUFFICIENT_EVIDENCE
+            or (
+                status is InvestigationStatus.INSUFFICIENT_EVIDENCE
+                and not reported_is_abuse
+            )
         )
     )
     return ComparisonRunOutcome(
@@ -175,6 +178,8 @@ def summarize_model_comparison(
         raise ValueError("comparison outcome references an unknown evaluation case")
     if len({record.case_id for record in records}) != len(records):
         raise ValueError("model comparison contains duplicate case outcomes")
+    if {record.case_id for record in records} != set(expected_by_case):
+        raise ValueError("model comparison must contain exactly one outcome per case")
     if len({record.model for record in records}) > 1:
         raise ValueError("model comparison summary accepts outcomes for one model")
 

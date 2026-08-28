@@ -116,7 +116,7 @@ class InvestigationComparisonScoringTests(unittest.TestCase):
         self.assertIsNone(system_failure.missed_obvious_abuse)
         self.assertTrue(system_failure.provider_request_failure)
 
-    def test_ambiguous_inconclusive_or_insufficient_evidence_is_appropriate(
+    def test_ambiguous_inconclusive_or_non_abuse_insufficient_evidence_is_appropriate(
         self,
     ) -> None:
         expected = case("ambiguous", InvestigationPattern.INCONCLUSIVE)
@@ -137,6 +137,59 @@ class InvestigationComparisonScoringTests(unittest.TestCase):
         self.assertTrue(completed.end_to_end_success)
         self.assertTrue(insufficient.appropriate_ambiguity_handling)
         self.assertTrue(insufficient.end_to_end_success)
+
+    def test_ambiguous_insufficient_evidence_with_abuse_pattern_has_no_credit(
+        self,
+    ) -> None:
+        outcome = score_comparison_run(
+            model="fixture-model",
+            case=case("ambiguous", InvestigationPattern.INCONCLUSIVE),
+            status=InvestigationStatus.INSUFFICIENT_EVIDENCE,
+            pattern=InvestigationPattern.PROMO_RING,
+        )
+
+        self.assertTrue(outcome.accepted_analytical_report)
+        self.assertFalse(outcome.appropriate_ambiguity_handling)
+        self.assertFalse(outcome.end_to_end_success)
+
+    def test_provider_failure_cannot_carry_a_status_or_pattern(self) -> None:
+        expected = case("promo", InvestigationPattern.PROMO_RING)
+        with self.assertRaisesRegex(ValueError, "cannot include a report"):
+            score_comparison_run(
+                model="fixture-model",
+                case=expected,
+                status=InvestigationStatus.FAILED,
+                pattern=None,
+                provider_request_failure=True,
+            )
+        with self.assertRaisesRegex(ValueError, "cannot include a report"):
+            score_comparison_run(
+                model="fixture-model",
+                case=expected,
+                status=None,
+                pattern=InvestigationPattern.INCONCLUSIVE,
+                provider_request_failure=True,
+            )
+
+    def test_summary_requires_exactly_one_outcome_for_every_case(self) -> None:
+        cases = (
+            case("promo", InvestigationPattern.PROMO_RING),
+            case("refund", InvestigationPattern.REFUND_RING),
+        )
+        promo = score_comparison_run(
+            model="fixture-model",
+            case=cases[0],
+            status=InvestigationStatus.COMPLETED,
+            pattern=InvestigationPattern.PROMO_RING,
+        )
+        unknown = promo.model_copy(update={"case_id": "unknown"})
+
+        with self.assertRaisesRegex(ValueError, "exactly one outcome"):
+            summarize_model_comparison((promo,), cases)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            summarize_model_comparison((promo, promo), (cases[0],))
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            summarize_model_comparison((promo, unknown), cases)
 
     def test_aggregate_rates_keep_quality_and_reliability_denominators_distinct(
         self,

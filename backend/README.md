@@ -793,6 +793,12 @@ grounding failure and its status is `COMPLETED` or `INSUFFICIENT_EVIDENCE`.
 `FAILED`, `BUDGET_EXHAUSTED`, provider/request failures, and invalid structured
 output have `null` quality flags, so their fallback `INCONCLUSIVE` pattern is
 never credited as correct reasoning.
+For an evaluator-only `INCONCLUSIVE` case, ambiguity credit requires a reported
+`INCONCLUSIVE` pattern, or `INSUFFICIENT_EVIDENCE` with a non-abuse pattern;
+an insufficient-evidence report that still declares an abuse ring receives no
+ambiguity credit. Each model summary requires exactly one run outcome for every
+fixed case, including an explicit provider/system-failure outcome for a missing
+run.
 
 Comparison summaries separate system reliability (`accepted_report_rate`,
 grounding/budget/failed-report/provider failure rates, and
