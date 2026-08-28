@@ -38,6 +38,8 @@ from mayajaal.investigation import (
     InvestigationConfig,
     InvestigationRequest,
     InvestigationSubjectType,
+    InvestigationToolContext,
+    build_investigation_tools,
 )
 from mayajaal.policy import (
     DecisionContext,
@@ -47,6 +49,7 @@ from mayajaal.policy import (
     decide,
 )
 from mayajaal.schemas import Event, EventType
+from mayajaal.scoring import ScoreObservation
 from mayajaal.scoring.service import score_feature_vector
 
 SUBJECT_ID = str(uuid5(UUID("00000000-0000-0000-0000-000000000001"), "account-subject"))
@@ -415,6 +418,39 @@ class EvidenceServiceTests(unittest.TestCase):
         self.assertTrue(all(item.observed_at <= item.cutoff_time for item in first))
         self.assertTrue(
             all(item.facts["related_account_ids"] == [PEER_ID] for item in first)
+        )
+
+    def test_tool_wrapper_preserves_real_evidence_ids_and_service_bounds(self) -> None:
+        service = self.service(max_related_accounts=1)
+        score = ScoreObservation(
+            score_id="score-fixture",
+            base_model_id=self.frozen.base_model_id,
+            subject_id=SUBJECT_ID,
+            scoring_cutoff=at(10),
+            raw_model_score=0.0,
+            feature_vector_id="vector-fixture",
+        )
+        context = InvestigationToolContext.create(
+            request=request(),
+            evidence_service=service,
+            score_observation=score,
+            config=InvestigationConfig(max_tool_calls=1, max_related_accounts=1),
+        )
+        wrapped = {tool.name: tool for tool in build_investigation_tools(context)}[
+            "shared_identity_summary"
+        ]
+        direct = service.get_shared_identity_summary(request())
+        returned = wrapped.invoke({})
+        self.assertEqual(
+            returned,
+            [item.model_dump(mode="json") for item in direct],
+        )
+        self.assertEqual(
+            [item["evidence_id"] for item in returned],
+            [item.evidence_id for item in direct],
+        )
+        self.assertTrue(
+            all(item["facts"]["max_related_accounts"] == 1 for item in returned)
         )
 
     def test_graph_and_related_account_budgets_truncate_deterministically(self) -> None:

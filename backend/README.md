@@ -571,12 +571,11 @@ the sole business-action authority.
 for tool calls, iterations, graph traversal, related accounts, and events. The
 current pure `should_investigate(...)` rule opens a future investigation for
 `REVIEW`, `BLOCK`, and an unstable `ALLOW`; it skips a stable `ALLOW`. Each case
-is independently configurable under `[investigation.triggers]`. No tool,
-database query, model/framework integration, external access, report artifact,
-or investigation orchestration exists yet—particularly no arbitrary
-SQL/Cypher, shell, or web access. Any future implementation must be read-only,
-fixed-cutoff, evidence-referenced, bounded by this configuration, and unable
-to override `ALLOW` / `REVIEW` / `BLOCK`.
+is independently configurable under `[investigation.triggers]`. There is no
+database query, model provider, report artifact, or investigation orchestration
+yet—particularly no arbitrary SQL/Cypher, shell, or web access. Any future
+implementation must be read-only, fixed-cutoff, evidence-referenced, bounded
+by this configuration, and unable to override `ALLOW` / `REVIEW` / `BLOCK`.
 
 `EvidenceService` now provides that bounded, read-only retrieval boundary. It
 accepts only an already-resolved immutable `GraphProjection`, public event
@@ -598,8 +597,46 @@ request's exact feature vector and calls `verify_score_from_feature_vector()`
 before CatBoost TreeSHAP; `RISK_DRIVER` describes a raw-score model contribution,
 never factual proof of abuse. Retrieved event/entity text is data only, not
 instructions. This keeps the service label-free, fixed-cutoff, and directly
-wrappable by future constrained tools without coupling it to LangChain or an
-LLM.
+wrapped by constrained LangChain tools without coupling the evidence service to
+an LLM or graph runtime.
+
+### Fixed LangChain evidence tools
+
+`mayajaal.investigation.tools` is a deliberately thin adapter over
+`EvidenceService`. `build_investigation_tools(...)` returns exactly five
+read-only, zero-argument tools:
+
+```text
+risk_explanation
+identity_neighborhood
+shared_identity_summary
+related_activity
+case_timeline
+```
+
+The trusted `InvestigationToolContext` holds the immutable request, verified
+`ScoreObservation`, evidence service, and a per-investigation deterministic
+tool-call budget. Each tool consumes that shared budget before calling its one
+matching service method, and fails closed once `max_tool_calls` is exhausted.
+The graph, event, and SHAP limits remain enforced inside `EvidenceService`.
+
+```text
+LangChain tool
+      ↓
+trusted runtime context
+      ↓
+EvidenceService
+      ↓
+bounded EvidenceItem[]
+```
+
+LangChain may choose which approved tool to call in a later orchestration
+slice. It does **not** choose a database/query, subject, cutoff, graph hop,
+node/edge, related-account, or event limit: those fields do not appear in the
+tool JSON schemas and come only from trusted runtime context and validated
+configuration. The adapter depends only on `langchain-core`; it has no OpenAI
+SDK, provider, model call, prompt, agent loop, LangGraph, network, or write
+capability. Retrieved facts remain untrusted data, never instructions.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

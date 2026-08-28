@@ -19,6 +19,7 @@ dependencies = [
     "shap>=0.48,<0.49",
     "catboost>=1.2.10",
     "scikit-learn>=1.9,<1.10",
+    "langchain-core>=1.5,<1.6",
 ]
 
 [tool.uv.sources]
