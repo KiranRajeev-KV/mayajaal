@@ -65,6 +65,11 @@ held-out-evaluate *args:
 calibration-evaluate *args:
     uv run python -m scripts.evaluate_calibration --config config.toml {{args}}
 
+# Make one cost-sensitive ALLOW / REVIEW / BLOCK decision from a verified
+# calibrated-probability artifact. Example: `just policy-decide --calibrated-probability 0.12 --exposure-paise 250000`.
+policy-decide *args:
+    uv run python -m scripts.decide_policy --config config.toml {{args}}
+
 # Run multi-seed realism diagnostics; pass flags after the recipe name.
 synthetic-validate *args:
     uv run python -m scripts.validate_synthetic --config config.toml {{args}}

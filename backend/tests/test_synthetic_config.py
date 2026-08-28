@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mayajaal.calibration import CalibrationConfig
 from mayajaal.evaluation import EvaluationConfig
+from mayajaal.policy import PolicyConfig
 from mayajaal.synthetic.config import load_generation_config
 from mayajaal.synthetic.profile import DiagnosticProfile, PrevalenceProfile
 
@@ -51,6 +52,8 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.evaluation.minimum_positive_samples, 10)
         self.assertEqual(config.calibration.method, "sigmoid")
         self.assertEqual(config.calibration.quantile_bin_count, 10)
+        self.assertEqual(config.policy.review_operational_cost_paise, 1500)
+        self.assertEqual(config.policy.sensitivity.stressed_probability_shift, 0.05)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
         with self.assertRaises(ValueError):
@@ -63,6 +66,8 @@ class SyntheticConfigTests(unittest.TestCase):
             _ = EvaluationConfig(false_positive_review_cost_paise=1)
         with self.assertRaises(ValueError):
             _ = CalibrationConfig(quantile_bin_count=1)
+        with self.assertRaises(ValueError):
+            _ = PolicyConfig(block_fraud_residual_loss_fraction=1.1)
 
 
 if __name__ == "__main__":

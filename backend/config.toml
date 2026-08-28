@@ -114,6 +114,30 @@ minimum_negative_samples = 20
 quantile_bin_count = 10
 maximum_iterations = 1000
 
+[policy]
+# Merchant policy assumptions, not evaluation-only fixed costs and not values
+# fitted from any benchmark labels. All fixed monetary values are integer paise.
+# Expected costs may be fractional paise because they are probability-weighted.
+allow_operational_cost_paise = 0
+allow_legitimate_cost_paise = 0
+allow_fraud_exposure_loss_fraction = 1.0
+review_operational_cost_paise = 1500
+review_legitimate_friction_cost_paise = 500
+review_fraud_residual_loss_fraction = 0.20
+block_operational_cost_paise = 200
+block_legitimate_margin_loss_fraction = 0.10
+block_legitimate_friction_cost_paise = 1000
+block_fraud_residual_loss_fraction = 0.01
+# On an exact expected-cost tie, prefer lower-friction action in this order.
+tie_break_order = ["ALLOW", "REVIEW", "BLOCK"]
+
+[policy.sensitivity]
+# These are explicit decision scenarios, not recalibrated probabilities. The
+# reported scenario probability is base calibrated probability plus this shift,
+# bounded to [0, 1].
+optimistic_probability_shift = -0.05
+stressed_probability_shift = 0.05
+
 [synthetic_world.difficulty_profiles.easy]
 persona_weight_temperature = 0.80
 benign_sharing_multiplier = 0.70

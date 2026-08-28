@@ -385,3 +385,74 @@ load and verify both IDs through `mayajaal.calibration.load_probability_model`
 rather than reconstructing calibration assumptions. By default calibration
 reads `artifacts/synthetic-world/held-out-evaluation`; pass `--evaluation-dir`
 to consume another completed held-out run.
+
+## Cost-sensitive decision policy
+
+`mayajaal.policy` is a model-neutral merchant decision layer. It receives a
+**verified calibrated probability** plus a known decision context, never raw
+model features, scores, labels, or CatBoost implementation details. It selects
+one of `ALLOW`, `REVIEW`, or `BLOCK` by computing, for each action `a`:
+
+```text
+EC(a) = P(fraud) × C(a | fraud) + (1 − P(fraud)) × C(a | legitimate)
+```
+
+The policy chooses the lowest expected cost. Fixed costs are configured as
+integer paise. Loss fractions apply to the supplied transaction exposure in
+paise: allowing fraud retains `allow_fraud_exposure_loss_fraction` of exposure;
+review retains `review_fraud_residual_loss_fraction`; blocking retains
+`block_fraud_residual_loss_fraction`. Review operational cost and legitimate
+review friction apply in both appropriate conditional cases. Blocking combines
+fixed operational cost, legitimate customer friction, and legitimate
+margin/revenue loss as a configured fraction of exposure. Thus a review or
+block boundary emerges from merchant assumptions and amount at risk—not an
+embedded probability threshold. Expected values can be fractional paise because
+they are mathematical expectations; stored monetary assumptions remain integer
+paise.
+
+`[policy]` in [config.toml](config.toml) holds these merchant assumptions
+separately from the evaluation-only fixed-cost fields. It also configures an
+exact tie-break order. The checked-in `ALLOW → REVIEW → BLOCK` order prefers the
+least disruptive action only when expected costs are exactly equal.
+
+Every decision includes conditional cost breakdowns for all actions, expected
+cost deltas from the chosen action, its cost margin, the calibrated probability,
+and the given exposure/context. It also reports two declared sensitivity
+scenarios: `optimistic` and `stressed`. Each is the base calibrated probability
+plus the configured signed shift, bounded to `[0, 1]`, and is explicitly an
+assumption rather than a newly calibrated probability. Scenario outputs include
+their own minimum-cost action and margin; `decision_is_stable_across_scenarios`
+shows whether both agree with the base action.
+
+The policy has independent deterministic provenance:
+
+```text
+base_model_id → probability_model_id → policy_id
+```
+
+`policy_id` is SHA-256 over canonical JSON containing only the policy provenance
+contract version, `probability_model_id`, and complete validated policy
+configuration. It excludes artifact paths, timestamps, runtime transaction
+values, and JSON formatting. `build_policy_model` binds configuration to a
+verified `ProbabilityModel`; `load_policy_model` recomputes the contract and
+rejects tampering or a base/probability lineage mismatch.
+
+For a local, offline auditable decision, first create a calibration artifact,
+then run:
+
+```bash
+# Recommended: derive the probability from a raw model margin through the
+# verified sigmoid artifact.
+just policy-decide --raw-model-score 0.12 --exposure-paise 250000
+just policy-decide --calibration-dir artifacts/calibration-standard-10k-final \
+  --raw-model-score 0.12 --exposure-paise 250000 --context-id order-123
+```
+
+The command does not generate a world, fit a model, refit calibration, read a
+held-out label, or choose a threshold. It verifies
+`sigmoid_calibrator.json` and transforms `--raw-model-score` through that
+artifact. `--calibrated-probability` remains available only for a probability
+already verified by an upstream model boundary. The command then writes `policy_model.json` and
+`policy_decision.json` to `artifacts/synthetic-world/policy-decision` by default.
+These are designed as the hand-off for a later realtime/API layer or
+investigation agent; neither is implemented here.

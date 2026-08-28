@@ -72,6 +72,10 @@ held-out-evaluate *args:
 calibration-evaluate *args:
     just --justfile {{backend_justfile}} calibration-evaluate {{args}}
 
+# Forward one verified-probability decision context to the policy CLI.
+policy-decide *args:
+    just --justfile {{backend_justfile}} policy-decide {{args}}
+
 # Forward arbitrary validation flags after the recipe name, for example:
 # `just synthetic-validate --full --output-dir artifacts/validation-10k`.
 synthetic-validate *args:

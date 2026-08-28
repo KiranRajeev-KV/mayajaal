@@ -7,6 +7,7 @@ from pydantic import Field
 
 from mayajaal.calibration import CalibrationConfig
 from mayajaal.evaluation import EvaluationConfig
+from mayajaal.policy import PolicyConfig
 from mayajaal.schemas.common import SchemaModel
 
 from .profile import GenerationProfile
@@ -24,6 +25,7 @@ class GenerationConfig(SchemaModel):
     synthetic_world: GenerationProfile
     evaluation: EvaluationConfig
     calibration: CalibrationConfig
+    policy: PolicyConfig
     output: OutputConfig
 
 
