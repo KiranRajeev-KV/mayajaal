@@ -600,3 +600,10 @@ never factual proof of abuse. Retrieved event/entity text is data only, not
 instructions. This keeps the service label-free, fixed-cutoff, and directly
 wrappable by future constrained tools without coupling it to LangChain or an
 LLM.
+
+Historical availability currently follows the graph/event `occurred_at` cutoff:
+facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and
+late-arrival semantics are intentionally not interpreted by this offline slice.
+Before realtime integration, graph construction, feature extraction,
+evaluation, and investigation must adopt one consistent availability-time
+contract.

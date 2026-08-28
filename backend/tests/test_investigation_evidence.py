@@ -199,6 +199,99 @@ def evidence_projection(events: tuple[Event, ...]) -> GraphProjection:
     return GraphProjection(nodes=tuple(nodes), relationships=tuple(relationships))
 
 
+def ranking_projection() -> GraphProjection:
+    """Build overlap/recency/tie fixtures for deterministic peer ranking."""
+    subject = SUBJECT_ID
+    peers = (
+        "account-many",
+        "account-recent",
+        "account-older",
+        "account-a",
+        "account-b",
+    )
+    nodes = [GraphNode(GraphNodeType.ACCOUNT, subject, {"created_at": at(1)})]
+    nodes.extend(
+        GraphNode(GraphNodeType.ACCOUNT, account_id, {"created_at": at(1)})
+        for account_id in peers
+    )
+    relationships: list[GraphRelationship] = []
+
+    def add_shared(
+        identity_type: GraphNodeType,
+        identity_id: str,
+        relationship_type: GraphRelationshipType,
+        peer_id: str,
+        peer_time: datetime,
+    ) -> None:
+        nodes.append(GraphNode(identity_type, identity_id, {}))
+        relationships.extend(
+            (
+                relationship(
+                    relationship_type,
+                    GraphNodeType.ACCOUNT,
+                    subject,
+                    identity_type,
+                    identity_id,
+                    f"subject-{identity_id}",
+                    at(2),
+                ),
+                relationship(
+                    relationship_type,
+                    GraphNodeType.ACCOUNT,
+                    peer_id,
+                    identity_type,
+                    identity_id,
+                    f"{peer_id}-{identity_id}",
+                    peer_time,
+                ),
+            )
+        )
+
+    add_shared(
+        GraphNodeType.DEVICE,
+        "device-many",
+        GraphRelationshipType.USED_DEVICE,
+        "account-many",
+        at(3),
+    )
+    add_shared(
+        GraphNodeType.IP_ADDRESS,
+        "ip-many",
+        GraphRelationshipType.SEEN_FROM,
+        "account-many",
+        at(4),
+    )
+    add_shared(
+        GraphNodeType.PAYMENT_IDENTITY,
+        "payment-recency",
+        GraphRelationshipType.PAID_WITH,
+        "account-recent",
+        at(9),
+    )
+    add_shared(
+        GraphNodeType.PAYMENT_IDENTITY,
+        "payment-older",
+        GraphRelationshipType.PAID_WITH,
+        "account-older",
+        at(7),
+    )
+    add_shared(
+        GraphNodeType.DEVICE,
+        "device-tie",
+        GraphRelationshipType.USED_DEVICE,
+        "account-a",
+        at(6),
+    )
+    add_shared(
+        GraphNodeType.DEVICE,
+        "device-tie",
+        GraphRelationshipType.USED_DEVICE,
+        "account-b",
+        at(6),
+    )
+    return GraphProjection(nodes=tuple(nodes), relationships=tuple(relationships))
+
+
 def minimal_frozen_evaluation() -> FrozenFullEvaluation:
     """Create a real, tiny CatBoost model for dependencies not used by graph tools."""
     schema = FeatureSchema(
@@ -399,6 +492,88 @@ class EvidenceServiceTests(unittest.TestCase):
             sorted(str(item["occurred_at"]) for item in timeline_events),
         )
         self.assertTrue(bool(timeline.facts["truncated"]))
+
+    def test_event_limit_keeps_recent_promo_refund_activity_and_timeline_matches(
+        self,
+    ) -> None:
+        service = self.service(max_events_per_tool=4)
+        activity = service.get_related_activity(request())
+        activity_events = [
+            cast(dict[str, object], item.facts)["event_type"] for item in activity[1:]
+        ]
+        self.assertEqual(
+            activity_events,
+            [
+                EventType.ORDER_PLACED.value,
+                EventType.PROMOTION_REDEEMED.value,
+                EventType.REFUND_REQUESTED.value,
+                EventType.REFUND_RESOLVED.value,
+            ],
+        )
+        self.assertNotIn(EventType.ACCOUNT_CREATED.value, activity_events)
+        self.assertTrue(bool(activity[0].facts["truncated"]))
+        timeline = service.get_case_timeline(request())[0]
+        timeline_events = cast(list[dict[str, object]], timeline.facts["events"])
+        self.assertEqual(
+            [item["event_id"] for item in timeline_events],
+            [cast(dict[str, object], item.facts)["event_id"] for item in activity[1:]],
+        )
+
+    def test_related_accounts_rank_by_overlap_recency_then_identifier(self) -> None:
+        projection = ranking_projection()
+        service = EvidenceService(
+            projection=projection,
+            events=self.events,
+            feature_service=FeatureService(projection),
+            frozen_evaluation=self.frozen,
+            config=InvestigationConfig(max_related_accounts=5),
+        )
+        first = service.get_shared_identity_summary(request())
+        second = service.get_shared_identity_summary(request())
+        self.assertEqual(first, second)
+        ranking = cast(
+            list[dict[str, object]], first[0].facts["related_account_ranking"]
+        )
+        self.assertEqual(
+            [item["account_id"] for item in ranking],
+            [
+                "account-many",
+                "account-recent",
+                "account-older",
+                "account-a",
+                "account-b",
+            ],
+        )
+        self.assertEqual(ranking[0]["shared_identity_type_count"], 2)
+        self.assertEqual(
+            first[0].facts["selected_related_account_ids"],
+            [item["account_id"] for item in ranking],
+        )
+        self.assertEqual(
+            [item.evidence_id for item in first], [item.evidence_id for item in second]
+        )
+
+    def test_related_account_limit_uses_the_same_ranked_selection_everywhere(
+        self,
+    ) -> None:
+        projection = ranking_projection()
+        service = EvidenceService(
+            projection=projection,
+            events=self.events,
+            feature_service=FeatureService(projection),
+            frozen_evaluation=self.frozen,
+            config=InvestigationConfig(max_related_accounts=2, max_events_per_tool=4),
+        )
+        summary = service.get_shared_identity_summary(request())
+        activity = service.get_related_activity(request())
+        timeline = service.get_case_timeline(request())[0]
+        expected = ["account-many", "account-recent"]
+        for item in (*summary, activity[0], timeline):
+            self.assertEqual(item.facts["selected_related_account_ids"], expected)
+            self.assertTrue(bool(item.facts["related_accounts_truncated"]))
+            self.assertLessEqual(
+                cast(int, item.facts["returned_related_account_count"]), 2
+            )
 
     def test_activity_exposes_promotion_and_refund_without_labels(self) -> None:
         service = self.service(max_events_per_tool=20)

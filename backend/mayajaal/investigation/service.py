@@ -43,6 +43,15 @@ class _IdentityLink:
     event_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _RankedRelatedAccount:
+    """One cutoff-safe peer ranked only by observed identity overlap."""
+
+    account_id: str
+    shared_identity_type_count: int
+    most_recent_shared_identity_observed_at: datetime
+
+
 _DIRECT_IDENTITY_TYPES = {
     GraphRelationshipType.USED_DEVICE: GraphNodeType.DEVICE,
     GraphRelationshipType.SEEN_FROM: GraphNodeType.IP_ADDRESS,
@@ -176,20 +185,13 @@ class EvidenceService:
         account_links = _account_links(links)
         identity_links = _identity_links(links)
         subject_links = account_links.get(request.subject_id, ())
-        related_accounts = sorted(
-            {
-                link.account_id
-                for subject_link in subject_links
-                for link in identity_links[
-                    (subject_link.identity_type, subject_link.identity_id)
-                ]
-                if link.account_id != request.subject_id
-            }
+        ranked_related = _rank_related_accounts(
+            request.subject_id, subject_links, identity_links
         )
-        allowed_related = frozenset(
-            related_accounts[: self._config.max_related_accounts]
+        selected_related = ranked_related[: self._config.max_related_accounts]
+        ranking_metadata = _related_account_metadata(
+            selected_related, len(ranked_related), self._config.max_related_accounts
         )
-        total_related_truncated = len(related_accounts) > len(allowed_related)
         result: list[EvidenceItem] = []
         for subject_link in subject_links:
             same_identity = identity_links[
@@ -205,7 +207,9 @@ class EvidenceService:
             if not all_peers:
                 continue
             returned_peers = tuple(
-                account_id for account_id in all_peers if account_id in allowed_related
+                account.account_id
+                for account in selected_related
+                if account.account_id in all_peers
             )
             first_seen = min(link.first_seen for link in same_identity)
             last_seen = max(link.last_seen for link in same_identity)
@@ -214,12 +218,10 @@ class EvidenceService:
                 "identity_type": subject_link.identity_type.value,
                 "related_account_count": len(all_peers),
                 "related_account_ids": list(returned_peers),
-                "related_account_ids_truncated": (
-                    len(returned_peers) < len(all_peers) or total_related_truncated
-                ),
-                "max_related_accounts": self._config.max_related_accounts,
+                "related_account_ids_truncated": (len(returned_peers) < len(all_peers)),
                 "first_seen": first_seen.isoformat(),
                 "last_seen": last_seen.isoformat(),
+                **ranking_metadata,
             }
             result.append(
                 self._evidence(
@@ -239,15 +241,25 @@ class EvidenceService:
         self, request: InvestigationRequest
     ) -> tuple[EvidenceItem, ...]:
         """Return bounded, sanitized historical activity for subject and peers."""
-        events, total_event_count, related_accounts = self._activity_events(request)
+        (
+            events,
+            total_event_count,
+            selected_related,
+            total_related_count,
+        ) = self._activity_events(request)
         metadata: dict[str, JsonValue] = {
             "subject_id": request.subject_id,
-            "related_account_ids": list(related_accounts),
-            "max_related_accounts": self._config.max_related_accounts,
+            "related_account_ids": [account.account_id for account in selected_related],
             "returned_event_count": len(events),
             "total_event_count": total_event_count,
             "max_events_per_tool": self._config.max_events_per_tool,
             "truncated": total_event_count > len(events),
+            "event_selection": "most_recent_n_then_chronological_presentation",
+            **_related_account_metadata(
+                selected_related,
+                total_related_count,
+                self._config.max_related_accounts,
+            ),
         }
         result = [
             self._evidence(
@@ -279,19 +291,30 @@ class EvidenceService:
         self, request: InvestigationRequest
     ) -> tuple[EvidenceItem, ...]:
         """Return one chronologically ordered, cutoff-safe case timeline fact."""
-        events, total_event_count, related_accounts = self._activity_events(request)
+        (
+            events,
+            total_event_count,
+            selected_related,
+            total_related_count,
+        ) = self._activity_events(request)
         timeline: list[JsonValue] = [
             _event_facts(event, self._event_canonical_ids(event, request.cutoff_time))
             for event in events
         ]
         facts: dict[str, JsonValue] = {
             "subject_id": request.subject_id,
-            "related_account_ids": list(related_accounts),
+            "related_account_ids": [account.account_id for account in selected_related],
             "returned_event_count": len(timeline),
             "total_event_count": total_event_count,
             "max_events_per_tool": self._config.max_events_per_tool,
             "truncated": total_event_count > len(timeline),
+            "event_selection": "most_recent_n_then_chronological_presentation",
             "events": timeline,
+            **_related_account_metadata(
+                selected_related,
+                total_related_count,
+                self._config.max_related_accounts,
+            ),
         }
         observed_at = events[-1].occurred_at if events else request.cutoff_time
         return (
@@ -412,32 +435,28 @@ class EvidenceService:
 
     def _activity_events(
         self, request: InvestigationRequest
-    ) -> tuple[tuple[Event, ...], int, tuple[str, ...]]:
+    ) -> tuple[tuple[Event, ...], int, tuple[_RankedRelatedAccount, ...], int]:
         """Return chronological sanitized-source events within account/event budgets."""
         links = self._links_at(request.cutoff_time)
         identity_links = _identity_links(links)
-        related = sorted(
-            {
-                link.account_id
-                for subject_link in _account_links(links).get(request.subject_id, ())
-                for link in identity_links[
-                    (subject_link.identity_type, subject_link.identity_id)
-                ]
-                if link.account_id != request.subject_id
-            }
-        )[: self._config.max_related_accounts]
-        allowed_accounts = {request.subject_id, *related}
+        ranked_related = _rank_related_accounts(
+            request.subject_id,
+            _account_links(links).get(request.subject_id, ()),
+            identity_links,
+        )
+        selected_related = ranked_related[: self._config.max_related_accounts]
+        allowed_accounts = {
+            request.subject_id,
+            *(account.account_id for account in selected_related),
+        }
         all_events = tuple(
             event
             for event in self._events
             if event.occurred_at <= request.cutoff_time
             and str(event.account_id) in allowed_accounts
         )
-        return (
-            all_events[: self._config.max_events_per_tool],
-            len(all_events),
-            tuple(related),
-        )
+        selected_events = all_events[-self._config.max_events_per_tool :]
+        return selected_events, len(all_events), selected_related, len(ranked_related)
 
     def _event_canonical_ids(self, event: Event, cutoff: datetime) -> dict[str, str]:
         """Map event-owned graph endpoints to resolved IDs without labels."""
@@ -502,6 +521,70 @@ def _link_from_events(
         last_seen=ordered[-1].event_time,
         event_ids=tuple(item.event_id for item in ordered),
     )
+
+
+def _rank_related_accounts(
+    subject_id: str,
+    subject_links: tuple[_IdentityLink, ...],
+    identity_links: dict[tuple[GraphNodeType, str], tuple[_IdentityLink, ...]],
+) -> tuple[_RankedRelatedAccount, ...]:
+    """Rank peers by cutoff-safe shared identity breadth, recency, then ID."""
+    shared_types: defaultdict[str, set[GraphNodeType]] = defaultdict(set)
+    latest_seen: dict[str, datetime] = {}
+    for subject_link in subject_links:
+        for peer_link in identity_links[
+            (subject_link.identity_type, subject_link.identity_id)
+        ]:
+            if peer_link.account_id == subject_id:
+                continue
+            shared_types[peer_link.account_id].add(subject_link.identity_type)
+            observed_at = max(subject_link.last_seen, peer_link.last_seen)
+            latest_seen[peer_link.account_id] = max(
+                latest_seen.get(peer_link.account_id, observed_at), observed_at
+            )
+    return tuple(
+        sorted(
+            (
+                _RankedRelatedAccount(
+                    account_id=account_id,
+                    shared_identity_type_count=len(identity_types),
+                    most_recent_shared_identity_observed_at=latest_seen[account_id],
+                )
+                for account_id, identity_types in shared_types.items()
+            ),
+            key=lambda item: (
+                -item.shared_identity_type_count,
+                -item.most_recent_shared_identity_observed_at.timestamp(),
+                item.account_id,
+            ),
+        )
+    )
+
+
+def _related_account_metadata(
+    selected: tuple[_RankedRelatedAccount, ...],
+    total_count: int,
+    max_related_accounts: int,
+) -> dict[str, JsonValue]:
+    """Describe bounded peer selection without exposing unselected identities."""
+    return {
+        "selected_related_account_ids": [item.account_id for item in selected],
+        "returned_related_account_count": len(selected),
+        "total_related_account_count": total_count,
+        "related_accounts_truncated": total_count > len(selected),
+        "max_related_accounts": max_related_accounts,
+        "related_account_ranking": [
+            {
+                "rank": index,
+                "account_id": item.account_id,
+                "shared_identity_type_count": item.shared_identity_type_count,
+                "most_recent_shared_identity_observed_at": (
+                    item.most_recent_shared_identity_observed_at.isoformat()
+                ),
+            }
+            for index, item in enumerate(selected, start=1)
+        ],
+    }
 
 
 def _merge_links(links: Iterable[_IdentityLink]) -> tuple[_IdentityLink, ...]:
