@@ -147,6 +147,8 @@ max_graph_nodes = 200
 max_graph_edges = 500
 max_related_accounts = 50
 max_events_per_tool = 100
+# Maximum positive and negative raw-score TreeSHAP drivers per explanation.
+max_risk_drivers = 5
 
 [investigation.triggers]
 # A stable ALLOW is skipped. Review, block, and an unstable ALLOW open a future

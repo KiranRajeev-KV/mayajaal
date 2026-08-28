@@ -488,6 +488,14 @@ calibration fitting, so existing held-out and calibration artifacts remain
 reusable. Earlier policy decisions must be regenerated from the reused
 calibration artifact and a verified feature-vector score.
 
+There are two deliberately distinct score checks. `verify_score_observation()`
+checks only deterministic score identity and self-consistency; a hash alone does
+**not** prove that a model was executed. `verify_score_from_feature_vector()`
+re-runs the verified frozen model on the exact `FeatureVector` and compares the
+result. Downstream persisted lineage therefore assumes that a `ScoreObservation`
+originated from trusted `score_feature_vector()`; use the latter verification
+whenever the feature vector and frozen model are available.
+
 `policy_decision.json` stores its explicit decision-contract version, raw
 margin, estimate lineage, economics result, scenarios, and deterministic
 `decision_id`. `load_policy_decision`
@@ -534,7 +542,7 @@ deterministic trigger
       ↓
 InvestigationRequest
       ↓
-future bounded evidence collection
+bounded deterministic evidence collection
       ↓
 future structured InvestigationReport
 ```
@@ -569,3 +577,26 @@ or investigation orchestration exists yet—particularly no arbitrary
 SQL/Cypher, shell, or web access. Any future implementation must be read-only,
 fixed-cutoff, evidence-referenced, bounded by this configuration, and unable
 to override `ALLOW` / `REVIEW` / `BLOCK`.
+
+`EvidenceService` now provides that bounded, read-only retrieval boundary. It
+accepts only an already-resolved immutable `GraphProjection`, public event
+facts, a `FeatureService`, and a verified frozen model. Its narrow methods
+expose TreeSHAP raw-score drivers, an account/device/IP/payment/address
+neighbourhood, shared-identity summaries, sanitized related activity, and a
+chronological case timeline. It has no graph driver, query-string, or write
+interface. Every method begins with `InvestigationRequest.subject_id` and its
+fixed cutoff; it accepts no alternate subject, cutoff, SQL, Cypher, shell, or
+web parameter. Graph hops/nodes/edges, related accounts, event records, and
+positive/negative TreeSHAP drivers are bounded by `[investigation]`, with
+deterministic ordering and count/truncation facts when a result is incomplete.
+
+Each item is made through `EvidenceItem.from_request(...)`, bound to the exact
+request cutoff, and has a semantic SHA-256 `evidence_id` independent of output
+path, retrieval time, or JSON presentation. Machine-readable facts reject known
+evaluation-label fields recursively. The explanation method re-extracts the
+request's exact feature vector and calls `verify_score_from_feature_vector()`
+before CatBoost TreeSHAP; `RISK_DRIVER` describes a raw-score model contribution,
+never factual proof of abuse. Retrieved event/entity text is data only, not
+instructions. This keeps the service label-free, fixed-cutoff, and directly
+wrappable by future constrained tools without coupling it to LangChain or an
+LLM.

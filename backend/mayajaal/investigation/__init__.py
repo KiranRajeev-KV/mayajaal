@@ -17,11 +17,15 @@ from .models import (
     InvestigationUsage,
     RelatedEntity,
 )
+from .provenance import EVIDENCE_CONTRACT_VERSION, evidence_id
+from .service import EvidenceService
 from .triggers import should_investigate
 
 __all__ = [
+    "EVIDENCE_CONTRACT_VERSION",
     "EvidenceFinding",
     "EvidenceItem",
+    "EvidenceService",
     "EvidenceSource",
     "EvidenceType",
     "InvestigationConfig",
@@ -35,5 +39,6 @@ __all__ = [
     "InvestigationTriggerReason",
     "InvestigationUsage",
     "RelatedEntity",
+    "evidence_id",
     "should_investigate",
 ]

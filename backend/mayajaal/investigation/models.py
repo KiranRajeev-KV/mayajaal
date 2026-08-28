@@ -61,6 +61,7 @@ class EvidenceType(StrEnum):
     SHARED_IP = "SHARED_IP"
     SHARED_ADDRESS = "SHARED_ADDRESS"
     RELATED_ACCOUNT_ACTIVITY = "RELATED_ACCOUNT_ACTIVITY"
+    IDENTITY_NEIGHBORHOOD = "IDENTITY_NEIGHBORHOOD"
     PROMOTION_ACTIVITY = "PROMOTION_ACTIVITY"
     REFUND_ACTIVITY = "REFUND_ACTIVITY"
     TIMELINE_EVENT = "TIMELINE_EVENT"
@@ -94,6 +95,7 @@ class InvestigationConfig(SchemaModel):
     max_graph_edges: int = Field(default=500, ge=1)
     max_related_accounts: int = Field(default=50, ge=1)
     max_events_per_tool: int = Field(default=100, ge=1)
+    max_risk_drivers: int = Field(default=5, ge=1)
     triggers: InvestigationTriggerConfig = Field(
         default_factory=InvestigationTriggerConfig
     )
