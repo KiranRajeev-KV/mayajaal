@@ -126,7 +126,13 @@ def build_investigation_tools(
 
     @tool
     def case_timeline() -> list[dict[str, JsonValue]]:
-        """Return the bounded chronological case timeline at the fixed cutoff."""
+        """Return chronological timeline events; only these refs are timeline-eligible.
+
+        Every returned object has ``timeline_reference_eligible=true``. Only
+        those ``evidence_ref`` values may be used in the structured
+        ``timeline_evidence_refs`` field; other tool references belong in
+        findings, counterevidence, related entities, or general evidence refs.
+        """
         return _invoke(context, "case_timeline")
 
     return (

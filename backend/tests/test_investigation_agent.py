@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -652,11 +652,15 @@ class InvestigationAgentTests(unittest.TestCase):
             service._agent_model_id(),  # pyright: ignore[reportPrivateUsage]
             "configured-before-construction",
         )
-        factory.assert_called_once_with(
-            model="configured-before-construction",
-            reasoning_effort=ReasoningEffort.HIGH,
-            use_responses_api=True,
+        factory.assert_called_once()
+        self.assertEqual(
+            factory.call_args.kwargs["model"], "configured-before-construction"
         )
+        self.assertIs(
+            factory.call_args.kwargs["reasoning_effort"], ReasoningEffort.HIGH
+        )
+        self.assertTrue(factory.call_args.kwargs["use_responses_api"])
+        self.assertEqual(len(factory.call_args.kwargs["callbacks"]), 1)
 
     def test_injected_model_identity_never_claims_configured_openai_model(self) -> None:
         service = InvestigationAgentService(
@@ -683,6 +687,72 @@ class InvestigationAgentTests(unittest.TestCase):
             model="approved-openai-model",
             reasoning_effort="medium",
             use_responses_api=True,
+        )
+
+    def test_production_callbacks_preserve_real_model_identity(self) -> None:
+        config = InvestigationConfig(model_name="approved-openai-model")
+        callback = BaseCallbackHandler()
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=True),
+            patch.object(investigation_agent, "ChatOpenAI") as factory,
+        ):
+            service = InvestigationAgentService(
+                config=config,
+                callbacks=(callback,),
+                max_retries=0,
+            )
+
+        self.assertEqual(
+            service._agent_model_id(),  # pyright: ignore[reportPrivateUsage]
+            "approved-openai-model",
+        )
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["model"], "approved-openai-model")
+        self.assertIs(
+            factory.call_args.kwargs["reasoning_effort"], ReasoningEffort.MEDIUM
+        )
+        self.assertEqual(factory.call_args.kwargs["callbacks"][0], callback)
+        self.assertEqual(len(factory.call_args.kwargs["callbacks"]), 2)
+        self.assertEqual(factory.call_args.kwargs["max_retries"], 0)
+        self.assertTrue(factory.call_args.kwargs["use_responses_api"])
+
+    def test_callback_model_count_beats_optional_langchain_state_count(self) -> None:
+        counter = investigation_agent._ModelCallCounter()  # pyright: ignore[reportPrivateUsage]
+        counter.on_llm_end(object())
+        counter.on_llm_end(object())
+
+        count = investigation_agent._model_call_count(  # pyright: ignore[reportPrivateUsage]
+            state={"run_model_call_count": 0},
+            counter=counter,
+            start_count=0,
+        )
+
+        self.assertEqual(count, 2)
+
+    def test_inconclusive_pattern_cannot_declare_promo_ring_in_summary(self) -> None:
+        service, evidence_service = self.service_and_evidence()
+        fake_agent = FakeAgent(
+            state={
+                "structured_response": {
+                    "status": "COMPLETED",
+                    "pattern": "INCONCLUSIVE",
+                    "summary": "The evidence most strongly supports PROMO_RING-style abuse.",
+                }
+            }
+        )
+        with patch.object(investigation_agent, "create_agent", return_value=fake_agent):
+            execution = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+
+        self.assertIs(execution.report.status, InvestigationStatus.FAILED)
+        self.assertEqual(execution.report.key_findings, ())
+        assert execution.grounding_failure is not None
+        self.assertIs(
+            execution.grounding_failure.code,
+            GroundingFailureCode.PATTERN_SUMMARY_CONTRADICTION,
         )
 
     def test_fake_model_needs_no_api_key_and_openai_requires_only_environment_key(

@@ -2,13 +2,15 @@
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from threading import Lock
 from typing import Annotated, Protocol, cast
 
 from langchain.agents import create_agent  # pyright: ignore[reportUnknownVariableType]
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from pydantic import Field, JsonValue, ValidationError
@@ -75,7 +77,14 @@ class InvestigationAgentOutput(SchemaModel):
     pattern: InvestigationPattern = InvestigationPattern.INCONCLUSIVE
     key_findings: tuple[InvestigationAgentFinding, ...] = ()
     counterevidence: tuple[InvestigationAgentFinding, ...] = ()
-    timeline_evidence_refs: tuple[EvidenceReference, ...] = ()
+    timeline_evidence_refs: tuple[EvidenceReference, ...] = Field(
+        default=(),
+        description=(
+            "Only aliases returned by case_timeline with "
+            "timeline_reference_eligible=true. Do not place general evidence "
+            "references here."
+        ),
+    )
     related_entities: tuple[InvestigationAgentRelatedEntity, ...] = ()
     evidence_refs: tuple[EvidenceReference, ...] = ()
     summary: str | None = Field(default=None, min_length=1)
@@ -100,7 +109,33 @@ Rules:
   capability.
 - Tool results expose short evidence references such as E001. Cite those exact
   references in the structured output; never invent an evidence reference.
+- `timeline_evidence_refs` is special: use only aliases returned by the
+  `case_timeline` tool that explicitly have `timeline_reference_eligible=true`.
+  Do not put identity, activity, or model-explanation refs in that field.
+- `pattern` is the sole structured classification. If it is INCONCLUSIVE, do
+  not declare PROMO_RING, REFUND_RING, or MIXED_ABUSE in the summary.
 """
+
+
+class _ModelCallCounter(BaseCallbackHandler):
+    """Application-owned count of completed provider model calls for one service."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._count = 0
+        self._lock = Lock()
+
+    @property
+    def count(self) -> int:
+        """Return a lock-protected cumulative count for this model instance."""
+        with self._lock:
+            return self._count
+
+    def on_llm_end(self, response: object, **_: object) -> None:
+        """Count completed provider calls without retaining response content."""
+        del response
+        with self._lock:
+            self._count += 1
 
 
 class _AgentInvoker(Protocol):
@@ -126,12 +161,25 @@ class InvestigationAgentService:
         *,
         config: InvestigationConfig,
         model: BaseChatModel | None = None,
+        callbacks: Sequence[BaseCallbackHandler] = (),
+        max_retries: int | None = None,
     ) -> None:
         # Do not retain application-owned mutable configuration. This snapshot
         # defines both the provider construction and every run's provenance.
         self._config = config.model_copy(deep=True)
+        if max_retries is not None and max_retries < 0:
+            raise ValueError("max_retries cannot be negative")
         self._uses_injected_model = model is not None
-        self._model = model if model is not None else _build_openai_model(self._config)
+        self._model_call_counter = _ModelCallCounter()
+        self._model = (
+            model
+            if model is not None
+            else _build_openai_model(
+                self._config,
+                callbacks=(*callbacks, self._model_call_counter),
+                max_retries=max_retries,
+            )
+        )
 
     @property
     def config(self) -> InvestigationConfig:
@@ -173,6 +221,7 @@ class InvestigationAgentService:
         # Preserve the exact internal values that governed this run.
         run_config = self._config.model_copy(deep=True)
         run_agent_model_id = self._agent_model_id()
+        model_call_start = self._model_call_counter.count
         context = InvestigationToolContext.create(
             request=request,
             evidence_service=evidence_service,
@@ -204,14 +253,23 @@ class InvestigationAgentService:
             report = _budget_exhausted_report(
                 request,
                 context,
-                iterations=error.run_count,
+                iterations=_model_call_count(
+                    state=None,
+                    counter=self._model_call_counter,
+                    start_count=model_call_start,
+                    fallback=error.run_count,
+                ),
                 limitation="model-call budget exhausted",
             )
         except InvestigationToolBudgetExhausted:
             report = _budget_exhausted_report(
                 request,
                 context,
-                iterations=0,
+                iterations=_model_call_count(
+                    state=None,
+                    counter=self._model_call_counter,
+                    start_count=model_call_start,
+                ),
                 limitation="tool-call budget exhausted",
             )
         else:
@@ -223,7 +281,11 @@ class InvestigationAgentService:
                     request,
                     context,
                     output,
-                    iterations=_state_run_model_call_count(state),
+                    iterations=_model_call_count(
+                        state=state,
+                        counter=self._model_call_counter,
+                        start_count=model_call_start,
+                    ),
                 )
                 report = validate_report_grounding(
                     candidate, request, context.ledger.snapshot()
@@ -238,7 +300,11 @@ class InvestigationAgentService:
                     request,
                     InvestigationUsage(
                         tool_calls=context.budget.used_tool_calls,
-                        iterations=_state_run_model_call_count(state),
+                        iterations=_model_call_count(
+                            state=state,
+                            counter=self._model_call_counter,
+                            start_count=model_call_start,
+                        ),
                     ),
                 )
             except ValueError:
@@ -251,7 +317,11 @@ class InvestigationAgentService:
                     request,
                     InvestigationUsage(
                         tool_calls=context.budget.used_tool_calls,
-                        iterations=_state_run_model_call_count(state),
+                        iterations=_model_call_count(
+                            state=state,
+                            counter=self._model_call_counter,
+                            start_count=model_call_start,
+                        ),
                     ),
                 )
             else:
@@ -277,7 +347,12 @@ class InvestigationAgentService:
         return f"injected:{model_type.__module__}.{model_type.__qualname__}"
 
 
-def _build_openai_model(config: InvestigationConfig) -> ChatOpenAI:
+def _build_openai_model(
+    config: InvestigationConfig,
+    *,
+    callbacks: Sequence[BaseCallbackHandler] = (),
+    max_retries: int | None = None,
+) -> ChatOpenAI:
     """Construct the production model without accepting credentials as arguments."""
     if config.model_name is None:
         raise ValueError(
@@ -285,14 +360,19 @@ def _build_openai_model(config: InvestigationConfig) -> ChatOpenAI:
         )
     if not os.environ.get("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY must be set for an OpenAI investigation run")
-    return ChatOpenAI(
-        model=config.model_name,
-        reasoning_effort=config.reasoning_effort,
+    options: dict[str, object] = {
+        "model": config.model_name,
+        "reasoning_effort": config.reasoning_effort,
         # Reasoning-effort function calling is supported through Responses.
         # Keeping this explicit prevents endpoint inference from falling back
         # to Chat Completions for the bounded tool agent.
-        use_responses_api=True,
-    )
+        "use_responses_api": True,
+    }
+    if callbacks:
+        options["callbacks"] = list(callbacks)
+    if max_retries is not None:
+        options["max_retries"] = max_retries
+    return ChatOpenAI(**options)  # pyright: ignore[reportArgumentType]
 
 
 def _task(request: InvestigationRequest) -> str:
@@ -359,6 +439,7 @@ def _report_from_output(
     iterations: int,
 ) -> InvestigationReport:
     """Attach immutable request/action fields after strict alias declaration checks."""
+    _verify_pattern_summary_consistency(output)
     _verify_declared_aliases(output)
     return InvestigationReport(
         request=request,
@@ -420,6 +501,32 @@ def _verify_declared_aliases(output: InvestigationAgentOutput) -> None:
         raise InvestigationGroundingError(
             GroundingFailureCode.UNDECLARED_EVIDENCE_REFERENCE,
             "model finding references an undeclared evidence reference",
+        )
+
+
+def _verify_pattern_summary_consistency(output: InvestigationAgentOutput) -> None:
+    """Reject an inconclusive structured pattern paired with an abuse declaration.
+
+    This is protocol consistency, not semantic claim validation: a model may
+    describe uncertainty in prose, but the taxonomy value is its authoritative
+    classification. Exact taxonomy declarations in an INCONCLUSIVE summary are
+    rejected rather than silently scored as an inconclusive conclusion.
+    """
+    if (
+        output.pattern is not InvestigationPattern.INCONCLUSIVE
+        or output.summary is None
+    ):
+        return
+    normalized_summary = re.sub(r"[^a-z0-9]+", "", output.summary.casefold())
+    declared_abuse_patterns = (
+        "promoring",
+        "refundring",
+        "mixedabuse",
+    )
+    if any(pattern in normalized_summary for pattern in declared_abuse_patterns):
+        raise InvestigationGroundingError(
+            GroundingFailureCode.PATTERN_SUMMARY_CONTRADICTION,
+            "INCONCLUSIVE pattern cannot declare an abuse-ring taxonomy in summary",
         )
 
 
@@ -492,3 +599,18 @@ def _state_run_model_call_count(state: Mapping[str, object]) -> int:
     """Read LangChain's optional run counter defensively for usage metadata."""
     value = state.get("run_model_call_count", 0)
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _model_call_count(
+    *,
+    state: Mapping[str, object] | None,
+    counter: _ModelCallCounter,
+    start_count: int,
+    fallback: int = 0,
+) -> int:
+    """Prefer completed provider calls, with state/fallback for injected test models."""
+    callback_count = counter.count - start_count
+    if callback_count > 0:
+        return callback_count
+    state_count = 0 if state is None else _state_run_model_call_count(state)
+    return max(state_count, fallback)

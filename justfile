@@ -76,6 +76,10 @@ calibration-evaluate *args:
 policy-decide *args:
     just --justfile {{backend_justfile}} policy-decide {{args}}
 
+# Run the three live investigation-model smoke calls sequentially.
+investigation-model-smoke *args:
+    just --justfile {{backend_justfile}} investigation-model-smoke {{args}}
+
 # Forward arbitrary validation flags after the recipe name, for example:
 # `just synthetic-validate --full --output-dir artifacts/validation-10k`.
 synthetic-validate *args:

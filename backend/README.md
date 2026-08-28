@@ -779,7 +779,7 @@ records its configured model name; an injected/test model records an explicit
 `injected:<module>.<type>` identity instead, so provenance never claims an
 OpenAI model ran when it did not.
 
-`investigation_id` (provenance contract v2) is SHA-256 over canonical JSON for the request/decision
+`investigation_id` (provenance contract v2, agent prompt/interface v3) is SHA-256 over canonical JSON for the request/decision
 lineage, validated investigation configuration (including reasoning effort),
 non-secret actual agent model identity, fixed tool allowlist, prompt-contract
 version, deterministic tool trace, and returned evidence IDs. It intentionally
@@ -789,9 +789,19 @@ complete grounded report. `save_investigation_artifacts(...)` writes
 `investigation_report.json` only after reconstructing the ledger and grounding
 the report. `load_investigation_artifacts(...)` revalidates schemas, evidence
 identities and request/cutoff bindings, grounding, and both IDs without another
-model call. The v2 contract deliberately rejects older investigation artifacts;
+model call. The current contracts deliberately reject older investigation artifacts;
 regenerate only those artifacts after upgrading. API keys, paths, and retrieval
 timestamps are never provenance inputs or persisted.
+
+Model-facing timeline payloads explicitly mark their short references with
+`timeline_reference_eligible=true`; only those aliases may appear in the
+structured `timeline_evidence_refs` field. The canonical evidence type remains
+the final enforcement check. The structured `pattern` is the sole taxonomy
+classification: an `INCONCLUSIVE` report that declares an abuse-ring taxonomy
+in its summary fails closed with a typed diagnostic rather than silently
+receiving inconclusive analytical credit. Investigation usage records completed
+provider model calls from an application-owned callback when available, falling
+back to LangChain's optional state only for injected/test models.
 
 The clarified aggregate/retrieval evidence facts use evidence contract v2, so
 their canonical evidence IDs—and therefore dependent investigation/report
@@ -833,6 +843,25 @@ only: it contains no hidden expectations and does not influence quality scores
 or investigation provenance. An evaluator outcome with `grounding_failure=true`
 is valid only with application-owned `FAILED` status; impossible combinations
 are rejected rather than being counted as analytical reports.
+
+### Manual three-model investigation smoke test
+
+`just investigation-model-smoke` is a deliberately small live preflight: it
+runs the existing `clear_promo_ring` representative once, sequentially, through
+`gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.4-mini-2026-03-17`, always with
+`reasoning_effort = "medium"`. It reuses the frozen evaluation/calibration
+artifacts, the production bounded agent, five evidence tools, grounding,
+comparison scorer, and verified investigation artifacts. It makes no Admin
+Usage or Costs request and never retries a provider call after a usable result.
+
+The command writes `artifacts/investigation-model-smoke/<UTC-run-id>/`, with a
+manifest, one `runs/<model>/` directory containing the normal verified
+investigation artifacts plus `comparison_record.json`, and concise
+`smoke_summary.json` / `smoke_summary.md`. The summary includes analytical
+acceptance, grounding diagnostics, artifact verification, context totals and
+per-tool metrics, provider-reported token metadata, latency, and the
+evaluator-only expected `PROMO_RING` result. `OPENAI_API_KEY` may be supplied
+by the environment or `backend/.env`; it is never written to these artifacts.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

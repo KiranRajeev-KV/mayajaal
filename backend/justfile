@@ -70,6 +70,11 @@ calibration-evaluate *args:
 policy-decide *args:
     uv run python -m scripts.decide_policy --config config.toml {{args}}
 
+# Run one fixed promo-ring case sequentially through the three investigation
+# comparison models. This intentionally makes live OpenAI calls.
+investigation-model-smoke *args:
+    uv run python -m scripts.run_investigation_model_smoke --config config.toml {{args}}
+
 # Run multi-seed realism diagnostics; pass flags after the recipe name.
 synthetic-validate *args:
     uv run python -m scripts.validate_synthetic --config config.toml {{args}}

@@ -127,7 +127,14 @@ class EvidenceLedger:
                 self._items[item.evidence_id] = item
                 self._aliases[item.evidence_id] = _evidence_alias(len(self._items))
             returned_ids.append(item.evidence_id)
-        payload = tuple(_model_facing_evidence(self, item) for item in items)
+        payload = tuple(
+            _model_facing_evidence(
+                self,
+                item,
+                timeline_reference_eligible=(tool_name == "case_timeline"),
+            )
+            for item in items
+        )
         self._trace.append(
             InvestigationToolTrace(
                 call_index=len(self._trace) + 1,
@@ -303,7 +310,10 @@ def reconcile_model_facing_metrics(
 
 
 def _model_facing_evidence(
-    ledger: EvidenceLedger, item: EvidenceItem
+    ledger: EvidenceLedger,
+    item: EvidenceItem,
+    *,
+    timeline_reference_eligible: bool,
 ) -> dict[str, JsonValue]:
     """Serialize one fact with its short, admitted evidence reference."""
     payload = item.model_dump(mode="json")
@@ -311,6 +321,9 @@ def _model_facing_evidence(
     if not isinstance(canonical_id, str):
         raise AssertionError("EvidenceItem serialization must contain evidence_id")
     payload["evidence_ref"] = ledger.alias_for(canonical_id)
+    # This is presentation-only guidance for the structured response. The
+    # canonical EvidenceItem type remains the final enforcement boundary.
+    payload["timeline_reference_eligible"] = timeline_reference_eligible
     return payload
 
 

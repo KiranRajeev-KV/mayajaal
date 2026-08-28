@@ -179,6 +179,7 @@ class InvestigationToolTests(unittest.TestCase):
         expected = item().model_dump(mode="json")
         canonical_id = expected.pop("evidence_id")
         expected["evidence_ref"] = "E001"
+        expected["timeline_reference_eligible"] = False
         actual = tools["related_activity"].invoke({})
         self.assertEqual(actual, [expected])
         self.assertNotIn("evidence_id", actual[0])
@@ -200,6 +201,21 @@ class InvestigationToolTests(unittest.TestCase):
         self.assertEqual(
             metrics.model_facing_serialized_bytes, len(serialized.encode("utf-8"))
         )
+
+    def test_case_timeline_marks_only_its_aliases_as_timeline_eligible(self) -> None:
+        context, _ = self.context()
+        tools = {
+            wrapped_tool.name: wrapped_tool
+            for wrapped_tool in build_investigation_tools(context)
+        }
+
+        timeline = tools["case_timeline"].invoke({})
+        activity = tools["related_activity"].invoke({})
+
+        self.assertTrue(timeline[0]["timeline_reference_eligible"])
+        self.assertFalse(activity[0]["timeline_reference_eligible"])
+        self.assertEqual(timeline[0]["evidence_ref"], "E001")
+        self.assertEqual(activity[0]["evidence_ref"], "E002")
 
     def test_context_metrics_count_only_detailed_events_and_are_deterministic(
         self,

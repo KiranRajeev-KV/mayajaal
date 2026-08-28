@@ -333,7 +333,7 @@ class InvestigationGroundingTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(INVESTIGATION_PROVENANCE_CONTRACT_VERSION, 2)
-        self.assertEqual(AGENT_PROMPT_CONTRACT_VERSION, 2)
+        self.assertEqual(AGENT_PROMPT_CONTRACT_VERSION, 3)
         self.assertEqual(EVIDENCE_CONTRACT_VERSION, 2)
         ledger, shared, timeline = self.ledger()
         snapshot = ledger.snapshot()
