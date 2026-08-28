@@ -53,6 +53,9 @@ class ProbabilityEstimate:
     base_model_id: str
     probability_model_id: str
     probability_estimate_id: str
+    score_id: str
+    subject_id: str
+    feature_vector_id: str
     raw_model_score: float
     calibrated_probability: float
     scoring_cutoff: AwareDatetime
@@ -61,8 +64,12 @@ class ProbabilityEstimate:
     def __post_init__(self) -> None:
         if not self.base_model_id or not self.probability_model_id:
             raise ValueError("probability estimate requires non-empty model lineage")
-        if not self.probability_estimate_id:
-            raise ValueError("probability estimate requires probability_estimate_id")
+        if not self.probability_estimate_id or not self.score_id:
+            raise ValueError("probability estimate requires score and estimate IDs")
+        if not self.subject_id or not self.feature_vector_id:
+            raise ValueError(
+                "probability estimate requires subject and feature-vector IDs"
+            )
         if not isfinite(self.raw_model_score):
             raise ValueError("raw model score must be finite")
         if (

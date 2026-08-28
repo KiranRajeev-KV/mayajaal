@@ -10,6 +10,7 @@ from mayajaal.calibration import (
     ProbabilityModel,
     verify_probability_estimate,
 )
+from mayajaal.scoring import ScoreObservation, verify_score_observation
 
 from .models import DecisionContext, PolicyDecision
 from .provenance import (
@@ -24,14 +25,21 @@ def save_policy_artifacts(
     output_directory: Path,
     policy_model: PolicyModel,
     probability_model: ProbabilityModel,
+    score_observation: ScoreObservation,
     probability_estimate: ProbabilityEstimate,
     context: DecisionContext,
     decision: PolicyDecision,
 ) -> dict[str, Path]:
     """Reconstruct a decision from trusted parents before persisting it."""
-    verify_probability_estimate(probability_estimate, probability_model)
+    verify_probability_estimate(
+        probability_estimate, probability_model, score_observation
+    )
     reconstructed = decide(
-        policy_model, probability_model, probability_estimate, context
+        policy_model,
+        probability_model,
+        score_observation,
+        probability_estimate,
+        context,
     )
     if decision != reconstructed:
         raise ValueError("policy decision does not match verified reconstruction")
@@ -70,6 +78,9 @@ def load_policy_decision(
         "base_model_id",
         "probability_model_id",
         "probability_estimate_id",
+        "score_id",
+        "subject_id",
+        "feature_vector_id",
         "decision_id",
         "calibrated_fraud_probability",
         "context",
@@ -100,10 +111,22 @@ def load_policy_decision(
     if scoring_context_id is not None and not isinstance(scoring_context_id, str):
         raise ValueError("invalid scoring_context_id in policy decision")
     scoring_cutoff = _aware_datetime(document["scoring_cutoff"], "scoring_cutoff")
+    score_observation = ScoreObservation(
+        score_id=str(document["score_id"]),
+        base_model_id=str(document["base_model_id"]),
+        subject_id=str(document["subject_id"]),
+        scoring_cutoff=scoring_cutoff,
+        raw_model_score=raw_score,
+        feature_vector_id=str(document["feature_vector_id"]),
+    )
+    verify_score_observation(score_observation)
     estimate = ProbabilityEstimate(
         base_model_id=str(document["base_model_id"]),
         probability_model_id=str(document["probability_model_id"]),
         probability_estimate_id=str(document["probability_estimate_id"]),
+        score_id=score_observation.score_id,
+        subject_id=score_observation.subject_id,
+        feature_vector_id=score_observation.feature_vector_id,
         raw_model_score=raw_score,
         calibrated_probability=_finite_float(
             document["calibrated_fraud_probability"], "calibrated_fraud_probability"
@@ -111,12 +134,14 @@ def load_policy_decision(
         scoring_context_id=scoring_context_id,
         scoring_cutoff=scoring_cutoff,
     )
-    verify_probability_estimate(estimate, probability_model)
+    verify_probability_estimate(estimate, probability_model, score_observation)
     if estimate.probability_estimate_id != document["probability_estimate_id"]:
         raise ValueError(
             "decision probability_estimate_id does not match verified estimate"
         )
-    reconstructed = decide(policy_model, probability_model, estimate, context)
+    reconstructed = decide(
+        policy_model, probability_model, score_observation, estimate, context
+    )
     if document != _decision_document(reconstructed):
         raise ValueError("policy decision semantics or integrity identifier mismatch")
     if (
@@ -160,6 +185,9 @@ def _decision_document(decision: PolicyDecision) -> dict[str, object]:
         "base_model_id": decision.base_model_id,
         "probability_model_id": decision.probability_model_id,
         "probability_estimate_id": decision.probability_estimate_id,
+        "score_id": decision.score_id,
+        "subject_id": decision.subject_id,
+        "feature_vector_id": decision.feature_vector_id,
         "decision_id": decision.decision_id,
         "raw_model_score": decision.raw_model_score,
         "calibrated_fraud_probability": decision.calibrated_fraud_probability,

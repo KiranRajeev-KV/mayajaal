@@ -33,6 +33,11 @@ from mayajaal.policy import (
     policy_provenance,
     save_policy_artifacts,
 )
+from mayajaal.scoring import (
+    ScoreObservation,
+    score_id,
+    score_observation_semantics,
+)
 
 SCORING_CUTOFF = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
@@ -55,13 +60,49 @@ def policy(config: PolicyConfig | None = None):
     return build_policy_model(probability_model(), config or PolicyConfig())
 
 
+def score_observation(
+    raw_model_score: float,
+    *,
+    subject_id: str = "account-1",
+    scoring_cutoff: datetime = SCORING_CUTOFF,
+) -> ScoreObservation:
+    """Build a self-verifying score fixture with a fixed feature input ID."""
+    semantics = score_observation_semantics(
+        score_contract_version=1,
+        base_model_id="base-model-fixture",
+        subject_id=subject_id,
+        scoring_cutoff=scoring_cutoff,
+        raw_model_score=raw_model_score,
+        feature_vector_id="feature-vector-fixture",
+    )
+    return ScoreObservation(
+        score_id=score_id(**semantics),
+        base_model_id="base-model-fixture",
+        subject_id=subject_id,
+        scoring_cutoff=scoring_cutoff,
+        raw_model_score=raw_model_score,
+        feature_vector_id="feature-vector-fixture",
+    )
+
+
 def estimate(probability: float, *, context_id: str | None = None):
     """Produce a verified estimate through the fixture's identity sigmoid."""
     return estimate_probability(
         probability_model(),
-        log(probability / (1.0 - probability)),
+        score_observation(log(probability / (1.0 - probability))),
         scoring_context_id=context_id,
-        scoring_cutoff=SCORING_CUTOFF,
+    )
+
+
+def score_for_estimate(probability_estimate: ProbabilityEstimate) -> ScoreObservation:
+    """Recover the score contract that the fixture estimate consumed."""
+    return ScoreObservation(
+        score_id=probability_estimate.score_id,
+        base_model_id=probability_estimate.base_model_id,
+        subject_id=probability_estimate.subject_id,
+        scoring_cutoff=probability_estimate.scoring_cutoff,
+        raw_model_score=probability_estimate.raw_model_score,
+        feature_vector_id=probability_estimate.feature_vector_id,
     )
 
 
@@ -71,7 +112,17 @@ def make_decision(
     context: DecisionContext,
 ) -> PolicyDecision:
     """Exercise the production policy boundary with a verified parent model."""
-    return decide(policy_model, probability_model(), probability_estimate, context)
+    return decide(
+        policy_model,
+        probability_model(),
+        score_observation(
+            probability_estimate.raw_model_score,
+            subject_id=probability_estimate.subject_id,
+            scoring_cutoff=probability_estimate.scoring_cutoff,
+        ),
+        probability_estimate,
+        context,
+    )
 
 
 def costs_by_action(decision: PolicyDecision) -> dict[PolicyAction, ActionCost]:
@@ -104,35 +155,38 @@ class CostSensitivePolicyTests(unittest.TestCase):
     ) -> None:
         first = estimate_probability(
             probability_model(),
-            0.25,
+            score_observation(0.25),
             scoring_context_id="o-1",
-            scoring_cutoff=SCORING_CUTOFF,
         )
         second = estimate_probability(
             probability_model(),
-            0.25,
+            score_observation(0.25),
             scoring_context_id="o-1",
-            scoring_cutoff=SCORING_CUTOFF,
         )
         self.assertEqual(first, second)
         self.assertEqual(first.calibrated_probability, second.calibrated_probability)
-        self.assertEqual(verify_probability_estimate(first, probability_model()), first)
+        self.assertEqual(
+            verify_probability_estimate(
+                first, probability_model(), score_for_estimate(first)
+            ),
+            first,
+        )
         self.assertNotEqual(
             first.probability_estimate_id,
             estimate_probability(
                 probability_model(),
-                0.26,
+                score_observation(0.26),
                 scoring_context_id="o-1",
-                scoring_cutoff=SCORING_CUTOFF,
             ).probability_estimate_id,
         )
         self.assertNotEqual(
             first.probability_estimate_id,
             estimate_probability(
                 probability_model(),
-                0.25,
+                score_observation(
+                    0.25, scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+                ),
                 scoring_context_id="o-1",
-                scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
             ).probability_estimate_id,
         )
         changed_model = replace(probability_model(), probability_model_id="other-model")
@@ -140,45 +194,63 @@ class CostSensitivePolicyTests(unittest.TestCase):
             first.probability_estimate_id,
             estimate_probability(
                 changed_model,
-                0.25,
+                score_observation(0.25),
                 scoring_context_id="o-1",
-                scoring_cutoff=SCORING_CUTOFF,
             ).probability_estimate_id,
         )
-        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+        with self.assertRaisesRegex(
+            ValueError, "score observation|semantics or calibrated probability"
+        ):
             _ = verify_probability_estimate(
-                replace(first, calibrated_probability=0.9), probability_model()
+                replace(first, calibrated_probability=0.9),
+                probability_model(),
+                score_for_estimate(first),
             )
-        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+        with self.assertRaisesRegex(
+            ValueError, "score observation|semantics or calibrated probability"
+        ):
             _ = verify_probability_estimate(
-                replace(first, raw_model_score=0.9), probability_model()
+                replace(first, raw_model_score=0.9),
+                probability_model(),
+                score_for_estimate(first),
             )
         with self.assertRaisesRegex(ValueError, "probability_model_id"):
-            _ = verify_probability_estimate(first, changed_model)
-        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+            _ = verify_probability_estimate(
+                first, changed_model, score_for_estimate(first)
+            )
+        with self.assertRaisesRegex(
+            ValueError, "score observation|semantics or calibrated probability"
+        ):
             _ = verify_probability_estimate(
                 replace(
                     first,
                     scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
                 ),
                 probability_model(),
+                score_for_estimate(first),
             )
         with self.assertRaisesRegex(ValueError, "scoring_cutoff"):
             _ = estimate_probability(
                 probability_model(),
-                0.25,
-                scoring_cutoff=datetime(2026, 5, 1, 12, 0),  # noqa: DTZ001
+                score_observation(0.25, scoring_cutoff=datetime(2026, 5, 1, 12, 0)),  # noqa: DTZ001
             )
 
     def test_decide_requires_a_probability_recomputed_by_verified_model(self) -> None:
         model = policy()
         probability_parent = probability_model()
         valid_estimate = estimate_probability(
-            probability_parent, 0.25, scoring_cutoff=SCORING_CUTOFF
+            probability_parent, score_observation(0.25)
         )
         context = DecisionContext(exposure_paise=10_000)
         self.assertIsInstance(
-            decide(model, probability_parent, valid_estimate, context), PolicyDecision
+            decide(
+                model,
+                probability_parent,
+                score_for_estimate(valid_estimate),
+                valid_estimate,
+                context,
+            ),
+            PolicyDecision,
         )
 
         fake_probability = 0.9
@@ -188,15 +260,26 @@ class CostSensitivePolicyTests(unittest.TestCase):
             probability_estimate_id=probability_estimate_id(
                 base_model_id=valid_estimate.base_model_id,
                 probability_model_id=valid_estimate.probability_model_id,
-                probability_estimate_contract_version=2,
+                probability_estimate_contract_version=3,
+                score_id=valid_estimate.score_id,
+                subject_id=valid_estimate.subject_id,
+                feature_vector_id=valid_estimate.feature_vector_id,
                 raw_model_score=valid_estimate.raw_model_score,
                 calibrated_probability=fake_probability,
                 scoring_context_id=valid_estimate.scoring_context_id,
                 scoring_cutoff=valid_estimate.scoring_cutoff,
             ),
         )
-        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
-            _ = decide(model, probability_parent, fake_estimate, context)
+        with self.assertRaisesRegex(
+            ValueError, "score observation|semantics or calibrated probability"
+        ):
+            _ = decide(
+                model,
+                probability_parent,
+                score_for_estimate(fake_estimate),
+                fake_estimate,
+                context,
+            )
 
         tampered_raw_score = 0.9
         tampered_raw_estimate = replace(
@@ -205,26 +288,46 @@ class CostSensitivePolicyTests(unittest.TestCase):
             probability_estimate_id=probability_estimate_id(
                 base_model_id=valid_estimate.base_model_id,
                 probability_model_id=valid_estimate.probability_model_id,
-                probability_estimate_contract_version=2,
+                probability_estimate_contract_version=3,
+                score_id=valid_estimate.score_id,
+                subject_id=valid_estimate.subject_id,
+                feature_vector_id=valid_estimate.feature_vector_id,
                 raw_model_score=tampered_raw_score,
                 calibrated_probability=valid_estimate.calibrated_probability,
                 scoring_context_id=valid_estimate.scoring_context_id,
                 scoring_cutoff=valid_estimate.scoring_cutoff,
             ),
         )
-        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
-            _ = decide(model, probability_parent, tampered_raw_estimate, context)
+        with self.assertRaisesRegex(
+            ValueError, "score observation|semantics or calibrated probability"
+        ):
+            _ = decide(
+                model,
+                probability_parent,
+                score_for_estimate(tampered_raw_estimate),
+                tampered_raw_estimate,
+                context,
+            )
 
         wrong_probability_parent = replace(
             probability_parent,
             calibrator=SigmoidCalibrator(coefficient=2.0, intercept=0.0),
         )
-        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
-            _ = decide(model, wrong_probability_parent, valid_estimate, context)
+        with self.assertRaisesRegex(
+            ValueError, "score observation|semantics or calibrated probability"
+        ):
+            _ = decide(
+                model,
+                wrong_probability_parent,
+                score_for_estimate(valid_estimate),
+                valid_estimate,
+                context,
+            )
         with self.assertRaisesRegex(ValueError, "probability_model_id"):
             _ = decide(
                 model,
                 replace(probability_parent, probability_model_id="wrong-model"),
+                score_for_estimate(valid_estimate),
                 valid_estimate,
                 context,
             )
@@ -232,6 +335,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
             _ = decide(
                 replace(model, policy_id="wrong-policy"),
                 probability_parent,
+                score_for_estimate(valid_estimate),
                 valid_estimate,
                 context,
             )
@@ -243,24 +347,30 @@ class CostSensitivePolicyTests(unittest.TestCase):
         probability_parent = probability_model()
         matched_estimate = estimate_probability(
             probability_parent,
-            0.25,
+            score_observation(0.25),
             scoring_context_id="order-123",
-            scoring_cutoff=SCORING_CUTOFF,
         )
         matching_context = DecisionContext(
             exposure_paise=10_000, context_id="order-123"
         )
-        matching = decide(model, probability_parent, matched_estimate, matching_context)
+        matching = decide(
+            model,
+            probability_parent,
+            score_for_estimate(matched_estimate),
+            matched_estimate,
+            matching_context,
+        )
         self.assertEqual(matching.scoring_context_id, matching.context.context_id)
         self.assertEqual(
             matching.decision_id,
-            "6469da30b0ff1b017709b05b1e274775136a328a4385dfb92e25c5d6ae3a3755",
+            "fedd967013147a85bfda04df817fa17daeddc671263e60581ecaedc586efa67f",
         )
 
         with self.assertRaisesRegex(ValueError, "scoring_context_id.*context_id"):
             _ = decide(
                 model,
                 probability_parent,
+                score_for_estimate(matched_estimate),
                 matched_estimate,
                 DecisionContext(exposure_paise=10_000, context_id="order-456"),
             )
@@ -269,9 +379,8 @@ class CostSensitivePolicyTests(unittest.TestCase):
             decide(
                 model,
                 probability_parent,
-                estimate_probability(
-                    probability_parent, 0.25, scoring_cutoff=SCORING_CUTOFF
-                ),
+                score_observation(0.25),
+                estimate_probability(probability_parent, score_observation(0.25)),
                 DecisionContext(exposure_paise=10_000),
             ),
             PolicyDecision,
@@ -280,6 +389,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
             decide(
                 model,
                 probability_parent,
+                score_for_estimate(matched_estimate),
                 matched_estimate,
                 DecisionContext(exposure_paise=10_000),
             ),
@@ -289,9 +399,8 @@ class CostSensitivePolicyTests(unittest.TestCase):
             decide(
                 model,
                 probability_parent,
-                estimate_probability(
-                    probability_parent, 0.25, scoring_cutoff=SCORING_CUTOFF
-                ),
+                score_observation(0.25),
+                estimate_probability(probability_parent, score_observation(0.25)),
                 DecisionContext(exposure_paise=10_000, context_id="order-123"),
             ),
             PolicyDecision,
@@ -302,6 +411,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 Path(directory),
                 model,
                 probability_parent,
+                score_for_estimate(matched_estimate),
                 matched_estimate,
                 matching_context,
                 matching,
@@ -477,7 +587,8 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 Path(directory),
                 model,
                 probability_model(),
-                estimate(0.10),
+                score_for_estimate(decision_to_estimate := estimate(0.10)),
+                decision_to_estimate,
                 decision.context,
                 decision,
             )
@@ -509,7 +620,8 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 Path(directory),
                 model,
                 probability_model(),
-                estimate(0.10),
+                score_for_estimate(decision_to_estimate),
+                decision_to_estimate,
                 decision.context,
                 decision,
             )
@@ -541,9 +653,11 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 model,
                 estimate_probability(
                     probability_model(),
-                    first_estimate.raw_model_score,
+                    score_observation(
+                        first_estimate.raw_model_score,
+                        scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+                    ),
                     scoring_context_id="order-1",
-                    scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
                 ),
                 DecisionContext(exposure_paise=10_000),
             ).decision_id,
@@ -568,6 +682,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 Path(directory),
                 model,
                 probability_model(),
+                score_for_estimate(first_estimate),
                 first_estimate,
                 first.context,
                 first,
@@ -593,7 +708,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 document[field] = value
                 artifacts["decision"].write_text(json.dumps(document), encoding="utf-8")
                 with self.assertRaisesRegex(
-                    ValueError, "decision|probability estimate"
+                    ValueError, "decision|probability estimate|score observation"
                 ):
                     _ = load_policy_decision(
                         artifacts["decision"], model, probability_model()
@@ -624,16 +739,20 @@ class CostSensitivePolicyTests(unittest.TestCase):
         model = policy()
         probability_parent = probability_model()
         probability_estimate = estimate_probability(
-            probability_parent, 0.25, scoring_cutoff=SCORING_CUTOFF
+            probability_parent, score_observation(0.25)
         )
         context = DecisionContext(exposure_paise=10_000)
-        decision = decide(model, probability_parent, probability_estimate, context)
+        score = score_for_estimate(probability_estimate)
+        decision = decide(
+            model, probability_parent, score, probability_estimate, context
+        )
         with TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "verified reconstruction"):
                 _ = save_policy_artifacts(
                     Path(directory),
                     model,
                     probability_parent,
+                    score,
                     probability_estimate,
                     context,
                     replace(decision, chosen_action=PolicyAction.ALLOW),
@@ -642,6 +761,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 Path(directory),
                 model,
                 probability_parent,
+                score,
                 probability_estimate,
                 context,
                 decision,

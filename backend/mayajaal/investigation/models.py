@@ -12,6 +12,7 @@ from mayajaal.calibration import (
 )
 from mayajaal.policy import PolicyAction, PolicyDecision
 from mayajaal.schemas.common import AwareDatetime, SchemaModel
+from mayajaal.scoring import ScoreObservation
 
 NonEmptyId = Annotated[str, Field(min_length=1)]
 
@@ -122,6 +123,8 @@ class InvestigationRequest(SchemaModel):
     decision_id: NonEmptyId
     policy_id: NonEmptyId
     probability_estimate_id: NonEmptyId
+    score_id: NonEmptyId
+    feature_vector_id: NonEmptyId
     subject_type: InvestigationSubjectType
     subject_id: NonEmptyId
     cutoff_time: AwareDatetime
@@ -134,20 +137,21 @@ class InvestigationRequest(SchemaModel):
         cls,
         decision: PolicyDecision,
         probability_model: ProbabilityModel,
+        score_observation: ScoreObservation,
         probability_estimate: ProbabilityEstimate,
-        *,
-        subject_type: InvestigationSubjectType = InvestigationSubjectType.ACCOUNT,
-        subject_id: str,
     ) -> "InvestigationRequest":
         """Bind a request to a verified score and its immutable policy decision."""
         verified_estimate = verify_probability_estimate(
-            probability_estimate, probability_model
+            probability_estimate, probability_model, score_observation
         )
         if (
             decision.base_model_id != verified_estimate.base_model_id
             or decision.probability_model_id != verified_estimate.probability_model_id
             or decision.probability_estimate_id
             != verified_estimate.probability_estimate_id
+            or decision.score_id != verified_estimate.score_id
+            or decision.subject_id != verified_estimate.subject_id
+            or decision.feature_vector_id != verified_estimate.feature_vector_id
             or decision.raw_model_score != verified_estimate.raw_model_score
             or decision.calibrated_fraud_probability
             != verified_estimate.calibrated_probability
@@ -160,8 +164,10 @@ class InvestigationRequest(SchemaModel):
             decision_id=decision.decision_id,
             policy_id=decision.policy_id,
             probability_estimate_id=decision.probability_estimate_id,
-            subject_type=subject_type,
-            subject_id=subject_id,
+            score_id=verified_estimate.score_id,
+            feature_vector_id=verified_estimate.feature_vector_id,
+            subject_type=InvestigationSubjectType.ACCOUNT,
+            subject_id=verified_estimate.subject_id,
             cutoff_time=verified_estimate.scoring_cutoff,
             context_id=decision.context.context_id,
             policy_action=decision.chosen_action,
@@ -179,6 +185,37 @@ class EvidenceItem(SchemaModel):
     cutoff_time: AwareDatetime
     subject_ids: tuple[NonEmptyId, ...] = Field(min_length=1)
     facts: dict[NonEmptyId, JsonValue] = Field(min_length=1)
+
+    @classmethod
+    def from_request(
+        cls,
+        request: InvestigationRequest,
+        *,
+        evidence_id: str,
+        evidence_type: EvidenceType,
+        source: EvidenceSource,
+        observed_at: AwareDatetime,
+        subject_ids: tuple[str, ...],
+        facts: dict[str, JsonValue],
+    ) -> "EvidenceItem":
+        """Create cutoff-bound evidence without caller control of its cutoff."""
+        return cls(
+            evidence_id=evidence_id,
+            evidence_type=evidence_type,
+            source=source,
+            observed_at=observed_at,
+            cutoff_time=request.cutoff_time,
+            subject_ids=subject_ids,
+            facts=facts,
+        )
+
+    def verify_for_request(self, request: InvestigationRequest) -> "EvidenceItem":
+        """Reject evidence whose fixed cutoff differs from its investigation."""
+        if self.cutoff_time != request.cutoff_time:
+            raise ValueError(
+                "evidence cutoff_time does not match investigation request"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_temporal_and_label_safety(self) -> "EvidenceItem":

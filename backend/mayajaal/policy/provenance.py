@@ -12,7 +12,7 @@ from mayajaal.calibration import ProbabilityModel
 from .models import ActionCost, DecisionContext, PolicyConfig, ScenarioDecision
 
 POLICY_PROVENANCE_CONTRACT_VERSION = 2
-DECISION_PROVENANCE_CONTRACT_VERSION = 2
+DECISION_PROVENANCE_CONTRACT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -109,6 +109,7 @@ def decision_semantics(
     base_model_id: str,
     probability_model_id: str,
     probability_estimate_id: str,
+    score_id: str,
     policy_id: str,
     calibrated_fraud_probability: float,
     scoring_cutoff: datetime,
@@ -125,6 +126,7 @@ def decision_semantics(
         "base_model_id": base_model_id,
         "probability_model_id": probability_model_id,
         "probability_estimate_id": probability_estimate_id,
+        "score_id": score_id,
         "policy_id": policy_id,
         "calibrated_fraud_probability": calibrated_fraud_probability,
         "scoring_cutoff": scoring_cutoff.isoformat(),

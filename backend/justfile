@@ -66,7 +66,7 @@ calibration-evaluate *args:
     uv run python -m scripts.evaluate_calibration --config config.toml {{args}}
 
 # Make one cost-sensitive ALLOW / REVIEW / BLOCK decision from a verified
-# calibrated-probability artifact. A timezone-aware --scoring-cutoff is required.
+# frozen evaluation sample (pass --sample-id from split_manifest.json).
 policy-decide *args:
     uv run python -m scripts.decide_policy --config config.toml {{args}}
 

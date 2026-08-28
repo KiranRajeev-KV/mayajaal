@@ -37,6 +37,7 @@ from mayajaal.policy import (
     build_policy_model,
     decide,
 )
+from mayajaal.scoring import ScoreObservation, score_id, score_observation_semantics
 
 
 def probability_model() -> ProbabilityModel:
@@ -55,25 +56,42 @@ def probability_model() -> ProbabilityModel:
 def scored_decision(probability: float, *, exposure_paise: int = 250_000):
     """Create one verified policy decision without any model-training concern."""
     probability_parent = probability_model()
+    raw_score = log(probability / (1.0 - probability))
+    semantics = score_observation_semantics(
+        score_contract_version=1,
+        base_model_id=probability_parent.base_model_id,
+        subject_id="account-123",
+        scoring_cutoff=cutoff(),
+        raw_model_score=raw_score,
+        feature_vector_id="feature-vector-fixture",
+    )
+    score_observation = ScoreObservation(
+        score_id=score_id(**semantics),
+        base_model_id=probability_parent.base_model_id,
+        subject_id="account-123",
+        scoring_cutoff=cutoff(),
+        raw_model_score=raw_score,
+        feature_vector_id="feature-vector-fixture",
+    )
     estimate = estimate_probability(
         probability_parent,
-        log(probability / (1.0 - probability)),
+        score_observation,
         scoring_context_id="order-123",
-        scoring_cutoff=cutoff(),
     )
     policy_model = build_policy_model(probability_parent, PolicyConfig())
     policy_decision = decide(
         policy_model,
         probability_parent,
+        score_observation,
         estimate,
         DecisionContext(exposure_paise=exposure_paise, context_id="order-123"),
     )
-    return probability_parent, estimate, policy_decision
+    return probability_parent, score_observation, estimate, policy_decision
 
 
 def decision(probability: float, *, exposure_paise: int = 250_000):
     """Return only the policy decision for trigger-focused fixtures."""
-    return scored_decision(probability, exposure_paise=exposure_paise)[2]
+    return scored_decision(probability, exposure_paise=exposure_paise)[3]
 
 
 def cutoff() -> datetime:
@@ -128,20 +146,25 @@ class InvestigationContractTests(unittest.TestCase):
             )
 
     def test_request_binds_decision_lineage_to_verified_scoring_cutoff(self) -> None:
-        probability_parent, probability_estimate, policy_decision = scored_decision(
-            0.05
-        )
+        (
+            probability_parent,
+            score_observation,
+            probability_estimate,
+            policy_decision,
+        ) = scored_decision(0.05)
         request = InvestigationRequest.from_policy_decision(
             policy_decision,
             probability_parent,
+            score_observation,
             probability_estimate,
-            subject_id="account-123",
         )
         self.assertEqual(request.decision_id, policy_decision.decision_id)
         self.assertEqual(request.policy_id, policy_decision.policy_id)
         self.assertEqual(
             request.probability_estimate_id, policy_decision.probability_estimate_id
         )
+        self.assertEqual(request.score_id, score_observation.score_id)
+        self.assertEqual(request.feature_vector_id, score_observation.feature_vector_id)
         self.assertIs(request.policy_action, policy_decision.chosen_action)
         self.assertEqual(request.cutoff_time, probability_estimate.scoring_cutoff)
         self.assertEqual(request.cutoff_time, policy_decision.scoring_cutoff)
@@ -157,6 +180,8 @@ class InvestigationContractTests(unittest.TestCase):
                 decision_id="",
                 policy_id="policy-1",
                 probability_estimate_id="estimate-1",
+                score_id="score-1",
+                feature_vector_id="feature-vector-1",
                 subject_type=InvestigationSubjectType.ACCOUNT,
                 subject_id="account-1",
                 cutoff_time=cutoff(),
@@ -168,34 +193,52 @@ class InvestigationContractTests(unittest.TestCase):
                 decision_id="decision-1",
                 policy_id="policy-1",
                 probability_estimate_id="estimate-1",
+                score_id="score-1",
+                feature_vector_id="feature-vector-1",
                 subject_type=InvestigationSubjectType.ACCOUNT,
                 subject_id="account-123",
                 cutoff_time=datetime(2026, 5, 1, 12, 0),  # noqa: DTZ001
                 policy_action=PolicyAction.REVIEW,
                 decision_is_stable_across_scenarios=True,
             )
+        changed_cutoff = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+        changed_score_semantics = score_observation_semantics(
+            score_contract_version=1,
+            base_model_id=probability_parent.base_model_id,
+            subject_id="account-123",
+            scoring_cutoff=changed_cutoff,
+            raw_model_score=probability_estimate.raw_model_score,
+            feature_vector_id="feature-vector-fixture",
+        )
+        changed_score = ScoreObservation(
+            score_id=score_id(**changed_score_semantics),
+            base_model_id=probability_parent.base_model_id,
+            subject_id="account-123",
+            scoring_cutoff=changed_cutoff,
+            raw_model_score=probability_estimate.raw_model_score,
+            feature_vector_id="feature-vector-fixture",
+        )
         changed_cutoff_estimate = estimate_probability(
             probability_parent,
-            probability_estimate.raw_model_score,
+            changed_score,
             scoring_context_id=probability_estimate.scoring_context_id,
-            scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
         )
         with self.assertRaisesRegex(ValueError, "does not match"):
             _ = InvestigationRequest.from_policy_decision(
                 policy_decision,
                 probability_parent,
+                changed_score,
                 changed_cutoff_estimate,
-                subject_id="account-123",
             )
         with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
             _ = InvestigationRequest.from_policy_decision(
                 policy_decision,
                 probability_parent,
+                score_observation,
                 replace(
                     probability_estimate,
                     scoring_cutoff=datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
                 ),
-                subject_id="account-123",
             )
 
     def test_investigation_budgets_are_validated(self) -> None:
@@ -219,6 +262,33 @@ class InvestigationContractTests(unittest.TestCase):
             facts={"shared_account_count": 3, "identity_type": "device"},
         )
         self.assertEqual(evidence.facts["shared_account_count"], 3)
+        (
+            probability_parent,
+            score_observation,
+            probability_estimate,
+            policy_decision,
+        ) = scored_decision(0.05)
+        request = InvestigationRequest.from_policy_decision(
+            policy_decision,
+            probability_parent,
+            score_observation,
+            probability_estimate,
+        )
+        request_bound = EvidenceItem.from_request(
+            request,
+            evidence_id="evidence-request-1",
+            evidence_type=EvidenceType.SHARED_DEVICE,
+            source=EvidenceSource.TEMPORAL_GRAPH,
+            observed_at=cutoff(),
+            subject_ids=("account-123", "device-456"),
+            facts={"shared_account_count": 3},
+        )
+        self.assertEqual(request_bound.cutoff_time, request.cutoff_time)
+        self.assertEqual(request_bound.verify_for_request(request), request_bound)
+        with self.assertRaisesRegex(ValueError, "does not match investigation request"):
+            _ = evidence.model_copy(
+                update={"cutoff_time": datetime(2026, 5, 2, 12, 0, tzinfo=UTC)}
+            ).verify_for_request(request)
         with self.assertRaisesRegex(ValueError, "after cutoff_time"):
             _ = EvidenceItem(
                 evidence_id="evidence-1",
@@ -265,14 +335,17 @@ class InvestigationContractTests(unittest.TestCase):
     def test_report_carries_input_action_and_only_evidence_referenced_claims(
         self,
     ) -> None:
-        probability_parent, probability_estimate, policy_decision = scored_decision(
-            0.05
-        )
+        (
+            probability_parent,
+            score_observation,
+            probability_estimate,
+            policy_decision,
+        ) = scored_decision(0.05)
         request = InvestigationRequest.from_policy_decision(
             policy_decision,
             probability_parent,
+            score_observation,
             probability_estimate,
-            subject_id="account-123",
         )
         report = InvestigationReport(
             request=request,

@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from mayajaal.scoring import ScoreObservation, verify_score_observation
+
 from .models import (
     CalibrationConfig,
     CalibrationMethod,
@@ -15,7 +17,7 @@ from .models import (
 )
 
 CALIBRATION_PROVENANCE_CONTRACT_VERSION = 1
-PROBABILITY_ESTIMATE_CONTRACT_VERSION = 2
+PROBABILITY_ESTIMATE_CONTRACT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,9 @@ def probability_estimate_semantics(
     base_model_id: str,
     probability_model_id: str,
     probability_estimate_contract_version: int,
+    score_id: str,
+    subject_id: str,
+    feature_vector_id: str,
     raw_model_score: float,
     calibrated_probability: float,
     scoring_context_id: str | None,
@@ -128,6 +133,9 @@ def probability_estimate_semantics(
         "probability_estimate_contract_version": probability_estimate_contract_version,
         "base_model_id": base_model_id,
         "probability_model_id": probability_model_id,
+        "score_id": score_id,
+        "subject_id": subject_id,
+        "feature_vector_id": feature_vector_id,
         "raw_model_score": raw_model_score,
         "calibrated_probability": calibrated_probability,
         "scoring_context_id": scoring_context_id,
@@ -140,6 +148,9 @@ def probability_estimate_id(
     base_model_id: str,
     probability_model_id: str,
     probability_estimate_contract_version: int,
+    score_id: str,
+    subject_id: str,
+    feature_vector_id: str,
     raw_model_score: float,
     calibrated_probability: float,
     scoring_context_id: str | None,
@@ -151,6 +162,9 @@ def probability_estimate_id(
             base_model_id=base_model_id,
             probability_model_id=probability_model_id,
             probability_estimate_contract_version=probability_estimate_contract_version,
+            score_id=score_id,
+            subject_id=subject_id,
+            feature_vector_id=feature_vector_id,
             raw_model_score=raw_model_score,
             calibrated_probability=calibrated_probability,
             scoring_context_id=scoring_context_id,
@@ -161,16 +175,20 @@ def probability_estimate_id(
 
 def estimate_probability(
     probability_model: ProbabilityModel,
-    raw_model_score: float,
+    score_observation: ScoreObservation,
     *,
     scoring_context_id: str | None = None,
-    scoring_cutoff: datetime,
 ) -> ProbabilityEstimate:
-    """Derive one probability only through a previously verified mapping."""
+    """Calibrate only a verified feature-vector score observation."""
     from .service import predict_probability
 
+    verified_score = verify_score_observation(score_observation)
+    if verified_score.base_model_id != probability_model.base_model_id:
+        raise ValueError(
+            "score observation base_model_id does not match probability model"
+        )
     calibrated_probability = predict_probability(
-        probability_model.calibrator, (raw_model_score,)
+        probability_model.calibrator, (verified_score.raw_model_score,)
     )[0]
     return ProbabilityEstimate(
         base_model_id=probability_model.base_model_id,
@@ -179,20 +197,28 @@ def estimate_probability(
             base_model_id=probability_model.base_model_id,
             probability_model_id=probability_model.probability_model_id,
             probability_estimate_contract_version=PROBABILITY_ESTIMATE_CONTRACT_VERSION,
-            raw_model_score=raw_model_score,
+            score_id=verified_score.score_id,
+            subject_id=verified_score.subject_id,
+            feature_vector_id=verified_score.feature_vector_id,
+            raw_model_score=verified_score.raw_model_score,
             calibrated_probability=calibrated_probability,
             scoring_context_id=scoring_context_id,
-            scoring_cutoff=scoring_cutoff,
+            scoring_cutoff=verified_score.scoring_cutoff,
         ),
-        raw_model_score=raw_model_score,
+        score_id=verified_score.score_id,
+        subject_id=verified_score.subject_id,
+        feature_vector_id=verified_score.feature_vector_id,
+        raw_model_score=verified_score.raw_model_score,
         calibrated_probability=calibrated_probability,
         scoring_context_id=scoring_context_id,
-        scoring_cutoff=scoring_cutoff,
+        scoring_cutoff=verified_score.scoring_cutoff,
     )
 
 
 def verify_probability_estimate(
-    estimate: ProbabilityEstimate, probability_model: ProbabilityModel
+    estimate: ProbabilityEstimate,
+    probability_model: ProbabilityModel,
+    score_observation: ScoreObservation,
 ) -> ProbabilityEstimate:
     """Recompute an estimate through trusted calibration and reject tampering."""
     if estimate.base_model_id != probability_model.base_model_id:
@@ -203,11 +229,15 @@ def verify_probability_estimate(
         raise ValueError(
             "probability estimate probability_model_id does not match verified lineage"
         )
+    verified_score = verify_score_observation(score_observation)
+    if verified_score.base_model_id != probability_model.base_model_id:
+        raise ValueError(
+            "score observation base_model_id does not match probability model"
+        )
     expected = estimate_probability(
         probability_model,
-        estimate.raw_model_score,
+        verified_score,
         scoring_context_id=estimate.scoring_context_id,
-        scoring_cutoff=estimate.scoring_cutoff,
     )
     if estimate != expected:
         raise ValueError(

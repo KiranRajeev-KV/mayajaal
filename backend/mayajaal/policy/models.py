@@ -111,6 +111,9 @@ class PolicyDecision:
     base_model_id: str
     probability_model_id: str
     probability_estimate_id: str
+    score_id: str
+    subject_id: str
+    feature_vector_id: str
     decision_id: str
     raw_model_score: float
     calibrated_fraud_probability: float

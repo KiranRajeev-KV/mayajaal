@@ -461,17 +461,19 @@ verified `ProbabilityModel`; `load_policy_model` recomputes the contract and
 rejects tampering or a base/probability lineage mismatch.
 
 `ProbabilityEstimate` is the immutable, score-derived runtime contract between
-calibration and merchant economics. `estimate_probability` accepts a raw model
-margin only through a verified `ProbabilityModel`, recomputes its calibrated
-probability, and creates `probability_estimate_id` from canonical semantics:
-the estimate contract version, base/probability model IDs, raw margin,
-calibrated probability, timezone-aware scoring cutoff, and optional
-scoring-context ID. The scoring cutoff is the fixed point-in-time view used to
-produce the raw score; it is required and cannot be changed without changing
-the estimate ID. The policy's normal API receives both the verified
-`ProbabilityModel` and this estimate, then calls `verify_probability_estimate`
-before calculating any expected cost. Therefore a self-consistent fake estimate
-cannot substitute a probability that the verified calibrator did not produce.
+calibration and merchant economics. The `mayajaal.scoring` adapter creates a
+`ScoreObservation` only by applying the verified frozen full model to an actual
+schema-validated `FeatureVector`; application code does not pair a raw margin
+with caller-provided account or cutoff fields. Its deterministic `score_id`
+binds the base model ID, account subject, cutoff, raw margin, and a fingerprint
+of the exact feature vector. `estimate_probability` consumes this score
+contract—not a raw float—and creates `probability_estimate_id` from the estimate
+contract version, base/probability model IDs, score lineage, calibrated
+probability, timezone-aware scoring cutoff, and optional scoring-context ID.
+The policy's normal API receives both the verified `ProbabilityModel` and this
+estimate, then calls `verify_probability_estimate` before calculating any
+expected cost. Therefore a self-consistent fake estimate cannot substitute a
+probability that the verified calibrator did not produce.
 It also reconstructs the expected
 `PolicyModel` from the probability lineage and validated economics before use.
 When both are present, `ProbabilityEstimate.scoring_context_id` must exactly
@@ -479,11 +481,12 @@ match `DecisionContext.context_id`; this prevents a score tied to one order or
 account from being applied to another. Either identifier may remain `None` for
 generic/offline decisions.
 
-The scoring-cutoff addition is probability-estimate contract version 2 and
-decision contract version 2. It does not alter `probability_model_id` or
+Score-observation contract version 1 is new; probability-estimate contract
+version 3 and decision contract version 3 now bind that score lineage. This
+does not alter `probability_model_id` or
 calibration fitting, so existing held-out and calibration artifacts remain
-reusable. Pre-version-2 policy decisions must be regenerated from the reused
-calibration artifact with `--scoring-cutoff`.
+reusable. Earlier policy decisions must be regenerated from the reused
+calibration artifact and a verified feature-vector score.
 
 `policy_decision.json` stores its explicit decision-contract version, raw
 margin, estimate lineage, economics result, scenarios, and deterministic
@@ -501,18 +504,18 @@ For a local, offline auditable decision, first create a calibration artifact,
 then run:
 
 ```bash
-# Required: derive the probability estimate from a raw model margin through the
-# verified sigmoid artifact.
-just policy-decide --raw-model-score 0.12 --exposure-paise 250000 \
-  --scoring-cutoff 2026-04-01T00:00:00+00:00
+# Required: choose an ID from the frozen split_manifest.json, then score its
+# cutoff-safe FeatureVector through the verified frozen model.
+just policy-decide --sample-id 'account-review:<account-id>:TEST' --exposure-paise 250000
 just policy-decide --calibration-dir artifacts/calibration-standard-10k-final \
-  --raw-model-score 0.12 --exposure-paise 250000 --context-id order-123 \
-  --scoring-cutoff 2026-04-01T00:00:00+00:00
+  --evaluation-dir artifacts/held-out-standard-10k-final \
+  --sample-id 'account-review:<account-id>:TEST' --exposure-paise 250000 --context-id order-123
 ```
 
-The command does not generate a world, fit a model, refit calibration, read a
-held-out label, or choose a threshold. It verifies
-`sigmoid_calibrator.json`, turns `--raw-model-score` into a verified
+The command reconstructs only the configured synthetic world to obtain the
+selected cutoff-safe feature vector; it does not fit a model, refit
+calibration, read a held-out label, or choose a threshold. It verifies the
+frozen model and `sigmoid_calibrator.json`, turns the verified score into a
 `ProbabilityEstimate`, then writes `policy_model.json` and
 `policy_decision.json` to `artifacts/synthetic-world/policy-decision` by default.
 These are designed as the hand-off for a later realtime/API layer or
@@ -537,13 +540,17 @@ future structured InvestigationReport
 ```
 
 `InvestigationRequest.from_policy_decision(...)` verifies the supplied
-`ProbabilityEstimate` through its `ProbabilityModel`, then copies immutable
-decision, policy, and probability-estimate lineage. Its cutoff comes directly
-from the verified estimate's scoring cutoff—callers cannot supply a newer
-investigation cutoff. The initial typed subject is `ACCOUNT`; `subject_id` is
+`ScoreObservation` and `ProbabilityEstimate` through their `ProbabilityModel`,
+then copies immutable decision, policy, feature-vector score, and
+probability-estimate lineage. Its `score_id` and `feature_vector_id` preserve
+the direct link back to the verified input vector.
+Its subject and cutoff come directly from the verified score—callers cannot
+supply either. The initial typed subject is `ACCOUNT`; `subject_id` is
 the scored account, while optional `context_id` is the separate order,
 transaction, or decision context. It does not recompute or modify the policy
-decision. `EvidenceItem` is a structured factual observation whose
+decision. `EvidenceItem.from_request(...)` fixes the evidence cutoff to the
+request cutoff, and `verify_for_request(...)` rejects a mismatch. An evidence
+item is a structured factual observation whose
 `observed_at` cannot be later than its fixed cutoff; its machine-readable facts
 reject known evaluation-only label keys. Its source and type use closed
 `EvidenceSource` and `EvidenceType` vocabularies rather than arbitrary

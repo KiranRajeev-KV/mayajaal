@@ -7,6 +7,7 @@ from mayajaal.calibration import (
     ProbabilityModel,
     verify_probability_estimate,
 )
+from mayajaal.scoring import ScoreObservation
 
 from .models import (
     ActionCost,
@@ -26,6 +27,7 @@ from .provenance import (
 def decide(
     policy_model: PolicyModel,
     probability_model: ProbabilityModel,
+    score_observation: ScoreObservation,
     probability_estimate: ProbabilityEstimate,
     context: DecisionContext,
 ) -> PolicyDecision:
@@ -36,7 +38,9 @@ def decide(
     calibrated probability. The estimate is a score-derived child of the
     calibrated probability model, never an unbound caller-provided float.
     """
-    _verify_probability_contract(policy_model, probability_model, probability_estimate)
+    _verify_probability_contract(
+        policy_model, probability_model, score_observation, probability_estimate
+    )
     _verify_context_binding(probability_estimate, context)
     probability = probability_estimate.calibrated_probability
     expected_costs, chosen_action, margin = _decision_at_probability(
@@ -55,6 +59,7 @@ def decide(
         base_model_id=policy_model.base_model_id,
         probability_model_id=policy_model.probability_model_id,
         probability_estimate_id=probability_estimate.probability_estimate_id,
+        score_id=probability_estimate.score_id,
         policy_id=policy_model.policy_id,
         calibrated_fraud_probability=probability,
         scoring_cutoff=probability_estimate.scoring_cutoff,
@@ -70,6 +75,9 @@ def decide(
         base_model_id=policy_model.base_model_id,
         probability_model_id=policy_model.probability_model_id,
         probability_estimate_id=probability_estimate.probability_estimate_id,
+        score_id=probability_estimate.score_id,
+        subject_id=probability_estimate.subject_id,
+        feature_vector_id=probability_estimate.feature_vector_id,
         decision_id=decision_id(**semantics),
         raw_model_score=probability_estimate.raw_model_score,
         calibrated_fraud_probability=probability,
@@ -102,6 +110,7 @@ def odds_adjusted_probability(probability: float, odds_multiplier: float) -> flo
 def _verify_probability_contract(
     policy_model: PolicyModel,
     probability_model: ProbabilityModel,
+    score_observation: ScoreObservation,
     estimate: ProbabilityEstimate,
 ) -> None:
     """Verify score-derived probability and its binding to policy lineage."""
@@ -112,7 +121,7 @@ def _verify_probability_contract(
     expected_policy_model = build_policy_model(probability_model, policy_model.config)
     if policy_model != expected_policy_model:
         raise ValueError("policy model does not match verified probability lineage")
-    _ = verify_probability_estimate(estimate, probability_model)
+    _ = verify_probability_estimate(estimate, probability_model, score_observation)
 
 
 def _verify_context_binding(
