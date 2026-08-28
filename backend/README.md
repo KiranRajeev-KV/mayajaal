@@ -651,15 +651,22 @@ enforcement capability. The existing `InvestigationToolContext` keeps the
 same validated `InvestigationConfig` instance flowing from `EvidenceService`
 through the tool adapter and agent, so trusted bounds cannot drift.
 
-The model-facing Pydantic output can determine investigation status, pattern,
-evidence-referenced findings, counterevidence, related entities, summary, and
-limitations. Application code supplies the immutable request, its existing
-policy action, and actual budget usage when it constructs
+The model-facing Pydantic output can determine only the analytical statuses
+`COMPLETED` and `INSUFFICIENT_EVIDENCE`, plus pattern, evidence-referenced
+findings, counterevidence, related entities, summary, and limitations.
+Application code alone assigns operational `BUDGET_EXHAUSTED` and `FAILED`
+statuses, and supplies the immutable request, its existing policy action, and
+actual budget usage when it constructs
 `InvestigationReport`; the model cannot replace merchant policy authority.
 The fixed system instructions require evidence citations, counterevidence,
 uncertainty, and an `INCONCLUSIVE` or `INSUFFICIENT_EVIDENCE` result when the
 facts are insufficient. TreeSHAP is explicitly framed as a model explanation,
 not factual proof.
+
+The fixed model task contains only subject type, scoring cutoff, immutable
+policy action, scenario stability, and the approved tool names. It never
+interpolates the account `subject_id` or decision `context_id`; those values
+remain exclusively inside the trusted, context-bound evidence tools.
 
 `max_tool_calls` remains an atomic shared cap across all evidence tools.
 `max_iterations` now means the hard LangChain run-level model-call cap, enforced

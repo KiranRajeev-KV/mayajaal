@@ -1,6 +1,10 @@
 """Read-only investigation contracts and deterministic trigger rules."""
 
-from .agent import InvestigationAgentOutput, InvestigationAgentService
+from .agent import (
+    InvestigationAgentOutput,
+    InvestigationAgentService,
+    InvestigationAgentStatus,
+)
 from .models import (
     EvidenceFinding,
     EvidenceItem,
@@ -39,6 +43,7 @@ __all__ = [
     "EvidenceType",
     "InvestigationAgentOutput",
     "InvestigationAgentService",
+    "InvestigationAgentStatus",
     "InvestigationConfig",
     "InvestigationPattern",
     "InvestigationReport",
