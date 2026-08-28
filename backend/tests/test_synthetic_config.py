@@ -5,6 +5,7 @@ from pathlib import Path
 
 from mayajaal.calibration import CalibrationConfig
 from mayajaal.evaluation import EvaluationConfig
+from mayajaal.investigation import InvestigationConfig
 from mayajaal.policy import PolicyConfig
 from mayajaal.synthetic.config import load_generation_config
 from mayajaal.synthetic.profile import DiagnosticProfile, PrevalenceProfile
@@ -54,6 +55,8 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.calibration.quantile_bin_count, 10)
         self.assertEqual(config.policy.review_operational_cost_paise, 1500)
         self.assertEqual(config.policy.sensitivity.stressed_odds_multiplier, 2.0)
+        self.assertEqual(config.investigation.max_tool_calls, 8)
+        self.assertTrue(config.investigation.triggers.investigate_review)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
         with self.assertRaises(ValueError):
@@ -68,6 +71,8 @@ class SyntheticConfigTests(unittest.TestCase):
             _ = CalibrationConfig(quantile_bin_count=1)
         with self.assertRaises(ValueError):
             _ = PolicyConfig(block_fraud_residual_loss_fraction=1.1)
+        with self.assertRaises(ValueError):
+            _ = InvestigationConfig(max_related_accounts=0)
 
 
 if __name__ == "__main__":

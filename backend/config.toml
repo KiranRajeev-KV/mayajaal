@@ -137,6 +137,24 @@ tie_break_order = ["ALLOW", "REVIEW", "BLOCK"]
 optimistic_odds_multiplier = 0.5
 stressed_odds_multiplier = 2.0
 
+[investigation]
+# Future read-only investigation limits. They do not create tools or alter the
+# merchant action; any future evidence collection must remain within them.
+max_tool_calls = 8
+max_iterations = 4
+max_graph_hops = 2
+max_graph_nodes = 200
+max_graph_edges = 500
+max_related_accounts = 50
+max_events_per_tool = 100
+
+[investigation.triggers]
+# A stable ALLOW is skipped. Review, block, and an unstable ALLOW open a future
+# investigation unless the corresponding trigger is explicitly disabled.
+investigate_review = true
+investigate_block = true
+investigate_unstable_allow = true
+
 [synthetic_world.difficulty_profiles.easy]
 persona_weight_temperature = 0.80
 benign_sharing_multiplier = 0.70

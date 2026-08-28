@@ -506,3 +506,42 @@ held-out label, or choose a threshold. It verifies
 `policy_decision.json` to `artifacts/synthetic-world/policy-decision` by default.
 These are designed as the hand-off for a later realtime/API layer or
 investigation agent; neither is implemented here.
+
+## Bounded investigation contracts
+
+`mayajaal.investigation` is a framework-neutral, read-only boundary for a
+future investigator. It neither estimates risk nor selects an enforcement
+action:
+
+```text
+PolicyDecision
+      ↓
+deterministic trigger
+      ↓
+InvestigationRequest
+      ↓
+future bounded evidence collection
+      ↓
+future structured InvestigationReport
+```
+
+`InvestigationRequest.from_policy_decision(...)` copies immutable decision,
+policy, and probability-estimate lineage together with a caller-supplied
+subject and timezone-aware cutoff. It does not recompute or modify the policy
+decision. `EvidenceItem` is a structured factual observation whose
+`observed_at` cannot be later than its fixed cutoff; its machine-readable facts
+reject known evaluation-only label keys. Future report claims use evidence IDs,
+and `InvestigationReport.policy_action` must exactly match the request action.
+There is intentionally no separate enforcement-action field: the policy stays
+the sole business-action authority.
+
+`[investigation]` in [config.toml](config.toml) validates future hard limits
+for tool calls, iterations, graph traversal, related accounts, and events. The
+current pure `should_investigate(...)` rule opens a future investigation for
+`REVIEW`, `BLOCK`, and an unstable `ALLOW`; it skips a stable `ALLOW`. Each case
+is independently configurable under `[investigation.triggers]`. No tool,
+database query, model/framework integration, external access, report artifact,
+or investigation orchestration exists yet—particularly no arbitrary
+SQL/Cypher, shell, or web access. Any future implementation must be read-only,
+fixed-cutoff, evidence-referenced, bounded by this configuration, and unable
+to override `ALLOW` / `REVIEW` / `BLOCK`.

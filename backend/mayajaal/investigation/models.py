@@ -1,0 +1,217 @@
+"""Framework-neutral contracts for bounded, read-only investigations."""
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Annotated
+
+from pydantic import Field, JsonValue, model_validator
+
+from mayajaal.policy import PolicyAction, PolicyDecision
+from mayajaal.schemas.common import AwareDatetime, SchemaModel
+
+NonEmptyId = Annotated[str, Field(min_length=1)]
+
+
+class InvestigationStatus(StrEnum):
+    """Lifecycle state of a future investigation result."""
+
+    COMPLETED = "COMPLETED"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    FAILED = "FAILED"
+
+
+class InvestigationPattern(StrEnum):
+    """Initial, deliberately broad investigation pattern taxonomy."""
+
+    PROMO_RING = "PROMO_RING"
+    REFUND_RING = "REFUND_RING"
+    MIXED_ABUSE = "MIXED_ABUSE"
+    BENIGN_SHARED_IDENTITY = "BENIGN_SHARED_IDENTITY"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class InvestigationTriggerReason(StrEnum):
+    """Deterministic explanation for an investigation trigger outcome."""
+
+    REVIEW_ACTION = "REVIEW_ACTION"
+    BLOCK_ACTION = "BLOCK_ACTION"
+    UNSTABLE_ALLOW = "UNSTABLE_ALLOW"
+    STABLE_ALLOW = "STABLE_ALLOW"
+    DISABLED_BY_CONFIG = "DISABLED_BY_CONFIG"
+
+
+class InvestigationTriggerConfig(SchemaModel):
+    """Explicit action/stability cases that may open an investigation."""
+
+    investigate_review: bool = True
+    investigate_block: bool = True
+    investigate_unstable_allow: bool = True
+
+
+class InvestigationConfig(SchemaModel):
+    """Validated hard limits for future read-only investigation tools."""
+
+    max_tool_calls: int = Field(default=8, ge=1)
+    max_iterations: int = Field(default=4, ge=1)
+    max_graph_hops: int = Field(default=2, ge=0)
+    max_graph_nodes: int = Field(default=200, ge=1)
+    max_graph_edges: int = Field(default=500, ge=1)
+    max_related_accounts: int = Field(default=50, ge=1)
+    max_events_per_tool: int = Field(default=100, ge=1)
+    triggers: InvestigationTriggerConfig = Field(
+        default_factory=InvestigationTriggerConfig
+    )
+
+
+class InvestigationTrigger(SchemaModel):
+    """Pure trigger result; it never changes the supplied policy decision."""
+
+    should_investigate: bool
+    reason: InvestigationTriggerReason
+
+    @model_validator(mode="after")
+    def validate_reason_matches_outcome(self) -> "InvestigationTrigger":
+        triggered_reasons = {
+            InvestigationTriggerReason.REVIEW_ACTION,
+            InvestigationTriggerReason.BLOCK_ACTION,
+            InvestigationTriggerReason.UNSTABLE_ALLOW,
+        }
+        if self.should_investigate != (self.reason in triggered_reasons):
+            raise ValueError("trigger reason does not match should_investigate")
+        return self
+
+
+class InvestigationRequest(SchemaModel):
+    """Immutable policy-decision binding supplied to a future investigator."""
+
+    decision_id: NonEmptyId
+    policy_id: NonEmptyId
+    probability_estimate_id: NonEmptyId
+    subject_id: NonEmptyId
+    cutoff_time: AwareDatetime
+    policy_action: PolicyAction
+    decision_is_stable_across_scenarios: bool
+
+    @classmethod
+    def from_policy_decision(
+        cls,
+        decision: PolicyDecision,
+        *,
+        subject_id: str,
+        cutoff_time: datetime,
+    ) -> "InvestigationRequest":
+        """Bind a request to policy lineage without recalculating policy state."""
+        return cls(
+            decision_id=decision.decision_id,
+            policy_id=decision.policy_id,
+            probability_estimate_id=decision.probability_estimate_id,
+            subject_id=subject_id,
+            cutoff_time=cutoff_time,
+            policy_action=decision.chosen_action,
+            decision_is_stable_across_scenarios=decision.decision_is_stable_across_scenarios,
+        )
+
+
+class EvidenceItem(SchemaModel):
+    """One factual observation known no later than the request cutoff."""
+
+    evidence_id: NonEmptyId
+    evidence_type: NonEmptyId
+    source: NonEmptyId
+    observed_at: AwareDatetime
+    cutoff_time: AwareDatetime
+    subject_ids: tuple[NonEmptyId, ...] = Field(min_length=1)
+    facts: dict[NonEmptyId, JsonValue] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_temporal_and_label_safety(self) -> "EvidenceItem":
+        if self.observed_at > self.cutoff_time:
+            raise ValueError("evidence observed_at cannot be after cutoff_time")
+        if _contains_evaluation_label_key(self.facts):
+            raise ValueError("evidence facts cannot contain evaluation-only label keys")
+        return self
+
+
+class EvidenceFinding(SchemaModel):
+    """A future report claim that must identify its supporting observations."""
+
+    claim: str = Field(min_length=1)
+    evidence_ids: tuple[NonEmptyId, ...] = Field(min_length=1)
+
+
+class RelatedEntity(SchemaModel):
+    """A related entity named by an investigation report."""
+
+    entity_id: NonEmptyId
+    entity_type: NonEmptyId
+
+
+class InvestigationUsage(SchemaModel):
+    """Future tool-budget consumption recorded with a structured report."""
+
+    tool_calls: int = Field(default=0, ge=0)
+    iterations: int = Field(default=0, ge=0)
+    graph_nodes: int = Field(default=0, ge=0)
+    graph_edges: int = Field(default=0, ge=0)
+    related_accounts: int = Field(default=0, ge=0)
+    events_retrieved: int = Field(default=0, ge=0)
+
+
+class InvestigationReport(SchemaModel):
+    """Future structured, evidence-referenced output with no action authority."""
+
+    request: InvestigationRequest
+    policy_action: PolicyAction
+    status: InvestigationStatus
+    pattern: InvestigationPattern = InvestigationPattern.INCONCLUSIVE
+    key_findings: tuple[EvidenceFinding, ...] = ()
+    counterevidence: tuple[EvidenceFinding, ...] = ()
+    timeline_evidence_ids: tuple[NonEmptyId, ...] = ()
+    related_entities: tuple[RelatedEntity, ...] = ()
+    evidence_ids: tuple[NonEmptyId, ...] = ()
+    summary: str | None = Field(default=None, min_length=1)
+    limitations: tuple[str, ...] = ()
+    usage: InvestigationUsage = Field(default_factory=InvestigationUsage)
+
+    @model_validator(mode="after")
+    def validate_request_action_and_evidence_references(self) -> "InvestigationReport":
+        if self.policy_action is not self.request.policy_action:
+            raise ValueError(
+                "report policy_action must match the immutable request action"
+            )
+        declared_ids = set(self.evidence_ids)
+        referenced_ids = {
+            evidence_id
+            for finding in (*self.key_findings, *self.counterevidence)
+            for evidence_id in finding.evidence_ids
+        } | set(self.timeline_evidence_ids)
+        if not referenced_ids.issubset(declared_ids):
+            raise ValueError("report findings must reference declared evidence_ids")
+        return self
+
+
+def _contains_evaluation_label_key(value: JsonValue) -> bool:
+    """Reject known evaluation-only label fields from structured evidence facts."""
+    forbidden_keys = {
+        "abusetypes",
+        "coordinationclusterid",
+        "fraudlabel",
+        "groundtruth",
+        "groundtruthlabel",
+        "iscoordinatedabuse",
+        "isfraud",
+        "syntheticlabels",
+    }
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            normalized_key = "".join(
+                character for character in key.casefold() if character.isalnum()
+            )
+            if normalized_key in forbidden_keys or _contains_evaluation_label_key(
+                nested_value
+            ):
+                return True
+    elif isinstance(value, list):
+        return any(_contains_evaluation_label_key(item) for item in value)
+    return False
