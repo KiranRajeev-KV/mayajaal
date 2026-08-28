@@ -3,9 +3,9 @@
 from math import isfinite
 
 from mayajaal.calibration import (
-    PROBABILITY_ESTIMATE_CONTRACT_VERSION,
     ProbabilityEstimate,
-    probability_estimate_id,
+    ProbabilityModel,
+    verify_probability_estimate,
 )
 
 from .models import (
@@ -15,11 +15,17 @@ from .models import (
     PolicyDecision,
     ScenarioDecision,
 )
-from .provenance import PolicyModel, decision_id, decision_semantics
+from .provenance import (
+    PolicyModel,
+    build_policy_model,
+    decision_id,
+    decision_semantics,
+)
 
 
 def decide(
     policy_model: PolicyModel,
+    probability_model: ProbabilityModel,
     probability_estimate: ProbabilityEstimate,
     context: DecisionContext,
 ) -> PolicyDecision:
@@ -30,7 +36,7 @@ def decide(
     calibrated probability. The estimate is a score-derived child of the
     calibrated probability model, never an unbound caller-provided float.
     """
-    _verify_estimate_identity(probability_estimate, policy_model)
+    _verify_probability_contract(policy_model, probability_model, probability_estimate)
     probability = probability_estimate.calibrated_probability
     expected_costs, chosen_action, margin = _decision_at_probability(
         policy_model, probability, context
@@ -90,26 +96,20 @@ def odds_adjusted_probability(probability: float, odds_multiplier: float) -> flo
     return scenario_odds / (1.0 + scenario_odds)
 
 
-def _verify_estimate_identity(
-    estimate: ProbabilityEstimate, policy_model: PolicyModel
+def _verify_probability_contract(
+    policy_model: PolicyModel,
+    probability_model: ProbabilityModel,
+    estimate: ProbabilityEstimate,
 ) -> None:
-    """Check child estimate identity before merchant economics consume it."""
-    if estimate.base_model_id != policy_model.base_model_id:
-        raise ValueError("probability estimate base_model_id does not match policy")
-    if estimate.probability_model_id != policy_model.probability_model_id:
-        raise ValueError(
-            "probability estimate probability_model_id does not match policy"
-        )
-    expected_id = probability_estimate_id(
-        base_model_id=estimate.base_model_id,
-        probability_model_id=estimate.probability_model_id,
-        probability_estimate_contract_version=PROBABILITY_ESTIMATE_CONTRACT_VERSION,
-        raw_model_score=estimate.raw_model_score,
-        calibrated_probability=estimate.calibrated_probability,
-        scoring_context_id=estimate.scoring_context_id,
-    )
-    if estimate.probability_estimate_id != expected_id:
-        raise ValueError("probability estimate identity does not match semantics")
+    """Verify score-derived probability and its binding to policy lineage."""
+    if probability_model.base_model_id != policy_model.base_model_id:
+        raise ValueError("probability model base_model_id does not match policy")
+    if probability_model.probability_model_id != policy_model.probability_model_id:
+        raise ValueError("probability model probability_model_id does not match policy")
+    expected_policy_model = build_policy_model(probability_model, policy_model.config)
+    if policy_model != expected_policy_model:
+        raise ValueError("policy model does not match verified probability lineage")
+    _ = verify_probability_estimate(estimate, probability_model)
 
 
 def _scenario_decision(

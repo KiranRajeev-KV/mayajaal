@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import cast
 
 from mayajaal.calibration import (
+    ProbabilityEstimate,
     ProbabilityModel,
-    estimate_probability,
     verify_probability_estimate,
 )
 
@@ -20,17 +20,27 @@ from .service import decide
 
 
 def save_policy_artifacts(
-    output_directory: Path, policy_model: PolicyModel, decision: PolicyDecision
+    output_directory: Path,
+    policy_model: PolicyModel,
+    probability_model: ProbabilityModel,
+    probability_estimate: ProbabilityEstimate,
+    context: DecisionContext,
+    decision: PolicyDecision,
 ) -> dict[str, Path]:
-    """Persist a policy contract and its deterministic decision result."""
-    _verify_decision_lineage(decision, policy_model)
+    """Reconstruct a decision from trusted parents before persisting it."""
+    verify_probability_estimate(probability_estimate, probability_model)
+    reconstructed = decide(
+        policy_model, probability_model, probability_estimate, context
+    )
+    if decision != reconstructed:
+        raise ValueError("policy decision does not match verified reconstruction")
     output_directory.mkdir(parents=True, exist_ok=True)
     policy_path = save_policy_model(
         output_directory / "policy_model.json", policy_model
     )
     decision_path = output_directory / "policy_decision.json"
     decision_path.write_text(
-        json.dumps(_decision_document(decision), indent=2, sort_keys=True) + "\n",
+        json.dumps(_decision_document(reconstructed), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return {"policy_model": policy_path, "decision": decision_path}
@@ -87,15 +97,22 @@ def load_policy_decision(
     scoring_context_id = document["scoring_context_id"]
     if scoring_context_id is not None and not isinstance(scoring_context_id, str):
         raise ValueError("invalid scoring_context_id in policy decision")
-    estimate = estimate_probability(
-        probability_model, raw_score, scoring_context_id=scoring_context_id
+    estimate = ProbabilityEstimate(
+        base_model_id=str(document["base_model_id"]),
+        probability_model_id=str(document["probability_model_id"]),
+        probability_estimate_id=str(document["probability_estimate_id"]),
+        raw_model_score=raw_score,
+        calibrated_probability=_finite_float(
+            document["calibrated_fraud_probability"], "calibrated_fraud_probability"
+        ),
+        scoring_context_id=scoring_context_id,
     )
     verify_probability_estimate(estimate, probability_model)
     if estimate.probability_estimate_id != document["probability_estimate_id"]:
         raise ValueError(
             "decision probability_estimate_id does not match verified estimate"
         )
-    reconstructed = decide(policy_model, estimate, context)
+    reconstructed = decide(policy_model, probability_model, estimate, context)
     if document != _decision_document(reconstructed):
         raise ValueError("policy decision semantics or integrity identifier mismatch")
     if (
@@ -104,21 +121,6 @@ def load_policy_decision(
     ):
         raise ValueError("decision_id does not match expected decision lineage")
     return reconstructed
-
-
-def _verify_decision_lineage(
-    decision: PolicyDecision, policy_model: PolicyModel
-) -> None:
-    if decision.policy_id != policy_model.policy_id:
-        raise ValueError("decision policy_id does not match policy model")
-    if decision.base_model_id != policy_model.base_model_id:
-        raise ValueError("decision base_model_id does not match policy model")
-    if decision.probability_model_id != policy_model.probability_model_id:
-        raise ValueError("decision probability_model_id does not match policy model")
-    if not decision.probability_estimate_id or not decision.decision_id:
-        raise ValueError(
-            "decision must include estimate and decision integrity identifiers"
-        )
 
 
 def _context(value: object) -> DecisionContext:

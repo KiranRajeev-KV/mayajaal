@@ -9,9 +9,11 @@ from tempfile import TemporaryDirectory
 
 from mayajaal.calibration import (
     CalibrationConfig,
+    ProbabilityEstimate,
     ProbabilityModel,
     SigmoidCalibrator,
     estimate_probability,
+    probability_estimate_id,
     verify_probability_estimate,
 )
 from mayajaal.policy import (
@@ -20,6 +22,7 @@ from mayajaal.policy import (
     PolicyAction,
     PolicyConfig,
     PolicyDecision,
+    PolicyModel,
     ProbabilitySensitivityConfig,
     build_policy_model,
     decide,
@@ -56,6 +59,15 @@ def estimate(probability: float, *, context_id: str | None = None):
         log(probability / (1.0 - probability)),
         scoring_context_id=context_id,
     )
+
+
+def make_decision(
+    policy_model: PolicyModel,
+    probability_estimate: ProbabilityEstimate,
+    context: DecisionContext,
+) -> PolicyDecision:
+    """Exercise the production policy boundary with a verified parent model."""
+    return decide(policy_model, probability_model(), probability_estimate, context)
 
 
 def costs_by_action(decision: PolicyDecision) -> dict[PolicyAction, ActionCost]:
@@ -119,29 +131,94 @@ class CostSensitivePolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "probability_model_id"):
             _ = verify_probability_estimate(first, changed_model)
 
+    def test_decide_requires_a_probability_recomputed_by_verified_model(self) -> None:
+        model = policy()
+        probability_parent = probability_model()
+        valid_estimate = estimate_probability(probability_parent, 0.25)
+        context = DecisionContext(exposure_paise=10_000)
+        self.assertIsInstance(
+            decide(model, probability_parent, valid_estimate, context), PolicyDecision
+        )
+
+        fake_probability = 0.9
+        fake_estimate = replace(
+            valid_estimate,
+            calibrated_probability=fake_probability,
+            probability_estimate_id=probability_estimate_id(
+                base_model_id=valid_estimate.base_model_id,
+                probability_model_id=valid_estimate.probability_model_id,
+                probability_estimate_contract_version=1,
+                raw_model_score=valid_estimate.raw_model_score,
+                calibrated_probability=fake_probability,
+                scoring_context_id=valid_estimate.scoring_context_id,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+            _ = decide(model, probability_parent, fake_estimate, context)
+
+        tampered_raw_score = 0.9
+        tampered_raw_estimate = replace(
+            valid_estimate,
+            raw_model_score=tampered_raw_score,
+            probability_estimate_id=probability_estimate_id(
+                base_model_id=valid_estimate.base_model_id,
+                probability_model_id=valid_estimate.probability_model_id,
+                probability_estimate_contract_version=1,
+                raw_model_score=tampered_raw_score,
+                calibrated_probability=valid_estimate.calibrated_probability,
+                scoring_context_id=valid_estimate.scoring_context_id,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+            _ = decide(model, probability_parent, tampered_raw_estimate, context)
+
+        wrong_probability_parent = replace(
+            probability_parent,
+            calibrator=SigmoidCalibrator(coefficient=2.0, intercept=0.0),
+        )
+        with self.assertRaisesRegex(ValueError, "semantics or calibrated probability"):
+            _ = decide(model, wrong_probability_parent, valid_estimate, context)
+        with self.assertRaisesRegex(ValueError, "probability_model_id"):
+            _ = decide(
+                model,
+                replace(probability_parent, probability_model_id="wrong-model"),
+                valid_estimate,
+                context,
+            )
+        with self.assertRaisesRegex(ValueError, "policy model"):
+            _ = decide(
+                replace(model, policy_id="wrong-policy"),
+                probability_parent,
+                valid_estimate,
+                context,
+            )
+
     def test_low_intermediate_and_high_risk_choose_allow_review_block(self) -> None:
         model = policy()
         context = DecisionContext(exposure_paise=250_000)
         self.assertIs(
-            decide(model, estimate(0.001), context).chosen_action, PolicyAction.ALLOW
+            make_decision(model, estimate(0.001), context).chosen_action,
+            PolicyAction.ALLOW,
         )
         self.assertIs(
-            decide(model, estimate(0.05), context).chosen_action, PolicyAction.REVIEW
+            make_decision(model, estimate(0.05), context).chosen_action,
+            PolicyAction.REVIEW,
         )
         self.assertIs(
-            decide(model, estimate(0.90), context).chosen_action, PolicyAction.BLOCK
+            make_decision(model, estimate(0.90), context).chosen_action,
+            PolicyAction.BLOCK,
         )
 
     def test_exposure_amount_changes_the_economic_action(self) -> None:
         model = policy()
         self.assertIs(
-            decide(
+            make_decision(
                 model, estimate(0.06), DecisionContext(exposure_paise=1_000)
             ).chosen_action,
             PolicyAction.ALLOW,
         )
         self.assertIs(
-            decide(
+            make_decision(
                 model, estimate(0.06), DecisionContext(exposure_paise=250_000)
             ).chosen_action,
             PolicyAction.REVIEW,
@@ -154,14 +231,16 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 block_legitimate_friction_cost_paise=500_000,
             )
         )
-        decision = decide(
+        decision = make_decision(
             model, estimate(0.90), DecisionContext(exposure_paise=250_000)
         )
         self.assertIs(decision.chosen_action, PolicyAction.REVIEW)
 
     def test_expected_costs_include_residual_review_loss_exactly(self) -> None:
         model = policy()
-        decision = decide(model, estimate(0.10), DecisionContext(exposure_paise=10_000))
+        decision = make_decision(
+            model, estimate(0.10), DecisionContext(exposure_paise=10_000)
+        )
         costs = costs_by_action(decision)
         review = costs[PolicyAction.REVIEW]
         self.assertEqual(review.fraud_cost_paise, 3_500.0)
@@ -181,7 +260,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
             allow_fraud_exposure_loss_fraction=0.0,
         )
         self.assertIs(
-            decide(
+            make_decision(
                 policy(zero_costs), estimate(0.5), DecisionContext(exposure_paise=99)
             ).chosen_action,
             PolicyAction.ALLOW,
@@ -196,7 +275,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
             }
         )
         self.assertIs(
-            decide(
+            make_decision(
                 policy(block_first), estimate(0.5), DecisionContext(exposure_paise=99)
             ).chosen_action,
             PolicyAction.BLOCK,
@@ -214,7 +293,7 @@ class CostSensitivePolicyTests(unittest.TestCase):
 
     def test_sensitivity_scenarios_report_stability_and_instability(self) -> None:
         model = policy()
-        unstable = decide(
+        unstable = make_decision(
             model, estimate(0.01), DecisionContext(exposure_paise=250_000)
         )
         self.assertFalse(unstable.decision_is_stable_across_scenarios)
@@ -228,7 +307,9 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 for item in unstable.scenarios
             )
         )
-        stable = decide(model, estimate(0.90), DecisionContext(exposure_paise=250_000))
+        stable = make_decision(
+            model, estimate(0.90), DecisionContext(exposure_paise=250_000)
+        )
         self.assertTrue(stable.decision_is_stable_across_scenarios)
 
     def test_policy_id_binds_semantics_but_not_paths_or_formatting(self) -> None:
@@ -270,9 +351,18 @@ class CostSensitivePolicyTests(unittest.TestCase):
 
     def test_policy_artifact_rejects_tampering_and_lineage_mismatch(self) -> None:
         model = policy()
-        decision = decide(model, estimate(0.10), DecisionContext(exposure_paise=10_000))
+        decision = make_decision(
+            model, estimate(0.10), DecisionContext(exposure_paise=10_000)
+        )
         with TemporaryDirectory() as directory:
-            artifacts = save_policy_artifacts(Path(directory), model, decision)
+            artifacts = save_policy_artifacts(
+                Path(directory),
+                model,
+                probability_model(),
+                estimate(0.10),
+                decision.context,
+                decision,
+            )
             loaded = load_policy_model(
                 artifacts["policy_model"],
                 probability_model(),
@@ -297,7 +387,14 @@ class CostSensitivePolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "hash or semantics"):
                 _ = load_policy_model(artifacts["policy_model"], probability_model())
 
-            artifacts = save_policy_artifacts(Path(directory), model, decision)
+            artifacts = save_policy_artifacts(
+                Path(directory),
+                model,
+                probability_model(),
+                estimate(0.10),
+                decision.context,
+                decision,
+            )
             wrong_probability = replace(
                 probability_model(), probability_model_id="wrong-probability-model"
             )
@@ -307,18 +404,22 @@ class CostSensitivePolicyTests(unittest.TestCase):
     def test_decision_id_and_artifact_integrity_cover_semantic_fields(self) -> None:
         model = policy()
         first_estimate = estimate(0.10, context_id="order-1")
-        first = decide(model, first_estimate, DecisionContext(exposure_paise=10_000))
-        same = decide(model, first_estimate, DecisionContext(exposure_paise=10_000))
+        first = make_decision(
+            model, first_estimate, DecisionContext(exposure_paise=10_000)
+        )
+        same = make_decision(
+            model, first_estimate, DecisionContext(exposure_paise=10_000)
+        )
         self.assertEqual(first.decision_id, same.decision_id)
         self.assertNotEqual(
             first.decision_id,
-            decide(
+            make_decision(
                 model, first_estimate, DecisionContext(exposure_paise=10_001)
             ).decision_id,
         )
         self.assertNotEqual(
             first.decision_id,
-            decide(
+            make_decision(
                 model,
                 estimate(0.11, context_id="order-1"),
                 DecisionContext(exposure_paise=10_000),
@@ -327,12 +428,19 @@ class CostSensitivePolicyTests(unittest.TestCase):
         altered_policy = policy(PolicyConfig(review_operational_cost_paise=1_501))
         self.assertNotEqual(
             first.decision_id,
-            decide(
+            make_decision(
                 altered_policy, first_estimate, DecisionContext(exposure_paise=10_000)
             ).decision_id,
         )
         with TemporaryDirectory() as directory:
-            artifacts = save_policy_artifacts(Path(directory), model, first)
+            artifacts = save_policy_artifacts(
+                Path(directory),
+                model,
+                probability_model(),
+                first_estimate,
+                first.context,
+                first,
+            )
             self.assertEqual(
                 load_policy_decision(artifacts["decision"], model, probability_model()),
                 first,
@@ -352,7 +460,9 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 document = json.loads(json.dumps(original))
                 document[field] = value
                 artifacts["decision"].write_text(json.dumps(document), encoding="utf-8")
-                with self.assertRaisesRegex(ValueError, "decision"):
+                with self.assertRaisesRegex(
+                    ValueError, "decision|probability estimate"
+                ):
                     _ = load_policy_decision(
                         artifacts["decision"], model, probability_model()
                     )
@@ -377,6 +487,35 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 _ = load_policy_decision(
                     artifacts["decision"], model, probability_model()
                 )
+
+    def test_save_rejects_a_caller_altered_decision(self) -> None:
+        model = policy()
+        probability_parent = probability_model()
+        probability_estimate = estimate_probability(probability_parent, 0.25)
+        context = DecisionContext(exposure_paise=10_000)
+        decision = decide(model, probability_parent, probability_estimate, context)
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "verified reconstruction"):
+                _ = save_policy_artifacts(
+                    Path(directory),
+                    model,
+                    probability_parent,
+                    probability_estimate,
+                    context,
+                    replace(decision, chosen_action=PolicyAction.ALLOW),
+                )
+            artifacts = save_policy_artifacts(
+                Path(directory),
+                model,
+                probability_parent,
+                probability_estimate,
+                context,
+                decision,
+            )
+            self.assertEqual(
+                load_policy_decision(artifacts["decision"], model, probability_parent),
+                decision,
+            )
 
     def test_policy_never_imports_synthetic_labels_or_catboost(self) -> None:
         package_directory = Path(__file__).parents[1] / "mayajaal" / "policy"

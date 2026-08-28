@@ -68,13 +68,21 @@ def main() -> int:
     )
     decision = decide(
         policy_model,
+        probability_model,
         probability_estimate,
         DecisionContext(
             exposure_paise=arguments.exposure_paise,
             context_id=arguments.context_id,
         ),
     )
-    artifacts = save_policy_artifacts(output_directory, policy_model, decision)
+    artifacts = save_policy_artifacts(
+        output_directory,
+        policy_model,
+        probability_model,
+        probability_estimate,
+        decision.context,
+        decision,
+    )
     print(f"policy_id: {decision.policy_id}")
     print(f"probability_model_id: {decision.probability_model_id}")
     print(f"probability_estimate_id: {decision.probability_estimate_id}")

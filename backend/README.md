@@ -466,16 +466,23 @@ margin only through a verified `ProbabilityModel`, recomputes its calibrated
 probability, and creates `probability_estimate_id` from canonical semantics:
 the estimate contract version, base/probability model IDs, raw margin,
 calibrated probability, and optional scoring-context ID. The policy's normal
-API consumes this contract rather than a naked probability float.
+API receives both the verified `ProbabilityModel` and this estimate, then calls
+`verify_probability_estimate` before calculating any expected cost. Therefore
+a self-consistent fake estimate cannot substitute a probability that the
+verified calibrator did not produce. It also reconstructs the expected
+`PolicyModel` from the probability lineage and validated economics before use.
 
 `policy_decision.json` stores its explicit decision-contract version, raw
 margin, estimate lineage, economics result, scenarios, and deterministic
 `decision_id`. `load_policy_decision`
-accepts verified probability and policy models, recomputes the estimate through
-the calibrator, reconstructs the whole expected-cost decision, and rejects any
-lineage, probability, exposure, action, cost, scenario, stability, or ID
-mismatch. This is deterministic tamper evidence and lineage checking, not a
-digital signature or authentication mechanism.
+accepts verified probability and policy models, verifies the stored estimate
+through the calibrator, reconstructs the whole expected-cost decision, and
+rejects any lineage, probability, exposure, action, cost, scenario, stability,
+or ID mismatch. `save_policy_artifacts` performs that same trusted-parent
+reconstruction before writing, so a caller-constructed `PolicyDecision` cannot
+be persisted merely because it contains plausible IDs. This is deterministic
+tamper evidence and lineage checking, not a digital signature or authentication
+mechanism.
 
 For a local, offline auditable decision, first create a calibration artifact,
 then run:
