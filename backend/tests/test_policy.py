@@ -193,6 +193,74 @@ class CostSensitivePolicyTests(unittest.TestCase):
                 context,
             )
 
+    def test_decide_binds_scoring_and_decision_contexts_when_both_are_present(
+        self,
+    ) -> None:
+        model = policy()
+        probability_parent = probability_model()
+        matched_estimate = estimate_probability(
+            probability_parent, 0.25, scoring_context_id="order-123"
+        )
+        matching_context = DecisionContext(
+            exposure_paise=10_000, context_id="order-123"
+        )
+        matching = decide(model, probability_parent, matched_estimate, matching_context)
+        self.assertEqual(matching.scoring_context_id, matching.context.context_id)
+        self.assertEqual(
+            matching.decision_id,
+            "82e7337ee08e00cabf34f60fd16a0a56948effb14409498a10c52b63d6b6cb92",
+        )
+
+        with self.assertRaisesRegex(ValueError, "scoring_context_id.*context_id"):
+            _ = decide(
+                model,
+                probability_parent,
+                matched_estimate,
+                DecisionContext(exposure_paise=10_000, context_id="order-456"),
+            )
+
+        self.assertIsInstance(
+            decide(
+                model,
+                probability_parent,
+                estimate_probability(probability_parent, 0.25),
+                DecisionContext(exposure_paise=10_000),
+            ),
+            PolicyDecision,
+        )
+        self.assertIsInstance(
+            decide(
+                model,
+                probability_parent,
+                matched_estimate,
+                DecisionContext(exposure_paise=10_000),
+            ),
+            PolicyDecision,
+        )
+        self.assertIsInstance(
+            decide(
+                model,
+                probability_parent,
+                estimate_probability(probability_parent, 0.25),
+                DecisionContext(exposure_paise=10_000, context_id="order-123"),
+            ),
+            PolicyDecision,
+        )
+
+        with TemporaryDirectory() as directory:
+            artifacts = save_policy_artifacts(
+                Path(directory),
+                model,
+                probability_parent,
+                matched_estimate,
+                matching_context,
+                matching,
+            )
+            self.assertEqual(
+                load_policy_decision(artifacts["decision"], model, probability_parent),
+                matching,
+            )
+
     def test_low_intermediate_and_high_risk_choose_allow_review_block(self) -> None:
         model = policy()
         context = DecisionContext(exposure_paise=250_000)

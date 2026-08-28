@@ -37,6 +37,7 @@ def decide(
     calibrated probability model, never an unbound caller-provided float.
     """
     _verify_probability_contract(policy_model, probability_model, probability_estimate)
+    _verify_context_binding(probability_estimate, context)
     probability = probability_estimate.calibrated_probability
     expected_costs, chosen_action, margin = _decision_at_probability(
         policy_model, probability, context
@@ -110,6 +111,21 @@ def _verify_probability_contract(
     if policy_model != expected_policy_model:
         raise ValueError("policy model does not match verified probability lineage")
     _ = verify_probability_estimate(estimate, probability_model)
+
+
+def _verify_context_binding(
+    estimate: ProbabilityEstimate,
+    context: DecisionContext,
+) -> None:
+    """Prevent a context-bound score from being applied to another context."""
+    if (
+        estimate.scoring_context_id is not None
+        and context.context_id is not None
+        and estimate.scoring_context_id != context.context_id
+    ):
+        raise ValueError(
+            "probability estimate scoring_context_id does not match decision context_id"
+        )
 
 
 def _scenario_decision(

@@ -471,6 +471,10 @@ API receives both the verified `ProbabilityModel` and this estimate, then calls
 a self-consistent fake estimate cannot substitute a probability that the
 verified calibrator did not produce. It also reconstructs the expected
 `PolicyModel` from the probability lineage and validated economics before use.
+When both are present, `ProbabilityEstimate.scoring_context_id` must exactly
+match `DecisionContext.context_id`; this prevents a score tied to one order or
+account from being applied to another. Either identifier may remain `None` for
+generic/offline decisions.
 
 `policy_decision.json` stores its explicit decision-contract version, raw
 margin, estimate lineage, economics result, scenarios, and deterministic
