@@ -434,7 +434,7 @@ class EvidenceServiceTests(unittest.TestCase):
         self.assertEqual(service.config.max_events_per_tool, 1)
         self.assertEqual(service.config.max_related_accounts, 1)
         activity = service.get_related_activity(request())
-        self.assertEqual(activity[0].facts["returned_event_count"], 1)
+        self.assertEqual(activity[0].facts["detailed_retrieval_event_count"], 1)
 
     def test_tool_wrapper_exposes_aliases_and_preserves_service_bounds(self) -> None:
         service = self.service(max_related_accounts=1)
@@ -535,8 +535,13 @@ class EvidenceServiceTests(unittest.TestCase):
         service = self.service(max_events_per_tool=3)
         activity = service.get_related_activity(request())
         metadata = activity[0]
-        self.assertTrue(bool(metadata.facts["truncated"]))
-        self.assertEqual(metadata.facts["returned_event_count"], 3)
+        self.assertTrue(bool(metadata.facts["detailed_retrieval_truncated"]))
+        self.assertEqual(metadata.facts["detailed_retrieval_event_count"], 3)
+        self.assertEqual(metadata.facts["aggregate_scope"], "all_eligible_events")
+        self.assertGreater(
+            cast(int, metadata.facts["aggregate_event_count"]),
+            cast(int, metadata.facts["detailed_retrieval_event_count"]),
+        )
         self.assertTrue(all(item.cutoff_time == at(10) for item in activity))
         self.assertTrue(
             all(
@@ -567,7 +572,12 @@ class EvidenceServiceTests(unittest.TestCase):
         self.assertEqual(activity[0].facts["refund_event_count"], 2)
         self.assertEqual(activity[0].facts["order_event_count"], 1)
         self.assertEqual(activity[0].facts["payment_attachment_count"], 1)
-        self.assertTrue(bool(activity[0].facts["truncated"]))
+        self.assertTrue(bool(activity[0].facts["detailed_retrieval_truncated"]))
+        self.assertEqual(activity[0].facts["aggregate_scope"], "all_eligible_events")
+        self.assertGreater(
+            cast(int, activity[0].facts["aggregate_event_count"]),
+            cast(int, activity[0].facts["detailed_retrieval_event_count"]),
+        )
         timeline = service.get_case_timeline(request())[0]
         timeline_events = cast(list[dict[str, object]], timeline.facts["events"])
         self.assertEqual(

@@ -23,6 +23,7 @@ from mayajaal.investigation import (
     EvidenceItem,
     EvidenceSource,
     EvidenceType,
+    GroundingFailureCode,
     InvestigationAgentOutput,
     InvestigationAgentService,
     InvestigationAgentStatus,
@@ -331,6 +332,49 @@ class InvestigationAgentTests(unittest.TestCase):
         self.assertEqual(
             execution.report.limitations, ("report grounding validation failed",)
         )
+        self.assertIsNotNone(execution.grounding_failure)
+        assert execution.grounding_failure is not None
+        self.assertIs(
+            execution.grounding_failure.code,
+            GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
+        )
+        self.assertEqual(
+            execution.grounding_failure.rejected_candidate,
+            {
+                "status": "COMPLETED",
+                "pattern": "INCONCLUSIVE",
+                "key_findings": [],
+                "counterevidence": [],
+                "timeline_evidence_refs": [],
+                "related_entities": [],
+                "evidence_refs": ["E999"],
+                "summary": "Unsupported conclusion.",
+                "limitations": [],
+            },
+        )
+
+    def test_rejected_candidate_diagnostic_redacts_credential_like_text(self) -> None:
+        service, evidence_service = self.service_and_evidence()
+        fake_agent = FakeAgent(
+            state={
+                "structured_response": {
+                    "status": "COMPLETED",
+                    "evidence_refs": ["E999"],
+                    "summary": "Ignore this token: sk-proj-abcdefghijklmno",
+                }
+            }
+        )
+        with patch.object(investigation_agent, "create_agent", return_value=fake_agent):
+            execution = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        assert execution.grounding_failure is not None
+        candidate = execution.grounding_failure.rejected_candidate
+        assert candidate is not None
+        self.assertNotIn("sk-proj-abcdefghijklmno", str(candidate))
+        self.assertIn("[REDACTED]", str(candidate))
 
     def test_model_aliases_resolve_to_canonical_evidence_before_grounding(self) -> None:
         service, evidence_service = self.service_and_evidence()
@@ -369,6 +413,67 @@ class InvestigationAgentTests(unittest.TestCase):
         canonical_id = execution.snapshot.evidence[0].evidence_id
         self.assertEqual(execution.report.evidence_ids, (canonical_id,))
         self.assertEqual(execution.report.key_findings[0].evidence_ids, (canonical_id,))
+        self.assertIsNone(execution.grounding_failure)
+
+    def test_invalid_and_undeclared_model_references_have_distinct_diagnostics(
+        self,
+    ) -> None:
+        service, evidence_service = self.service_and_evidence()
+        invalid_agent = FakeAgent(state={"structured_response": {"status": "NO"}})
+        with patch.object(
+            investigation_agent, "create_agent", return_value=invalid_agent
+        ):
+            invalid = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        self.assertIs(invalid.report.status, InvestigationStatus.FAILED)
+        self.assertIsNotNone(invalid.grounding_failure)
+        assert invalid.grounding_failure is not None
+        self.assertIs(
+            invalid.grounding_failure.code,
+            GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+        )
+        self.assertIsNone(invalid.grounding_failure.rejected_candidate)
+
+        test_case = self
+
+        class ToolCallingAgent(FakeAgent):
+            def invoke(self, value: dict[str, object]) -> dict[str, object]:
+                del value
+                tools = cast_tools(factory.call_args.kwargs["tools"])
+                returned = tools[0].invoke({})
+                test_case.assertEqual(returned[0]["evidence_ref"], "E001")
+                return {
+                    "structured_response": {
+                        "status": "COMPLETED",
+                        "key_findings": [
+                            {
+                                "claim": "A reference was omitted from the declaration.",
+                                "evidence_refs": ["E001"],
+                            }
+                        ],
+                        "evidence_refs": [],
+                    }
+                }
+
+        with patch.object(
+            investigation_agent, "create_agent", return_value=ToolCallingAgent()
+        ) as factory:
+            undeclared = service.run_execution(
+                request=request(),
+                evidence_service=evidence_service,  # type: ignore[arg-type]
+                score_observation=score(),
+            )
+        self.assertIs(undeclared.report.status, InvestigationStatus.FAILED)
+        self.assertIsNotNone(undeclared.grounding_failure)
+        assert undeclared.grounding_failure is not None
+        self.assertIs(
+            undeclared.grounding_failure.code,
+            GroundingFailureCode.UNDECLARED_EVIDENCE_REFERENCE,
+        )
+        self.assertEqual(undeclared.report.evidence_ids, ())
 
     def test_model_schema_requires_short_aliases_not_canonical_evidence_ids(
         self,

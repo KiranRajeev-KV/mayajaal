@@ -14,6 +14,8 @@ from mayajaal.policy import PolicyAction, PolicyDecision
 from mayajaal.schemas.common import AwareDatetime, SchemaModel
 from mayajaal.scoring import ScoreObservation
 
+from .errors import GroundingFailureCode
+
 NonEmptyId = Annotated[str, Field(min_length=1)]
 
 
@@ -267,6 +269,18 @@ class InvestigationUsage(SchemaModel):
     graph_edges: int = Field(default=0, ge=0)
     related_accounts: int = Field(default=0, ge=0)
     events_retrieved: int = Field(default=0, ge=0)
+
+
+class GroundingFailureDiagnostic(SchemaModel):
+    """Non-authoritative debugging metadata for a rejected model candidate.
+
+    It is deliberately separate from ``InvestigationReport``: a failed report
+    carries no model claims and this diagnostic is not report provenance.
+    """
+
+    code: GroundingFailureCode
+    detail: str = Field(min_length=1)
+    rejected_candidate: dict[str, JsonValue] | None = None
 
 
 class InvestigationReport(SchemaModel):

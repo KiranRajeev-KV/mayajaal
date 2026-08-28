@@ -8,8 +8,10 @@ from pydantic import Field, field_validator
 from mayajaal.schemas.common import SchemaModel
 
 from .allowlist import INVESTIGATION_TOOL_NAMES
+from .errors import GroundingFailureCode, InvestigationGroundingError
 from .models import (
     EvidenceItem,
+    GroundingFailureDiagnostic,
     InvestigationConfig,
     InvestigationReport,
     InvestigationRequest,
@@ -49,6 +51,7 @@ class InvestigationExecution:
     snapshot: EvidenceLedgerSnapshot
     agent_model_id: str
     config: InvestigationConfig
+    grounding_failure: GroundingFailureDiagnostic | None = None
 
 
 @dataclass
@@ -100,11 +103,17 @@ class EvidenceLedger:
     def resolve_alias(self, alias: str) -> str:
         """Resolve one strict, run-local evidence alias to its canonical ID."""
         if not _EVIDENCE_ALIAS_PATTERN.fullmatch(alias):
-            raise ValueError("evidence reference must use the E001 alias format")
+            raise InvestigationGroundingError(
+                GroundingFailureCode.MALFORMED_EVIDENCE_REFERENCE,
+                "evidence reference must use the E001 alias format",
+            )
         for canonical_id, admitted_alias in self._aliases.items():
             if admitted_alias == alias:
                 return canonical_id
-        raise ValueError("evidence reference is not admitted to this investigation")
+        raise InvestigationGroundingError(
+            GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
+            "evidence reference is not admitted to this investigation",
+        )
 
     def resolve_aliases(self, aliases: tuple[str, ...]) -> tuple[str, ...]:
         """Resolve ordered model references without any fuzzy matching."""

@@ -15,6 +15,7 @@ from .ledger import (
 )
 from .models import (
     EvidenceItem,
+    GroundingFailureDiagnostic,
     InvestigationConfig,
     InvestigationReport,
     InvestigationRequest,
@@ -50,7 +51,21 @@ def save_investigation_artifacts(
         "report": output_directory / "investigation_report.json",
     }
     paths["provenance"].write_text(
-        _document({"status": "VALID", "provenance": provenance}), encoding="utf-8"
+        _document(
+            {
+                "status": "VALID",
+                "provenance": provenance,
+                # Debug-only rejected-candidate data is intentionally outside
+                # the deterministic provenance/report hashes and is never a
+                # trusted report claim.
+                "grounding_failure": (
+                    execution.grounding_failure.model_dump(mode="json")
+                    if execution.grounding_failure is not None
+                    else None
+                ),
+            }
+        ),
+        encoding="utf-8",
     )
     paths["evidence"].write_text(
         _document(
@@ -115,6 +130,21 @@ def load_investigation_artifacts(
         raise ValueError(
             "investigation artifact configuration does not match trusted expected configuration"
         )
+    grounding_failure_value = provenance_document.get("grounding_failure")
+    grounding_failure = (
+        None
+        if grounding_failure_value is None
+        else cast(
+            GroundingFailureDiagnostic,
+            _model(
+                GroundingFailureDiagnostic,
+                grounding_failure_value,
+                "grounding failure diagnostic",
+            ),
+        )
+    )
+    if grounding_failure is not None and report.status.value != "FAILED":
+        raise ValueError("grounding failure diagnostic requires a FAILED report")
     snapshot = EvidenceLedgerSnapshot(
         evidence=tuple(
             cast(EvidenceItem, _model(EvidenceItem, value, "evidence"))
@@ -158,6 +188,7 @@ def load_investigation_artifacts(
         snapshot=snapshot,
         agent_model_id=agent_model_id,
         config=persisted_config,
+        grounding_failure=grounding_failure,
     )
 
 

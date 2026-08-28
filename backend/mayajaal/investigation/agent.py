@@ -1,6 +1,7 @@
 """Framework-isolated, bounded LangChain orchestration for investigations."""
 
 import os
+import re
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Protocol, cast
@@ -10,15 +11,17 @@ from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from mayajaal.schemas.common import SchemaModel
 from mayajaal.scoring import ScoreObservation
 
-from .grounding import InvestigationGroundingError, validate_report_grounding
+from .errors import GroundingFailureCode, InvestigationGroundingError
+from .grounding import validate_report_grounding
 from .ledger import InvestigationExecution
 from .models import (
     EvidenceFinding,
+    GroundingFailureDiagnostic,
     InvestigationConfig,
     InvestigationPattern,
     InvestigationReport,
@@ -188,6 +191,7 @@ class InvestigationAgentService:
                 name="bounded_investigation_agent",
             ),
         )
+        grounding_failure: GroundingFailureDiagnostic | None = None
         try:
             state = agent.invoke(
                 {"messages": [{"role": "user", "content": _task(request)}]}
@@ -207,12 +211,25 @@ class InvestigationAgentService:
                 limitation="tool-call budget exhausted",
             )
         else:
+            rejected_candidate: dict[str, JsonValue] | None = None
             try:
-                candidate = _report_from_state(request, context, state)
+                output = _output_from_state(state)
+                rejected_candidate = _safe_rejected_candidate(output)
+                candidate = _report_from_output(
+                    request,
+                    context,
+                    output,
+                    iterations=_state_run_model_call_count(state),
+                )
                 report = validate_report_grounding(
                     candidate, request, context.ledger.snapshot()
                 )
-            except (InvestigationGroundingError, ValueError):
+            except InvestigationGroundingError as error:
+                grounding_failure = GroundingFailureDiagnostic(
+                    code=error.code,
+                    detail=error.detail,
+                    rejected_candidate=rejected_candidate,
+                )
                 report = _grounding_failed_report(
                     request,
                     InvestigationUsage(
@@ -220,11 +237,27 @@ class InvestigationAgentService:
                         iterations=_state_run_model_call_count(state),
                     ),
                 )
+            except ValueError:
+                grounding_failure = GroundingFailureDiagnostic(
+                    code=GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+                    detail="investigation agent returned invalid structured output",
+                    rejected_candidate=rejected_candidate,
+                )
+                report = _grounding_failed_report(
+                    request,
+                    InvestigationUsage(
+                        tool_calls=context.budget.used_tool_calls,
+                        iterations=_state_run_model_call_count(state),
+                    ),
+                )
+            else:
+                grounding_failure = None
         return InvestigationExecution(
             report=report,
             snapshot=context.ledger.snapshot(),
             agent_model_id=run_agent_model_id,
             config=run_config,
+            grounding_failure=grounding_failure,
         )
 
     def _agent_model_id(self) -> str:
@@ -269,20 +302,36 @@ def _task(request: InvestigationRequest) -> str:
     )
 
 
-def _report_from_state(
-    request: InvestigationRequest,
-    context: InvestigationToolContext,
-    state: Mapping[str, object],
-) -> InvestigationReport:
-    """Attach immutable request/action/usage fields to model-facing output."""
+def _output_from_state(state: Mapping[str, object]) -> InvestigationAgentOutput:
+    """Parse model-owned fields without granting it authority over trusted ones."""
     value = state.get("structured_response")
     if value is None:
-        raise ValueError("investigation agent returned no structured response")
-    output = (
-        value
-        if isinstance(value, InvestigationAgentOutput)
-        else InvestigationAgentOutput.model_validate(value)
-    )
+        raise InvestigationGroundingError(
+            GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+            "investigation agent returned no structured response",
+        )
+    try:
+        return (
+            value
+            if isinstance(value, InvestigationAgentOutput)
+            else InvestigationAgentOutput.model_validate(value)
+        )
+    except ValueError as error:
+        raise InvestigationGroundingError(
+            GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+            "investigation agent returned invalid structured output",
+        ) from error
+
+
+def _report_from_output(
+    request: InvestigationRequest,
+    context: InvestigationToolContext,
+    output: InvestigationAgentOutput,
+    *,
+    iterations: int,
+) -> InvestigationReport:
+    """Attach immutable request/action fields after strict alias declaration checks."""
+    _verify_declared_aliases(output)
     return InvestigationReport(
         request=request,
         policy_action=request.policy_action,
@@ -318,9 +367,62 @@ def _report_from_state(
         limitations=output.limitations,
         usage=InvestigationUsage(
             tool_calls=context.budget.used_tool_calls,
-            iterations=_state_run_model_call_count(state),
+            iterations=iterations,
         ),
     )
+
+
+def _verify_declared_aliases(output: InvestigationAgentOutput) -> None:
+    """Require each factual model reference to also be declared by the report."""
+    declared = set(output.evidence_refs)
+    referenced = (
+        {
+            evidence_ref
+            for finding in (*output.key_findings, *output.counterevidence)
+            for evidence_ref in finding.evidence_refs
+        }
+        | set(output.timeline_evidence_refs)
+        | {
+            evidence_ref
+            for related in output.related_entities
+            for evidence_ref in related.evidence_refs
+        }
+    )
+    if not referenced.issubset(declared):
+        raise InvestigationGroundingError(
+            GroundingFailureCode.UNDECLARED_EVIDENCE_REFERENCE,
+            "model finding references an undeclared evidence reference",
+        )
+
+
+_SECRET_VALUE_PATTERN = re.compile(
+    r"(?i)(?:\b(?:sk|sk-proj)-[a-z0-9_-]{8,}\b|\bbearer\s+\S+|"
+    r"\bopenai_api_key\s*=\s*\S+)"
+)
+
+
+def _safe_rejected_candidate(
+    output: InvestigationAgentOutput,
+) -> dict[str, JsonValue]:
+    """Keep an evaluable candidate while redacting credential-like model text."""
+    value = output.model_dump(mode="json")
+    redacted = _redact_candidate_value(value)
+    if not isinstance(redacted, dict):
+        raise AssertionError(
+            "structured investigation output must serialize as a mapping"
+        )
+    return redacted
+
+
+def _redact_candidate_value(value: JsonValue) -> JsonValue:
+    """Recursively remove credential-like text without interpreting evidence."""
+    if isinstance(value, str):
+        return _SECRET_VALUE_PATTERN.sub("[REDACTED]", value)
+    if isinstance(value, list):
+        return [_redact_candidate_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_candidate_value(item) for key, item in value.items()}
+    return value
 
 
 def _budget_exhausted_report(

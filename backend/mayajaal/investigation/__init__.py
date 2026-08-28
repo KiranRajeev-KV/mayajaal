@@ -8,7 +8,8 @@ from .agent import (
     InvestigationAgentStatus,
 )
 from .artifacts import load_investigation_artifacts, save_investigation_artifacts
-from .grounding import InvestigationGroundingError, validate_report_grounding
+from .errors import GroundingFailureCode, InvestigationGroundingError
+from .grounding import validate_report_grounding
 from .ledger import (
     EvidenceLedger,
     EvidenceLedgerSnapshot,
@@ -20,6 +21,7 @@ from .models import (
     EvidenceItem,
     EvidenceSource,
     EvidenceType,
+    GroundingFailureDiagnostic,
     InvestigationConfig,
     InvestigationPattern,
     InvestigationReport,
@@ -66,6 +68,8 @@ __all__ = [
     "EvidenceService",
     "EvidenceSource",
     "EvidenceType",
+    "GroundingFailureCode",
+    "GroundingFailureDiagnostic",
     "InvestigationAgentFinding",
     "InvestigationAgentOutput",
     "InvestigationAgentRelatedEntity",

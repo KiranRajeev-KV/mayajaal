@@ -269,12 +269,13 @@ class EvidenceService:
         metadata: dict[str, JsonValue] = {
             "subject_id": request.subject_id,
             "related_account_ids": [account.account_id for account in selected_related],
-            "returned_event_count": len(retrieved_events),
-            "total_event_count": total_event_count,
+            "aggregate_scope": "all_eligible_events",
+            "aggregate_event_count": total_event_count,
+            "detailed_retrieval_event_count": len(retrieved_events),
             "max_events_per_tool": self._config.max_events_per_tool,
-            "truncated": total_event_count > len(retrieved_events),
+            "detailed_retrieval_truncated": total_event_count > len(retrieved_events),
             "representation": "aggregate_activity_summary",
-            "event_selection": "most_recent_n_for_bounded_retrieval",
+            "detailed_retrieval_selection": "most_recent_n",
             "event_counts_by_type": event_counts_facts,
             "promotion_event_count": event_counts.get(
                 EventType.PROMOTION_REDEEMED.value, 0

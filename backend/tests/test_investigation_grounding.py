@@ -12,6 +12,7 @@ from pydantic import JsonValue
 import mayajaal.investigation.artifacts as investigation_artifacts
 from mayajaal.investigation import (
     AGENT_PROMPT_CONTRACT_VERSION,
+    EVIDENCE_CONTRACT_VERSION,
     INVESTIGATION_PROVENANCE_CONTRACT_VERSION,
     EvidenceFinding,
     EvidenceItem,
@@ -19,6 +20,8 @@ from mayajaal.investigation import (
     EvidenceLedgerSnapshot,
     EvidenceSource,
     EvidenceType,
+    GroundingFailureCode,
+    GroundingFailureDiagnostic,
     InvestigationConfig,
     InvestigationExecution,
     InvestigationGroundingError,
@@ -237,6 +240,61 @@ class InvestigationGroundingTests(unittest.TestCase):
         with self.assertRaisesRegex(InvestigationGroundingError, "TIMELINE_EVENT"):
             validate_report_grounding(timeline_altered, request(), ledger.snapshot())
 
+    def test_grounding_failure_codes_distinguish_reference_failures(self) -> None:
+        ledger, shared, timeline = self.ledger()
+        valid = self.report(shared, timeline)
+
+        with self.assertRaises(InvestigationGroundingError) as unknown_error:
+            ledger.resolve_alias("E999")
+        self.assertIs(
+            unknown_error.exception.code,
+            GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
+        )
+        with self.assertRaises(InvestigationGroundingError) as malformed_error:
+            ledger.resolve_alias("not-an-alias")
+        self.assertIs(
+            malformed_error.exception.code,
+            GroundingFailureCode.MALFORMED_EVIDENCE_REFERENCE,
+        )
+
+        wrong_timeline = valid.model_copy(
+            update={"timeline_evidence_ids": (shared.evidence_id,)}
+        )
+        with self.assertRaises(InvestigationGroundingError) as timeline_error:
+            validate_report_grounding(wrong_timeline, request(), ledger.snapshot())
+        self.assertIs(
+            timeline_error.exception.code,
+            GroundingFailureCode.WRONG_TIMELINE_EVIDENCE_TYPE,
+        )
+
+        ungrounded_related = valid.model_copy(
+            update={
+                "related_entities": (
+                    RelatedEntity(
+                        entity_id="device-1",
+                        entity_type="DEVICE",
+                        evidence_ids=("invented",),
+                    ),
+                )
+            }
+        )
+        with self.assertRaises(InvestigationGroundingError) as related_error:
+            validate_report_grounding(ungrounded_related, request(), ledger.snapshot())
+        self.assertIs(
+            related_error.exception.code,
+            GroundingFailureCode.UNGROUNDED_RELATED_ENTITY,
+        )
+
+        mismatched_request = valid.model_copy(
+            update={"request": request(decision_id="other")}
+        )
+        with self.assertRaises(InvestigationGroundingError) as request_error:
+            validate_report_grounding(mismatched_request, request(), ledger.snapshot())
+        self.assertIs(
+            request_error.exception.code,
+            GroundingFailureCode.GROUNDING_VALIDATION_FAILED,
+        )
+
     def test_related_entities_and_evidence_from_another_request_are_rejected(
         self,
     ) -> None:
@@ -273,6 +331,7 @@ class InvestigationGroundingTests(unittest.TestCase):
     ) -> None:
         self.assertEqual(INVESTIGATION_PROVENANCE_CONTRACT_VERSION, 2)
         self.assertEqual(AGENT_PROMPT_CONTRACT_VERSION, 2)
+        self.assertEqual(EVIDENCE_CONTRACT_VERSION, 2)
         ledger, shared, timeline = self.ledger()
         snapshot = ledger.snapshot()
         config = InvestigationConfig()
@@ -438,6 +497,45 @@ class InvestigationGroundingTests(unittest.TestCase):
                     InvestigationConfig(),
                     agent_model_id="fixture-model",
                 )
+
+    def test_rejected_candidate_diagnostic_is_non_authoritative_and_round_trips(
+        self,
+    ) -> None:
+        report = InvestigationReport(
+            request=request(),
+            policy_action=PolicyAction.REVIEW,
+            status=InvestigationStatus.FAILED,
+            limitations=("report grounding validation failed",),
+        )
+        diagnostic = GroundingFailureDiagnostic(
+            code=GroundingFailureCode.UNKNOWN_EVIDENCE_REFERENCE,
+            detail="evidence reference is not admitted to this investigation",
+            rejected_candidate={"status": "COMPLETED", "evidence_refs": ["E999"]},
+        )
+        execution = InvestigationExecution(
+            report=report,
+            snapshot=EvidenceLedgerSnapshot(evidence=(), tool_trace=()),
+            agent_model_id="fixture-model",
+            config=InvestigationConfig(),
+            grounding_failure=diagnostic,
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            _ = save_investigation_artifacts(output, execution)
+            loaded = load_investigation_artifacts(
+                output,
+                request(),
+                InvestigationConfig(),
+                agent_model_id="fixture-model",
+            )
+            self.assertEqual(loaded, execution)
+            provenance = json.loads(
+                (output / "investigation_provenance.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                provenance["grounding_failure"]["code"], "UNKNOWN_EVIDENCE_REFERENCE"
+            )
+            self.assertNotIn("grounding_failure", provenance["provenance"])
 
     def test_artifact_verification_has_no_agent_or_model_call_boundary(self) -> None:
         source = inspect.getsource(investigation_artifacts)

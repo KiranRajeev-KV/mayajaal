@@ -587,9 +587,12 @@ facts, a `FeatureService`, and a verified frozen model. Its narrow methods
 expose TreeSHAP raw-score drivers, an account/device/IP/payment/address
 neighbourhood, shared-identity summaries, compact related-activity aggregates,
 and a chronological high-signal case timeline. `related_activity` reports
-bounded retrieval metadata, counts by event type, promo/refund/order/payment
-signals, aggregate known order/refund amounts, participating accounts, and the
-activity window; it never repeats a detailed event list. `case_timeline` alone
+full cutoff-safe aggregate history (`aggregate_scope=all_eligible_events`),
+including counts by event type, promo/refund/order/payment signals, aggregate
+known order/refund amounts, participating accounts, and the activity window.
+Its separate `detailed_retrieval_*` fields describe the independently bounded
+recent-event retrieval used by detailed tools; they do not limit the aggregate.
+It never repeats a detailed event list. `case_timeline` alone
 shows detailed events, selecting the most recent high-signal events from the
 independently bounded retrieval set and presenting them chronologically.
 `max_events_per_tool` bounds retrieval, while
@@ -723,7 +726,11 @@ evidence reference exists in this run's ledger. Timeline references must cite
 evidence IDs. This is referential grounding, not semantic truth detection: it
 does not claim that free-form model prose is correct. Failed grounding produces
 an application-owned `FAILED` report without model claims; an empty
-`BUDGET_EXHAUSTED` report remains valid.
+`BUDGET_EXHAUSTED` report remains valid. Alias and grounding failures retain a
+closed, application-owned diagnostic code (and, when structurally valid, the
+rejected candidate) on `InvestigationExecution` for local evaluation. That
+diagnostic is explicitly non-authoritative: it is not report content and does
+not participate in `report_id`.
 
 The final trust chain is:
 
@@ -765,6 +772,11 @@ identities and request/cutoff bindings, grounding, and both IDs without another
 model call. The v2 contract deliberately rejects older investigation artifacts;
 regenerate only those artifacts after upgrading. API keys, paths, and retrieval
 timestamps are never provenance inputs or persisted.
+
+The clarified aggregate/retrieval evidence facts use evidence contract v2, so
+their canonical evidence IDs—and therefore dependent investigation/report
+artifacts—must be regenerated. This is an explicit evidence-contract change;
+model, probability, policy, and score lineage are unaffected.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

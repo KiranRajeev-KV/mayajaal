@@ -20,7 +20,9 @@ from .models import (
 if TYPE_CHECKING:
     from .ledger import EvidenceLedgerSnapshot, InvestigationToolTrace
 
-EVIDENCE_CONTRACT_VERSION = 1
+# Related-activity facts now distinguish full-history aggregates from bounded
+# detailed retrieval metadata. This changes canonical evidence semantics.
+EVIDENCE_CONTRACT_VERSION = 2
 INVESTIGATION_PROVENANCE_CONTRACT_VERSION = 2
 REPORT_PROVENANCE_CONTRACT_VERSION = 1
 AGENT_PROMPT_CONTRACT_VERSION = 2
