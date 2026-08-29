@@ -165,9 +165,9 @@ reasoning_effort = "medium"
 [investigation.triggers]
 # A stable ALLOW is skipped. Review, block, and an unstable ALLOW open a future
 # investigation unless the corresponding trigger is explicitly disabled.
-investigate_review = true
-investigate_block = true
-investigate_unstable_allow = true
+investigate_review = false
+investigate_block = false
+investigate_unstable_allow = false
 
 [synthetic_world.difficulty_profiles.easy]
 persona_weight_temperature = 0.80

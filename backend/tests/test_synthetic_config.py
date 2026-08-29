@@ -60,7 +60,9 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.investigation.max_timeline_events, 20)
         self.assertEqual(config.investigation.model_name, "gpt-5.6-terra")
         self.assertIs(config.investigation.reasoning_effort, ReasoningEffort.MEDIUM)
-        self.assertTrue(config.investigation.triggers.investigate_review)
+        self.assertFalse(config.investigation.triggers.investigate_review)
+        self.assertFalse(config.investigation.triggers.investigate_block)
+        self.assertFalse(config.investigation.triggers.investigate_unstable_allow)
 
     def test_new_distribution_and_diagnostic_knobs_are_validated(self) -> None:
         with self.assertRaises(ValueError):

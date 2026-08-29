@@ -76,7 +76,7 @@ calibration-evaluate *args:
 policy-decide *args:
     just --justfile {{backend_justfile}} policy-decide {{args}}
 
-# Run the frozen 18 live investigation-model comparison calls sequentially.
+# Run the frozen 18 live investigation-model comparison runs sequentially.
 investigation-model-comparison *args:
     just --justfile {{backend_justfile}} investigation-model-comparison {{args}}
 

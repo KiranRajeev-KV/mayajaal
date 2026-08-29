@@ -575,7 +575,9 @@ the sole business-action authority.
 for tool calls, iterations, graph traversal, related accounts, and events. The
 current pure `should_investigate(...)` rule opens a future investigation for
 `REVIEW`, `BLOCK`, and an unstable `ALLOW`; it skips a stable `ALLOW`. Each case
-is independently configurable under `[investigation.triggers]`. There is no
+is independently configurable under `[investigation.triggers]`, and the
+checked-in config.toml disables all three, so no live investigation opens until
+a trigger is enabled. There is no
 database query, model provider, report artifact, or investigation orchestration
 yet—particularly no arbitrary SQL/Cypher, shell, or web access. Any future
 implementation must be read-only, fixed-cutoff, evidence-referenced, bounded

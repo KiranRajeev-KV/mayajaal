@@ -71,7 +71,8 @@ policy-decide *args:
     uv run python -m scripts.decide_policy --config config.toml {{ args }}
 
 # Run the frozen six-case/three-model investigation comparison sequentially.
-# This intentionally makes 18 live OpenAI calls.
+# This intentionally performs 18 live investigation runs (successful runs make
+# ~2 model calls each).
 investigation-model-comparison *args:
     uv run python -m scripts.run_investigation_model_comparison --config config.toml {{ args }}
 
