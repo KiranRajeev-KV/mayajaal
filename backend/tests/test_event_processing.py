@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from mayajaal.api.db import (
     Base,
     NormalizedEventRepository,
+    WebhookClaimUnavailable,
     WebhookEventRepository,
 )
 from mayajaal.api.event_processing import (
@@ -157,6 +158,55 @@ class EventProcessingTests(TestCase):
             (first.provider_event_id, second.provider_event_id),
             ("evt_first", "evt_second"),
         )
+
+    def test_stale_worker_cannot_finalize_reclaimed_event(self) -> None:
+        old_claim, new_claim = self._reclaim("evt_fenced")
+        with self.sessions.begin() as session:
+            repository = WebhookEventRepository(session)
+            with self.assertRaises(WebhookClaimUnavailable):
+                repository.mark_processed(
+                    "evt_fenced",
+                    expected_claimed_at=old_claim,
+                    processed_at=datetime.now(tz=UTC),
+                )
+            with self.assertRaises(WebhookClaimUnavailable):
+                repository.mark_failed(
+                    "evt_fenced",
+                    expected_claimed_at=old_claim,
+                    detail="stale failure",
+                )
+            repository.mark_processed(
+                "evt_fenced",
+                expected_claimed_at=new_claim,
+                processed_at=datetime.now(tz=UTC),
+            )
+        with self.sessions() as session:
+            record = WebhookEventRepository(session).get("evt_fenced")
+        assert record is not None
+        self.assertEqual(record.status, WebhookProcessingStatus.PROCESSED.value)
+
+    def _reclaim(self, event_id: str) -> tuple[datetime, datetime]:
+        self._accept(
+            event_id,
+            "mayajaal.device.seen",
+            {"account_id": ACCOUNT, "device_id": DEVICE},
+        )
+        new_claim = datetime.now(tz=UTC)
+        old_claim = new_claim - timedelta(minutes=10)
+        with self.sessions.begin() as session:
+            repository = WebhookEventRepository(session)
+            repository.claim(
+                event_id,
+                claimed_at=old_claim,
+                lease_timeout=timedelta(minutes=5),
+            )
+        with self.sessions.begin() as session:
+            WebhookEventRepository(session).claim(
+                event_id,
+                claimed_at=new_claim,
+                lease_timeout=timedelta(minutes=5),
+            )
+        return old_claim, new_claim
 
     def _accept(self, event_id: str, event_type: str, fixture: dict[str, str]) -> None:
         envelope = RazorpayWebhookEnvelope.model_validate(

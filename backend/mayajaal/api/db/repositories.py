@@ -537,20 +537,63 @@ class WebhookEventRepository:
         record.failure_detail = None
         return record
 
-    def mark_processed(self, provider_event_id: str, *, processed_at: datetime) -> None:
-        record = self._require(provider_event_id)
-        if record.status not in {"PROCESSING", "PROCESSED"}:
-            raise WebhookClaimUnavailable("webhook event is not being processed")
-        record.status = "PROCESSED"
-        record.processed_at = processed_at
-        record.failure_detail = None
+    def mark_processed(
+        self,
+        provider_event_id: str,
+        *,
+        expected_claimed_at: datetime,
+        processed_at: datetime,
+    ) -> None:
+        """Finalize only the exact ``PROCESSING`` claim that owns the row."""
+        self._finalize_claim(
+            provider_event_id,
+            expected_claimed_at=expected_claimed_at,
+            values={
+                "status": "PROCESSED",
+                "processed_at": processed_at,
+                "failure_detail": None,
+            },
+        )
 
-    def mark_failed(self, provider_event_id: str, *, detail: str) -> None:
-        record = self._require(provider_event_id)
-        if record.status != "PROCESSING":
-            raise WebhookClaimUnavailable("webhook event is not being processed")
-        record.status = "FAILED"
-        record.failure_detail = detail[:1000]
+    def mark_failed(
+        self,
+        provider_event_id: str,
+        *,
+        expected_claimed_at: datetime,
+        detail: str,
+    ) -> None:
+        """Record failure only if this processor still owns its claim."""
+        self._finalize_claim(
+            provider_event_id,
+            expected_claimed_at=expected_claimed_at,
+            values={
+                "status": "FAILED",
+                "failure_detail": detail[:1000],
+            },
+        )
+
+    def _finalize_claim(
+        self,
+        provider_event_id: str,
+        *,
+        expected_claimed_at: datetime,
+        values: dict[str, object],
+    ) -> None:
+        if expected_claimed_at.tzinfo is None:
+            raise ValueError("expected_claimed_at must be timezone-aware")
+        result = self._session.execute(
+            update(WebhookEventRecord)
+            .where(
+                WebhookEventRecord.provider_event_id == provider_event_id,
+                WebhookEventRecord.status == "PROCESSING",
+                WebhookEventRecord.claimed_at == expected_claimed_at,
+            )
+            .values(**values)
+        )
+        if result.rowcount != 1:  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            raise WebhookClaimUnavailable(
+                "webhook event claim is no longer owned by this processor"
+            )
 
     def _require(self, provider_event_id: str) -> WebhookEventRecord:
         record = self.get(provider_event_id)

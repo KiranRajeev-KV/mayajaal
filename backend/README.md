@@ -181,7 +181,9 @@ event is safe because event-backed Neo4j relationships merge on `event_id`.
 An active `PROCESSING` row cannot be claimed by another processor; expired
 claims are atomically reclaimed with a refreshed timestamp. Batch selection
 uses PostgreSQL `FOR UPDATE SKIP LOCKED`, while the claim predicate remains
-atomic. Each incremental projection's node and relationship `MERGE` statements
+atomic. The exact `claimed_at` value is also a claim-fencing token: only the
+worker that still owns that `PROCESSING` claim can mark it `PROCESSED` or
+`FAILED`, so a stale worker cannot overwrite a later reclaim. Each incremental projection's node and relationship `MERGE` statements
 run in one Neo4j managed write transaction; the transaction function consumes
 all results and remains safe if the driver retries it. There is no clear or
 full graph reload. Stage 12B still does not extract

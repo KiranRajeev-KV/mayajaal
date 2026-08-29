@@ -182,6 +182,7 @@ class WebhookEventProcessor:
                 claimed_at=datetime.now(tz=UTC),
                 lease_timeout=self._processing_lease_timeout,
             )
+            claim_token = _claim_token(record)
             try:
                 event = self._normalizer.normalize(record)
                 NormalizedEventRepository(session).persist(
@@ -189,7 +190,9 @@ class WebhookEventProcessor:
                 )
             except Exception as error:
                 WebhookEventRepository(session).mark_failed(
-                    provider_event_id, detail=_failure_detail(error)
+                    provider_event_id,
+                    expected_claimed_at=claim_token,
+                    detail=_failure_detail(error),
                 )
                 return ProcessedWebhookEvent(
                     provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
@@ -200,7 +203,9 @@ class WebhookEventProcessor:
         except Exception as error:
             with self._sessions.begin() as session:
                 WebhookEventRepository(session).mark_failed(
-                    provider_event_id, detail=_failure_detail(error)
+                    provider_event_id,
+                    expected_claimed_at=claim_token,
+                    detail=_failure_detail(error),
                 )
             return ProcessedWebhookEvent(
                 provider_event_id,
@@ -212,7 +217,9 @@ class WebhookEventProcessor:
             )
         with self._sessions.begin() as session:
             WebhookEventRepository(session).mark_processed(
-                provider_event_id, processed_at=datetime.now(tz=UTC)
+                provider_event_id,
+                expected_claimed_at=claim_token,
+                processed_at=datetime.now(tz=UTC),
             )
         return _result(provider_event_id, event, report)
 
@@ -227,7 +234,11 @@ class WebhookEventProcessor:
             if claimed is None:
                 break
             try:
-                results.append(self._process_claimed(claimed.provider_event_id))
+                results.append(
+                    self._process_claimed(
+                        claimed.provider_event_id, _claim_token(claimed)
+                    )
+                )
             except WebhookClaimUnavailable:
                 # A processor may have recovered or completed it after its lease.
                 continue
@@ -239,13 +250,17 @@ class WebhookEventProcessor:
         report = self._graph.load_incremental(build_incremental_graph_projection(event))
         return _result(record.provider_event_id, event, report)
 
-    def _process_claimed(self, provider_event_id: str) -> ProcessedWebhookEvent:
+    def _process_claimed(
+        self, provider_event_id: str, claim_token: datetime
+    ) -> ProcessedWebhookEvent:
         """Finish one row already atomically moved to ``PROCESSING``."""
         with self._sessions.begin() as session:
             record = WebhookEventRepository(session).get(provider_event_id)
             if (
                 record is None
                 or record.status != WebhookProcessingStatus.PROCESSING.value
+                or record.claimed_at is None
+                or _aware(record.claimed_at) != claim_token
             ):
                 raise WebhookClaimUnavailable(
                     "webhook event is no longer claimed by this processor"
@@ -257,7 +272,9 @@ class WebhookEventProcessor:
                 )
             except Exception as error:
                 WebhookEventRepository(session).mark_failed(
-                    provider_event_id, detail=_failure_detail(error)
+                    provider_event_id,
+                    expected_claimed_at=claim_token,
+                    detail=_failure_detail(error),
                 )
                 return ProcessedWebhookEvent(
                     provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
@@ -268,7 +285,9 @@ class WebhookEventProcessor:
         except Exception as error:
             with self._sessions.begin() as session:
                 WebhookEventRepository(session).mark_failed(
-                    provider_event_id, detail=_failure_detail(error)
+                    provider_event_id,
+                    expected_claimed_at=claim_token,
+                    detail=_failure_detail(error),
                 )
             return ProcessedWebhookEvent(
                 provider_event_id,
@@ -280,7 +299,9 @@ class WebhookEventProcessor:
             )
         with self._sessions.begin() as session:
             WebhookEventRepository(session).mark_processed(
-                provider_event_id, processed_at=datetime.now(tz=UTC)
+                provider_event_id,
+                expected_claimed_at=claim_token,
+                processed_at=datetime.now(tz=UTC),
             )
         return _result(provider_event_id, event, report)
 
@@ -300,6 +321,12 @@ def _result(
 
 def _failure_detail(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"[:1000]
+
+
+def _claim_token(record: WebhookEventRecord) -> datetime:
+    if record.claimed_at is None:
+        raise RuntimeError("claimed webhook event has no claim token")
+    return _aware(record.claimed_at)
 
 
 def _aware(value: datetime) -> datetime:
