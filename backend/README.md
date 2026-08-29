@@ -36,6 +36,55 @@ the only targeted deptry unused-dependency exceptions. CatBoost and SHAP are
 direct baseline dependencies. Production tooling lives in the `dev` dependency
 group.
 
+## Operational PostgreSQL foundation
+
+Stage 11A adds only the synchronous operational database foundation in
+`mayajaal.api.db`; it deliberately creates no business tables, repositories,
+routes, ingestion, or realtime workers. Future operational ORM models will
+inherit the single `Base` metadata root and receive sessions from the
+application-owned `DatabaseRuntime`.
+
+Mayajaal keeps its storage responsibilities separate:
+
+```text
+PostgreSQL  operational application state
+Neo4j       derived identity / temporal graph
+Parquet     deterministic synthetic + ML benchmark artifacts
+```
+
+PostgreSQL is therefore not a second copy of the temporal graph and does not
+yet persist scores, cases, events, or investigation records. Those operational
+tables and repositories arrive in Stage 11B.
+
+The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
+required application setting is the secret-bearing environment variable
+`MAYAJAAL_DATABASE_URL`, using an explicit
+`postgresql+psycopg://user:password@host:port/database` URL. It is deliberately
+not read from `config.toml` or `alembic.ini`. Copy [`.env.example`](.env.example)
+to the gitignored `.env`, then export it before database commands:
+
+```bash
+cp .env.example .env
+set -a; source .env; set +a
+
+just db-up       # start only PostgreSQL, exposed as localhost:5433
+just db-ping     # SQLAlchemy connection + SELECT 1
+just db-current  # inspect Alembic revision state
+just db-migrate  # upgrade to Alembic head
+just db-down     # stop only PostgreSQL; the named volume remains
+```
+
+`compose.yml` supplies local-only defaults for the PostgreSQL image; environment
+variables override its database/user/password settings. Never commit the
+resulting `.env` or use those local development values outside a local setup.
+
+Alembic lives in `backend/alembic/` and imports the same `Base.metadata` and
+`DatabaseConfig` as the application. There is intentionally no initial empty
+revision: with no operational tables yet, `alembic current` and `alembic upgrade
+head` validate wiring without inventing a baseline schema. Create the first
+revision alongside the real Stage 11B ORM model(s), then use
+`uv run alembic revision --autogenerate -m "..."` from `backend/`.
+
 ## Synthetic fraud world
 
 `mayajaal.synthetic` generates deterministic, validated temporal histories from

@@ -47,6 +47,17 @@ neo4j-load config="config.toml":
 neo4j-reset:
     uv run python -m scripts.reset_neo4j
 
+# PostgreSQL operational-storage foundation. Set MAYAJAAL_DATABASE_URL in the
+# shell (for example: `set -a; source .env; set +a`) before running these.
+db-migrate:
+    uv run alembic upgrade head
+
+db-current:
+    uv run alembic current
+
+db-ping:
+    uv run python -m scripts.db_ping
+
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
     uv run python -m scripts.extract_features --config {{ config }}

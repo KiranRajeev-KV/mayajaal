@@ -51,6 +51,22 @@ docker-logs service="":
 neo4j-up:
     docker compose up -d neo4j
 
+# Start or stop only the local operational PostgreSQL service.
+db-up:
+    docker compose up -d postgres
+
+db-down:
+    docker compose stop postgres
+
+db-migrate:
+    just --justfile {{backend_justfile}} db-migrate
+
+db-current:
+    just --justfile {{backend_justfile}} db-current
+
+db-ping:
+    just --justfile {{backend_justfile}} db-ping
+
 neo4j-load config="config.toml":
     just --justfile {{backend_justfile}} neo4j-load {{config}}
 
