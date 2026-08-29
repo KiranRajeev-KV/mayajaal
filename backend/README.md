@@ -156,7 +156,8 @@ SQLAlchemy/psycopg persistence to FastAPI's worker threadpool; the application
 otherwise remains synchronous SQLAlchemy.
 
 Stage 12A stops at `RECEIVED`. Stage 12B is an explicit CLI operation: it
-claims one `RECEIVED`/`FAILED` delivery, supports only the named synthetic
+claims one `RECEIVED`/`FAILED` delivery (or an abandoned `PROCESSING` claim
+whose five-minute lease has expired), supports only the named synthetic
 fixtures `mayajaal.account.created`, `mayajaal.device.seen`,
 `mayajaal.ip.seen`, and `mayajaal.payment.attached`, and stores a validated
 canonical `Event` in `normalized_events`. `payload.mayajaal` contains local
@@ -177,7 +178,13 @@ RECEIVED → normalized canonical Event → idempotent Neo4j MERGE → PROCESSED
 PostgreSQL and Neo4j are intentionally not a distributed transaction. A failed
 row retains bounded diagnostic text and is retryable; reapplying a canonical
 event is safe because event-backed Neo4j relationships merge on `event_id`.
-There is no clear or full graph reload. Stage 12B still does not extract
+An active `PROCESSING` row cannot be claimed by another processor; expired
+claims are atomically reclaimed with a refreshed timestamp. Batch selection
+uses PostgreSQL `FOR UPDATE SKIP LOCKED`, while the claim predicate remains
+atomic. Each incremental projection's node and relationship `MERGE` statements
+run in one Neo4j managed write transaction; the transaction function consumes
+all results and remains safe if the driver retries it. There is no clear or
+full graph reload. Stage 12B still does not extract
 features, score, calibrate, decide policy, create cases, or investigate.
 
 The input shape is **Razorpay-compatible/Razorpay-shaped synthetic local input**;

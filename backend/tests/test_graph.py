@@ -55,9 +55,27 @@ class _Result:
         return iter(())
 
 
+class _Transaction:
+    def __init__(self, driver: "_Driver") -> None:
+        self._driver = driver
+        self._calls: list[tuple[Query | str, dict[str, Any]]] = []
+
+    def run(self, query: Query | str, **parameters: Any) -> _Result:
+        if (
+            self._driver.fail_managed_run_at is not None
+            and len(self._calls) + 1 == self._driver.fail_managed_run_at
+        ):
+            raise RuntimeError("simulated managed transaction failure")
+        self._calls.append((query, parameters))
+        return _Result()
+
+    def commit(self) -> None:
+        self._driver.managed_calls.extend(self._calls)
+
+
 class _Session:
-    def __init__(self, calls: list[tuple[Query | str, dict[str, Any]]]) -> None:
-        self.calls = calls
+    def __init__(self, driver: "_Driver") -> None:
+        self._driver = driver
 
     def __enter__(self) -> "_Session":
         return self
@@ -66,19 +84,28 @@ class _Session:
         return None
 
     def run(self, query: Query | str, **parameters: Any) -> _Result:
-        self.calls.append((query, parameters))
+        self._driver.calls.append((query, parameters))
         return _Result()
+
+    def execute_write(self, function: Any, *arguments: Any) -> None:
+        self._driver.managed_write_count += 1
+        transaction = _Transaction(self._driver)
+        function(transaction, *arguments)
+        transaction.commit()
 
 
 class _Driver:
     def __init__(self) -> None:
         self.calls: list[tuple[Query | str, dict[str, Any]]] = []
+        self.managed_calls: list[tuple[Query | str, dict[str, Any]]] = []
+        self.managed_write_count = 0
+        self.fail_managed_run_at: int | None = None
 
     def close(self) -> None:
         return None
 
     def session(self, **_: object) -> _Session:
-        return _Session(self.calls)
+        return _Session(self)
 
 
 class GraphProjectionTests(unittest.TestCase):
@@ -240,6 +267,50 @@ class GraphProjectionTests(unittest.TestCase):
         self.assertTrue(
             any("relationship.event_type" in query for query in merge_queries)
         )
+
+    def test_incremental_projection_is_one_atomic_managed_write(self) -> None:
+        _, _, graph = projection()
+        driver = _Driver()
+        repository = Neo4jGraphRepository(
+            "bolt://unused",
+            ("unused", "unused"),
+            driver=driver,  # type: ignore[arg-type]
+        )
+        repository.load_incremental(graph)
+        self.assertEqual(driver.managed_write_count, 1)
+        self.assertGreater(len(driver.managed_calls), 1)
+
+        failed_driver = _Driver()
+        failed_driver.fail_managed_run_at = 2
+        failed_repository = Neo4jGraphRepository(
+            "bolt://unused",
+            ("unused", "unused"),
+            driver=failed_driver,  # type: ignore[arg-type]
+        )
+        with self.assertRaisesRegex(RuntimeError, "managed transaction failure"):
+            failed_repository.load_incremental(graph)
+        self.assertEqual(failed_driver.managed_calls, [])
+
+    def test_incremental_retry_submits_the_same_event_merges(self) -> None:
+        _, _, graph = projection()
+        driver = _Driver()
+        repository = Neo4jGraphRepository(
+            "bolt://unused",
+            ("unused", "unused"),
+            driver=driver,  # type: ignore[arg-type]
+        )
+        repository.load_incremental(graph)
+        first = tuple(
+            (query.text if isinstance(query, Query) else query, parameters)
+            for query, parameters in driver.managed_calls
+        )
+        repository.load_incremental(graph)
+        retried = tuple(
+            (query.text if isinstance(query, Query) else query, parameters)
+            for query, parameters in driver.managed_calls
+        )
+        self.assertEqual(retried, first + first)
+        self.assertTrue(any("{event_id: row.event_id}" in query for query, _ in first))
 
 
 if __name__ == "__main__":

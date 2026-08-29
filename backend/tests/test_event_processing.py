@@ -1,13 +1,20 @@
 """High-value contracts for durable normalization and one-event graph writes."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest import TestCase
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from mayajaal.api.db import Base, NormalizedEventRepository, WebhookEventRepository
-from mayajaal.api.event_processing import RazorpayEventNormalizer, WebhookEventProcessor
+from mayajaal.api.db import (
+    Base,
+    NormalizedEventRepository,
+    WebhookEventRepository,
+)
+from mayajaal.api.event_processing import (
+    RazorpayEventNormalizer,
+    WebhookEventProcessor,
+)
 from mayajaal.api.webhooks import (
     RazorpayWebhookEnvelope,
     WebhookInboxService,
@@ -30,7 +37,7 @@ class _Graph:
         self.fail = fail
         self.projections: list[GraphProjection] = []
 
-    def load(self, projection: object) -> GraphLoadReport:
+    def load_incremental(self, projection: object) -> GraphLoadReport:
         if not isinstance(projection, GraphProjection):
             raise TypeError("expected graph projection")
         if self.fail:
@@ -101,6 +108,55 @@ class EventProcessingTests(TestCase):
             event = RazorpayEventNormalizer().normalize(record)
         projection = build_incremental_graph_projection(event)
         self.assertEqual(projection.relationships[0].event_time, event.occurred_at)
+
+    def test_processing_lease_reclaims_only_abandoned_work(self) -> None:
+        self._accept(
+            "evt_active",
+            "mayajaal.device.seen",
+            {"account_id": ACCOUNT, "device_id": DEVICE},
+        )
+        claimed_at = datetime.now(tz=UTC)
+        with self.sessions.begin() as session:
+            repository = WebhookEventRepository(session)
+            repository.claim(
+                "evt_active",
+                claimed_at=claimed_at,
+                lease_timeout=timedelta(minutes=5),
+            )
+        active_processor = WebhookEventProcessor(
+            self.sessions,
+            _Graph(),
+            processing_lease_timeout=timedelta(minutes=5),
+        )
+        self.assertEqual(active_processor.process_next(limit=1), ())
+        with self.sessions.begin() as session:
+            record = WebhookEventRepository(session).get("evt_active")
+            assert record is not None
+            record.claimed_at = datetime(2020, 1, 1, tzinfo=UTC)
+        recovered = active_processor.process_next(limit=1)
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0].status, WebhookProcessingStatus.PROCESSED)
+
+    def test_next_claims_are_distinct_for_competing_processors(self) -> None:
+        for event_id in ("evt_first", "evt_second"):
+            self._accept(
+                event_id,
+                "mayajaal.device.seen",
+                {"account_id": ACCOUNT, "device_id": DEVICE},
+            )
+        with self.sessions.begin() as session:
+            first = WebhookEventRepository(session).claim_next(
+                claimed_at=datetime.now(tz=UTC), lease_timeout=timedelta(minutes=5)
+            )
+        with self.sessions.begin() as session:
+            second = WebhookEventRepository(session).claim_next(
+                claimed_at=datetime.now(tz=UTC), lease_timeout=timedelta(minutes=5)
+            )
+        assert first is not None and second is not None
+        self.assertEqual(
+            (first.provider_event_id, second.provider_event_id),
+            ("evt_first", "evt_second"),
+        )
 
     def _accept(self, event_id: str, event_type: str, fixture: dict[str, str]) -> None:
         envelope = RazorpayWebhookEnvelope.model_validate(

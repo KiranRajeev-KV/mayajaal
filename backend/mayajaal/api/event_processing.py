@@ -1,7 +1,7 @@
 """Durable webhook normalization and incremental, idempotent graph projection."""
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from os import environ
 from typing import ClassVar, Protocol, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -29,6 +29,7 @@ NEO4J_URI_ENVIRONMENT_VARIABLE = "MAYAJAAL_NEO4J_URI"
 NEO4J_USERNAME_ENVIRONMENT_VARIABLE = "MAYAJAAL_NEO4J_USERNAME"
 NEO4J_PASSWORD_ENVIRONMENT_VARIABLE = "MAYAJAAL_NEO4J_PASSWORD"
 _EVENT_NAMESPACE = NAMESPACE_URL
+DEFAULT_PROCESSING_LEASE_TIMEOUT = timedelta(minutes=5)
 
 
 class Neo4jRuntimeConfig(SchemaModel):
@@ -67,7 +68,7 @@ class UnsupportedProviderEvent(ValueError):
 class IncrementalGraphWriter(Protocol):
     """The narrow idempotent graph-write boundary used by the processor."""
 
-    def load(self, projection: object) -> GraphLoadReport: ...
+    def load_incremental(self, projection: object) -> GraphLoadReport: ...
 
 
 class RazorpayEventNormalizer:
@@ -152,10 +153,14 @@ class WebhookEventProcessor:
         graph_repository: IncrementalGraphWriter,
         *,
         normalizer: RazorpayEventNormalizer | None = None,
+        processing_lease_timeout: timedelta = DEFAULT_PROCESSING_LEASE_TIMEOUT,
     ) -> None:
+        if processing_lease_timeout <= timedelta(0):
+            raise ValueError("processing lease timeout must be positive")
         self._sessions = session_factory
         self._graph = graph_repository
         self._normalizer = normalizer or RazorpayEventNormalizer()
+        self._processing_lease_timeout = processing_lease_timeout
 
     def process(self, provider_event_id: str) -> ProcessedWebhookEvent:
         with self._sessions() as session:
@@ -173,7 +178,9 @@ class WebhookEventProcessor:
                 return self._project_existing(record, event)
         with self._sessions.begin() as session:
             record = WebhookEventRepository(session).claim(
-                provider_event_id, claimed_at=datetime.now(tz=UTC)
+                provider_event_id,
+                claimed_at=datetime.now(tz=UTC),
+                lease_timeout=self._processing_lease_timeout,
             )
             try:
                 event = self._normalizer.normalize(record)
@@ -189,7 +196,7 @@ class WebhookEventProcessor:
                 )
         try:
             projection = build_incremental_graph_projection(event)
-            report = self._graph.load(projection)
+            report = self._graph.load_incremental(projection)
         except Exception as error:
             with self._sessions.begin() as session:
                 WebhookEventRepository(session).mark_failed(
@@ -210,22 +217,72 @@ class WebhookEventProcessor:
         return _result(provider_event_id, event, report)
 
     def process_next(self, *, limit: int) -> tuple[ProcessedWebhookEvent, ...]:
-        with self._sessions() as session:
-            provider_event_ids = WebhookEventRepository(session).ready_ids(limit=limit)
         results: list[ProcessedWebhookEvent] = []
-        for provider_event_id in provider_event_ids:
+        for _ in range(limit):
+            with self._sessions.begin() as session:
+                claimed = WebhookEventRepository(session).claim_next(
+                    claimed_at=datetime.now(tz=UTC),
+                    lease_timeout=self._processing_lease_timeout,
+                )
+            if claimed is None:
+                break
             try:
-                results.append(self.process(provider_event_id))
+                results.append(self._process_claimed(claimed.provider_event_id))
             except WebhookClaimUnavailable:
-                # Another processor claimed it after the bounded snapshot.
+                # A processor may have recovered or completed it after its lease.
                 continue
         return tuple(results)
 
     def _project_existing(
         self, record: WebhookEventRecord, event: Event
     ) -> ProcessedWebhookEvent:
-        report = self._graph.load(build_incremental_graph_projection(event))
+        report = self._graph.load_incremental(build_incremental_graph_projection(event))
         return _result(record.provider_event_id, event, report)
+
+    def _process_claimed(self, provider_event_id: str) -> ProcessedWebhookEvent:
+        """Finish one row already atomically moved to ``PROCESSING``."""
+        with self._sessions.begin() as session:
+            record = WebhookEventRepository(session).get(provider_event_id)
+            if (
+                record is None
+                or record.status != WebhookProcessingStatus.PROCESSING.value
+            ):
+                raise WebhookClaimUnavailable(
+                    "webhook event is no longer claimed by this processor"
+                )
+            try:
+                event = self._normalizer.normalize(record)
+                NormalizedEventRepository(session).persist(
+                    provider_event_id=provider_event_id, event=event
+                )
+            except Exception as error:
+                WebhookEventRepository(session).mark_failed(
+                    provider_event_id, detail=_failure_detail(error)
+                )
+                return ProcessedWebhookEvent(
+                    provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
+                )
+        try:
+            projection = build_incremental_graph_projection(event)
+            report = self._graph.load_incremental(projection)
+        except Exception as error:
+            with self._sessions.begin() as session:
+                WebhookEventRepository(session).mark_failed(
+                    provider_event_id, detail=_failure_detail(error)
+                )
+            return ProcessedWebhookEvent(
+                provider_event_id,
+                WebhookProcessingStatus.FAILED,
+                str(event.id),
+                event.event_type,
+                0,
+                0,
+            )
+        with self._sessions.begin() as session:
+            WebhookEventRepository(session).mark_processed(
+                provider_event_id, processed_at=datetime.now(tz=UTC)
+            )
+        return _result(provider_event_id, event, report)
 
 
 def _result(

@@ -1,10 +1,10 @@
 """Small session-owned repositories for immutable operational lineage."""
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import cast
 
-from sqlalchemy import Select, select, update
+from sqlalchemy import Select, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -490,14 +490,19 @@ class WebhookEventRepository:
         return record, True
 
     def claim(
-        self, provider_event_id: str, *, claimed_at: datetime
+        self,
+        provider_event_id: str,
+        *,
+        claimed_at: datetime,
+        lease_timeout: timedelta,
     ) -> WebhookEventRecord:
-        """Atomically claim a received or failed delivery for one processor."""
+        """Atomically claim an available or abandoned delivery for one processor."""
+        lease_expires_at = _lease_expires_at(claimed_at, lease_timeout)
         result = self._session.execute(
             update(WebhookEventRecord)
             .where(
                 WebhookEventRecord.provider_event_id == provider_event_id,
-                WebhookEventRecord.status.in_(("RECEIVED", "FAILED")),
+                _claimable_webhook_condition(lease_expires_at),
             )
             .values(status="PROCESSING", claimed_at=claimed_at, failure_detail=None)
         )
@@ -510,11 +515,14 @@ class WebhookEventRepository:
             raise RuntimeError("claimed webhook event disappeared")
         return record
 
-    def claim_next(self, *, claimed_at: datetime) -> WebhookEventRecord | None:
-        """Claim the oldest ready row with ``SKIP LOCKED`` for concurrent workers."""
+    def claim_next(
+        self, *, claimed_at: datetime, lease_timeout: timedelta
+    ) -> WebhookEventRecord | None:
+        """Claim the oldest available row with ``SKIP LOCKED`` for concurrent workers."""
+        lease_expires_at = _lease_expires_at(claimed_at, lease_timeout)
         record = self._session.scalar(
             select(WebhookEventRecord)
-            .where(WebhookEventRecord.status.in_(("RECEIVED", "FAILED")))
+            .where(_claimable_webhook_condition(lease_expires_at))
             .order_by(
                 WebhookEventRecord.received_at.asc(),
                 WebhookEventRecord.provider_event_id.asc(),
@@ -568,12 +576,15 @@ class WebhookEventRepository:
             )
         )
 
-    def ready_ids(self, *, limit: int) -> tuple[str, ...]:
+    def ready_ids(
+        self, *, limit: int, now: datetime, lease_timeout: timedelta
+    ) -> tuple[str, ...]:
         """Return a deterministic bounded snapshot; ``claim`` remains atomic."""
+        lease_expires_at = _lease_expires_at(now, lease_timeout)
         return tuple(
             self._session.scalars(
                 select(WebhookEventRecord.provider_event_id)
-                .where(WebhookEventRecord.status.in_(("RECEIVED", "FAILED")))
+                .where(_claimable_webhook_condition(lease_expires_at))
                 .order_by(
                     WebhookEventRecord.received_at.asc(),
                     WebhookEventRecord.provider_event_id.asc(),
@@ -581,6 +592,25 @@ class WebhookEventRepository:
                 .limit(_bounded_limit(limit))
             )
         )
+
+
+def _lease_expires_at(claimed_at: datetime, lease_timeout: timedelta) -> datetime:
+    if claimed_at.tzinfo is None:
+        raise ValueError("claimed_at must be timezone-aware")
+    if lease_timeout <= timedelta(0):
+        raise ValueError("processing lease timeout must be positive")
+    return claimed_at - lease_timeout
+
+
+def _claimable_webhook_condition(lease_expires_at: datetime):  # type: ignore[no-untyped-def]
+    """SQL predicate shared by direct and ``SKIP LOCKED`` claim paths."""
+    return or_(
+        WebhookEventRecord.status.in_(("RECEIVED", "FAILED")),
+        (
+            (WebhookEventRecord.status == "PROCESSING")
+            & (WebhookEventRecord.claimed_at < lease_expires_at)
+        ),
+    )
 
 
 class NormalizedEventRepository:

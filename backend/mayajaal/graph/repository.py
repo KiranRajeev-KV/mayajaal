@@ -5,7 +5,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, LiteralString, cast
 
-from neo4j import Driver, GraphDatabase, Query
+from neo4j import (
+    Driver,
+    GraphDatabase,
+    ManagedTransaction,
+    Query,
+)
+from neo4j import (
+    Session as Neo4jSession,
+)
 
 from .cypher import (
     CLEAR_DERIVED_GRAPH,
@@ -76,46 +84,30 @@ class Neo4jGraphRepository:
     def load(self, projection: GraphProjection) -> GraphLoadReport:
         """Idempotently merge canonical nodes and event-backed relationships."""
         self.ensure_schema()
-        nodes_by_type: defaultdict[GraphNodeType, list[dict[str, Any]]] = defaultdict(
-            list
-        )
-        for node in projection.nodes:
-            nodes_by_type[node.node_type].append(
-                {"canonical_id": node.canonical_id, "properties": node.properties}
-            )
-
-        relationships_by_type: defaultdict[
-            tuple[GraphRelationshipType, GraphNodeType, GraphNodeType],
-            list[dict[str, Any]],
-        ] = defaultdict(list)
-        for relationship in projection.relationships:
-            relationships_by_type[
-                (
-                    relationship.relationship_type,
-                    relationship.source_type,
-                    relationship.target_type,
-                )
-            ].append(_relationship_row(relationship))
+        nodes_by_type, relationships_by_type = _projection_batches(projection)
 
         with self.driver.session(database=self.database) as session:  # type: ignore[reportUnknownMemberType]
-            for node_type in sorted(nodes_by_type):
-                session.run(
-                    Query(merge_nodes_query(node_type)),  # type: ignore[reportArgumentType]
-                    rows=nodes_by_type[node_type],
-                ).consume()
-            for key in sorted(relationships_by_type):
-                relationship_type, source_type, target_type = key
-                session.run(
-                    Query(
-                        cast(
-                            LiteralString,
-                            merge_relationships_query(
-                                relationship_type, source_type, target_type
-                            ),
-                        )
-                    ),
-                    rows=relationships_by_type[key],
-                ).consume()
+            _merge_batch_projection(session, nodes_by_type, relationships_by_type)
+        return GraphLoadReport(
+            node_count=len(projection.nodes),
+            relationship_count=len(projection.relationships),
+        )
+
+    def load_incremental(self, projection: GraphProjection) -> GraphLoadReport:
+        """Merge one event projection in one idempotent managed transaction.
+
+        Neo4j managed transaction functions may retry, so every statement uses
+        the existing canonical-ID/event-ID ``MERGE`` semantics and consumes its
+        result before the function returns.
+        """
+        self.ensure_schema()
+        nodes_by_type, relationships_by_type = _projection_batches(projection)
+        with self.driver.session(database=self.database) as session:  # type: ignore[reportUnknownMemberType]
+            session.execute_write(
+                _merge_incremental_projection,
+                nodes_by_type,
+                relationships_by_type,
+            )
         return GraphLoadReport(
             node_count=len(projection.nodes),
             relationship_count=len(projection.relationships),
@@ -158,3 +150,77 @@ def _relationship_row(relationship: GraphRelationship) -> dict[str, Any]:
         "event_type": relationship.event_type,
         "event_time": relationship.event_time,
     }
+
+
+type _NodeBatches = defaultdict[GraphNodeType, list[dict[str, Any]]]
+type _RelationshipKey = tuple[GraphRelationshipType, GraphNodeType, GraphNodeType]
+type _RelationshipBatches = defaultdict[_RelationshipKey, list[dict[str, Any]]]
+
+
+def _projection_batches(
+    projection: GraphProjection,
+) -> tuple[_NodeBatches, _RelationshipBatches]:
+    nodes_by_type: _NodeBatches = defaultdict(list)
+    for node in projection.nodes:
+        nodes_by_type[node.node_type].append(
+            {"canonical_id": node.canonical_id, "properties": node.properties}
+        )
+
+    relationships_by_type: _RelationshipBatches = defaultdict(list)
+    for relationship in projection.relationships:
+        relationships_by_type[
+            (
+                relationship.relationship_type,
+                relationship.source_type,
+                relationship.target_type,
+            )
+        ].append(_relationship_row(relationship))
+    return nodes_by_type, relationships_by_type
+
+
+def _merge_batch_projection(
+    session: Neo4jSession,
+    nodes_by_type: _NodeBatches,
+    relationships_by_type: _RelationshipBatches,
+) -> None:
+    """Preserve the batch loader's established auto-commit behavior."""
+    for node_type in sorted(nodes_by_type):
+        session.run(
+            Query(merge_nodes_query(node_type)),  # type: ignore[reportArgumentType]
+            rows=nodes_by_type[node_type],
+        ).consume()
+    for key in sorted(relationships_by_type):
+        relationship_type, source_type, target_type = key
+        session.run(
+            Query(
+                cast(
+                    LiteralString,
+                    merge_relationships_query(
+                        relationship_type, source_type, target_type
+                    ),
+                )
+            ),
+            rows=relationships_by_type[key],
+        ).consume()
+
+
+def _merge_incremental_projection(
+    transaction: ManagedTransaction,
+    nodes_by_type: _NodeBatches,
+    relationships_by_type: _RelationshipBatches,
+) -> None:
+    """Run all projection mutations within the supplied write boundary."""
+    for node_type in sorted(nodes_by_type):
+        transaction.run(
+            cast(LiteralString, merge_nodes_query(node_type)),
+            rows=nodes_by_type[node_type],
+        ).consume()
+    for key in sorted(relationships_by_type):
+        relationship_type, source_type, target_type = key
+        transaction.run(
+            cast(
+                LiteralString,
+                merge_relationships_query(relationship_type, source_type, target_type),
+            ),
+            rows=relationships_by_type[key],
+        ).consume()
