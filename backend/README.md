@@ -781,7 +781,7 @@ records its configured model name; an injected/test model records an explicit
 `injected:<module>.<type>` identity instead, so provenance never claims an
 OpenAI model ran when it did not.
 
-`investigation_id` (provenance contract v2, agent prompt/interface v4) is SHA-256 over canonical JSON for the request/decision
+`investigation_id` (provenance contract v2, agent prompt/interface v5) is SHA-256 over canonical JSON for the request/decision
 lineage, validated investigation configuration (including reasoning effort),
 non-secret actual agent model identity, fixed tool allowlist, prompt-contract
 version, deterministic tool trace, and returned evidence IDs. It intentionally
@@ -798,8 +798,10 @@ timestamps are never provenance inputs or persisted.
 Model-facing timeline payloads explicitly mark their short references with
 `timeline_reference_eligible=true`; only those aliases may appear in the
 structured `timeline_evidence_refs` field. The canonical evidence type remains
-the final enforcement check. The structured `pattern` is the sole taxonomy
-classification; summary prose is guidance rather than a lexical grounding rule.
+the final enforcement check. The model must explicitly provide the structured
+`pattern`; it is the sole authoritative taxonomy, and no default or prose-based
+inference is applied when it is missing.
+Summary prose is guidance rather than a lexical grounding rule.
 Investigation usage records completed
 provider model calls from an application-owned callback when available, falling
 back to LangChain's optional state only for injected/test models.

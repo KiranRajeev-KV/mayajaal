@@ -74,7 +74,12 @@ class InvestigationAgentOutput(SchemaModel):
     """Only the bounded factual-analysis fields an investigation model may set."""
 
     status: InvestigationAgentStatus
-    pattern: InvestigationPattern = InvestigationPattern.INCONCLUSIVE
+    pattern: InvestigationPattern = Field(
+        description=(
+            "Required authoritative analytical classification selected by the model. "
+            "Do not infer it from prose, findings, or any external label."
+        )
+    )
     key_findings: tuple[InvestigationAgentFinding, ...] = ()
     counterevidence: tuple[InvestigationAgentFinding, ...] = ()
     timeline_evidence_refs: tuple[EvidenceReference, ...] = Field(

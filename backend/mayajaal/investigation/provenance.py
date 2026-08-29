@@ -29,7 +29,7 @@ REPORT_PROVENANCE_CONTRACT_VERSION = 1
 # Diagnostics are debug-only and deliberately excluded from investigation and
 # report identities, but persisted diagnostics still need independent integrity.
 DIAGNOSTIC_PROVENANCE_CONTRACT_VERSION = 1
-AGENT_PROMPT_CONTRACT_VERSION = 4
+AGENT_PROMPT_CONTRACT_VERSION = 5
 
 
 def evidence_id(
