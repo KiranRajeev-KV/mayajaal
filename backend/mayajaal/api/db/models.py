@@ -8,7 +8,15 @@ identity, lineage, and the immediate subject/time/status lookup paths.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    LargeBinary,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -211,3 +219,30 @@ class InvestigationRunRecord(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
+
+
+class WebhookEventRecord(Base):
+    """Durable, append-only provider delivery inbox row.
+
+    The provider's delivery ID is the database identity: it is deliberately
+    not replaced by an application-generated identifier.
+    """
+
+    __tablename__ = "webhook_events"
+    __table_args__ = (Index("ix_webhook_events_received_at", "received_at"),)
+
+    provider_event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    raw_body: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    raw_body_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_detail: Mapped[str | None] = mapped_column(String(1000))

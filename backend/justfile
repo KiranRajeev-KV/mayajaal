@@ -62,6 +62,11 @@ db-ping:
 api-run:
     uv run uvicorn mayajaal.api.app:create_app --factory --reload
 
+# Deliver deterministic Razorpay-shaped local webhook fixtures to api-run.
+# Source .env first so the simulator and endpoint share the local secret.
+webhook-simulate mode="normal" endpoint="http://127.0.0.1:8000":
+    uv run python -m scripts.simulate_webhook --mode {{mode}} --endpoint {{endpoint}}
+
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
     uv run python -m scripts.extract_features --config {{ config }}

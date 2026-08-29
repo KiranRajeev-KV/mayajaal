@@ -1,9 +1,12 @@
 """Small session-owned repositories for immutable operational lineage."""
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import cast
 
 from sqlalchemy import Select, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from mayajaal.api.contracts import (
@@ -25,12 +28,17 @@ from .models import (
     RiskCaseDecisionRecord,
     RiskCaseRecord,
     ScoreObservationRecord,
+    WebhookEventRecord,
 )
 from .serialization import from_payload, payload_for
 
 
 class ImmutablePersistenceConflict(ValueError):
     """Raised when one authoritative ID is reused for different semantics."""
+
+
+class WebhookPayloadConflict(ValueError):
+    """Raised when a provider delivery ID is reused with changed raw bytes."""
 
 
 class _ImmutableRepository[
@@ -224,6 +232,32 @@ class RiskCaseRepository(_ImmutableRepository[RiskCase, RiskCaseRecord]):
         if self._session.get(RiskCaseDecisionRecord, key) is None:
             self._session.add(RiskCaseDecisionRecord(**key))
 
+    def close_case(self, case_id: str, closed_at: datetime) -> RiskCase:
+        """Apply the sole mutable case transition: OPEN to CLOSED.
+
+        An identical repeated close is accepted for operational idempotency;
+        a conflicting close or any other state is rejected.
+        """
+        record = self._session.get(RiskCaseRecord, case_id)
+        if record is None:
+            raise ValueError("risk case does not exist")
+        existing = cast(RiskCase, from_payload(RiskCase, record.payload))
+        if existing.status.value == "CLOSED":
+            if existing.closed_at == closed_at:
+                return existing
+            raise ValueError("risk case is already closed with a different timestamp")
+        closed = RiskCase.model_validate(
+            {
+                **existing.model_dump(mode="json"),
+                "status": "CLOSED",
+                "closed_at": closed_at,
+            }
+        )
+        record.status = closed.status.value
+        record.closed_at = closed.closed_at
+        record.payload = payload_for(closed)
+        return closed
+
     def list_recent(self, *, limit: int, offset: int = 0) -> tuple[RiskCase, ...]:
         return tuple(
             cast(RiskCase, from_payload(RiskCase, row.payload))
@@ -389,6 +423,81 @@ class InvestigationReportRepository:
             run_id=record.run_id,
             investigation_id=record.investigation_id,
             report=report,
+        )
+
+
+class WebhookEventRepository:
+    """Atomic provider-delivery inbox persistence, owned by a caller session."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def persist_received(
+        self,
+        *,
+        provider_event_id: str,
+        provider: str,
+        event_type: str,
+        provider_created_at: datetime,
+        received_at: datetime,
+        raw_body: bytes,
+        raw_body_sha256: str,
+        payload: dict[str, object],
+    ) -> tuple[WebhookEventRecord, bool]:
+        """Insert once atomically; reject delivery-ID reuse with changed bytes."""
+        values = {
+            "provider_event_id": provider_event_id,
+            "provider": provider,
+            "event_type": event_type,
+            "provider_created_at": provider_created_at,
+            "received_at": received_at,
+            "raw_body": raw_body,
+            "raw_body_sha256": raw_body_sha256,
+            "payload": payload,
+            "status": "RECEIVED",
+            "processed_at": None,
+            "failure_detail": None,
+        }
+        bind = self._session.get_bind()
+        if bind.dialect.name == "postgresql":
+            statement = postgresql_insert(WebhookEventRecord).values(**values)
+        elif bind.dialect.name == "sqlite":
+            statement = sqlite_insert(WebhookEventRecord).values(**values)
+        else:
+            raise ValueError("webhook inbox requires PostgreSQL or SQLite test dialect")
+        inserted_id = self._session.scalar(
+            statement.on_conflict_do_nothing(
+                index_elements=["provider_event_id"]
+            ).returning(WebhookEventRecord.provider_event_id)
+        )
+        self._session.flush()
+        record = self._session.get(WebhookEventRecord, provider_event_id)
+        if record is None:
+            raise RuntimeError("webhook inbox insert did not return a durable row")
+        if inserted_id is None:
+            if record.raw_body_sha256 != raw_body_sha256 or record.raw_body != raw_body:
+                raise WebhookPayloadConflict(
+                    "provider event ID already exists with a different raw payload"
+                )
+            return record, False
+        return record, True
+
+    def get(self, provider_event_id: str) -> WebhookEventRecord | None:
+        return self._session.get(WebhookEventRecord, provider_event_id)
+
+    def list_recent(
+        self, *, limit: int, offset: int = 0
+    ) -> tuple[WebhookEventRecord, ...]:
+        return tuple(
+            self._session.scalars(
+                select(WebhookEventRecord)
+                .order_by(
+                    WebhookEventRecord.received_at.desc(),
+                    WebhookEventRecord.provider_event_id.asc(),
+                )
+                .limit(_bounded_limit(limit))
+                .offset(_bounded_offset(offset))
+            )
         )
 
 

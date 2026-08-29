@@ -32,6 +32,7 @@ from mayajaal.api.db import (
     InvestigationRunRepository,
     PolicyDecisionRepository,
     ProbabilityEstimateRepository,
+    RiskCaseRepository,
     ScoreObservationRepository,
     session_scope,
 )
@@ -120,6 +121,7 @@ class DatabaseFoundationTests(unittest.TestCase):
                 "investigation_runs",
                 "risk_cases",
                 "risk_case_decisions",
+                "webhook_events",
             },
         )
 
@@ -212,6 +214,33 @@ class DatabaseFoundationTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "authoritative validation"),
             ):
                 _ = ScoreObservationRepository(session).get(score.score_id)
+        finally:
+            engine.dispose()
+
+    def test_risk_case_allows_only_idempotent_open_to_closed_transition(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        _, _, decision, _, _ = _lineage()
+        risk_case = _case(decision)
+        closed_at = datetime(2026, 8, 29, 13, tzinfo=UTC)
+        try:
+            with session_scope(sessions) as session:
+                repository = RiskCaseRepository(session)
+                repository.persist(risk_case)
+                closed = repository.close_case(risk_case.case_id, closed_at)
+                self.assertEqual(closed.status.value, "CLOSED")
+                self.assertEqual(closed.closed_at, closed_at)
+                self.assertEqual(
+                    repository.close_case(risk_case.case_id, closed_at), closed
+                )
+                with self.assertRaisesRegex(ValueError, "already closed"):
+                    repository.close_case(
+                        risk_case.case_id, datetime(2026, 8, 29, 14, tzinfo=UTC)
+                    )
+            with session_scope(sessions) as session:
+                restored = RiskCaseRepository(session).get(risk_case.case_id)
+                self.assertEqual(restored, closed)
         finally:
             engine.dispose()
 

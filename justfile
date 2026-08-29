@@ -70,6 +70,9 @@ db-ping:
 api-run:
     just --justfile {{backend_justfile}} api-run
 
+webhook-simulate mode="normal" endpoint="http://127.0.0.1:8000":
+    just --justfile {{backend_justfile}} webhook-simulate mode={{mode}} endpoint={{endpoint}}
+
 neo4j-load config="config.toml":
     just --justfile {{backend_justfile}} neo4j-load {{config}}
 

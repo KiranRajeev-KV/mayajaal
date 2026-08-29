@@ -77,9 +77,11 @@ payload fails. PostgreSQL foreign keys protect persisted parent lineage.
 
 `RiskCase` is deliberately small: an opaque `case_id`, account subject, open or
 closed state, opening decision, and operational timestamps. It is a long-lived
-container, not a model output. `risk_case_decisions` permits additional policy
-decisions for the same case over time. It does **not** imply one account has one
-case forever.
+container, not a model output. Case identity/opening fields are immutable; the
+only lifecycle mutation is the explicit, validated, idempotent
+`OPEN → CLOSED` repository transition. `risk_case_decisions` permits additional
+policy decisions for the same case over time. It does **not** imply one account
+has one case forever.
 
 Operational IDs stay distinct:
 
@@ -99,9 +101,9 @@ functions; callers never supply those IDs independently.
 
 The thin application service `RuntimeLineagePersistenceService` coordinates
 already-produced trusted objects within one caller-owned transaction. It does
-not score, call models, invoke investigations, or commit. The FastAPI layer is
-read-only and exposes stable response models rather than ORM rows or arbitrary
-JSONB payloads:
+not score, call models, invoke investigations, or commit. The FastAPI layer
+exposes stable response models rather than ORM rows or arbitrary JSONB payloads;
+its only write route is the deliberately bounded durable webhook inbox:
 
 ```text
 GET /health
@@ -110,6 +112,9 @@ GET /cases/{case_id}
 GET /cases/{case_id}/investigations
 GET /investigations/{run_id}
 GET /investigations/{run_id}/report
+POST /webhooks/razorpay
+GET /webhooks/events
+GET /webhooks/events/{provider_event_id}
 ```
 
 The app factory owns one `DatabaseRuntime` for its lifespan and disposes its
@@ -128,10 +133,48 @@ recreates the report table instead of inventing fake historical executions.
 The local hackathon database is disposable; upgrade/downgrade has the same
 constraint for Stage 11C reports.
 
+### Stage 12A: durable webhook inbox
+
+The first realtime boundary is deliberately limited to durable ingestion:
+
+```text
+Razorpay-shaped webhook
+→ raw-body signature verification
+→ PostgreSQL durable inbox
+→ RECEIVED
+```
+
+`POST /webhooks/razorpay` reads the exact request bytes, verifies the
+`X-Razorpay-Signature` HMAC-SHA256 before JSON parsing, validates the minimal
+Razorpay-compatible envelope, and uses `x-razorpay-event-id` as the database
+deduplication identity. PostgreSQL `INSERT ... ON CONFLICT DO NOTHING` makes
+at-least-once concurrent duplicate deliveries idempotent; reusing an event ID
+with different raw bytes is rejected rather than overwritten. The inbox accepts
+out-of-order provider timestamps and stores both provider `created_at` and local
+receipt time. Stage 12A stops at `RECEIVED`: it does not normalize events,
+update Neo4j, extract features, score, decide policy, open cases, or investigate.
+
+The input shape is **Razorpay-compatible/Razorpay-shaped synthetic local input**;
+the simulator does not call Razorpay. Set the additional environment-only
+secret `MAYAJAAL_RAZORPAY_WEBHOOK_SECRET` (included as a local-only example in
+`.env.example`) before starting the API. Minimal bounded development visibility
+is available through `GET /webhooks/events` and
+`GET /webhooks/events/{provider_event_id}`; raw bodies and arbitrary payload
+JSON are intentionally not exposed by those responses.
+
+With the API running, send deterministic fixtures locally:
+
+```bash
+just webhook-simulate                         # normal accepted delivery
+just webhook-simulate mode=duplicate          # two successful deliveries, one row
+just webhook-simulate mode=out-of-order       # delivery order differs from provider time
+just webhook-simulate mode=invalid-signature  # rejected, no durable row
+```
+
 There is still deliberately no synthetic account/event copy, graph replication,
-webhook ingestion, realtime scoring, incremental Neo4j update, SSE/WebSocket
-delivery, authentication, workers, or generic CRUD layer. Atomic webhook
-deduplication and `ON CONFLICT` ingestion belong to the later realtime stage.
+incremental Neo4j update, realtime scoring, SSE/WebSocket delivery,
+authentication, workers, or generic CRUD layer. Stage 12B will consume durable
+`RECEIVED` events for normalization and incremental graph processing.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable
@@ -158,7 +201,8 @@ resulting `.env` or use those local development values outside a local setup.
 Alembic lives in `backend/alembic/`, imports the same `Base.metadata` and
 `DatabaseConfig` as the application, and now has the first real autogen-reviewed
 revision for the lineage tables: `c263e0cacd3d_persist_operational_runtime_lineage`,
-followed by `57142160cad9_add_operational_case_investigation_runs`.
+followed by `57142160cad9_add_operational_case_investigation_runs` and
+`ce8de48b5f07_add_durable_webhook_inbox`.
 The shared metadata applies deterministic names for indexes and primary, unique,
 check, and foreign-key constraints before migrations are generated. Future
 schema changes should continue with

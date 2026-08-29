@@ -12,6 +12,7 @@ from .models import (
     RiskCaseDecisionRecord,
     RiskCaseRecord,
     ScoreObservationRecord,
+    WebhookEventRecord,
 )
 from .repositories import (
     ImmutablePersistenceConflict,
@@ -22,6 +23,8 @@ from .repositories import (
     ProbabilityEstimateRepository,
     RiskCaseRepository,
     ScoreObservationRepository,
+    WebhookEventRepository,
+    WebhookPayloadConflict,
 )
 from .session import SessionFactory, session_scope
 
@@ -47,6 +50,9 @@ __all__ = [
     "ScoreObservationRecord",
     "ScoreObservationRepository",
     "SessionFactory",
+    "WebhookEventRecord",
+    "WebhookEventRepository",
+    "WebhookPayloadConflict",
     "create_database_runtime",
     "ping_database",
     "session_scope",
