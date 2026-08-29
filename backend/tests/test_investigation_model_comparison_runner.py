@@ -1,4 +1,4 @@
-"""Provider-free assembly tests for the manual three-model smoke command."""
+"""Provider-free assembly tests for the manual three-model comparison command."""
 
 import unittest
 
@@ -9,32 +9,40 @@ from mayajaal.investigation import (
     InvestigationPattern,
     InvestigationStatus,
 )
-from scripts.run_investigation_model_smoke import (
+from scripts.run_investigation_model_comparison import (
+    COMPARISON_FIXTURES,
     MODELS,
-    SMOKE_CASE,
     CaptureHandler,
+    _comparison_status_label,  # pyright: ignore[reportPrivateUsage]
     _failed_run,  # pyright: ignore[reportPrivateUsage]
     _is_provider_request_failure,  # pyright: ignore[reportPrivateUsage]
-    _smoke_status_label,  # pyright: ignore[reportPrivateUsage]
+    build_comparison_summary,
     build_model_config,
-    build_smoke_summary,
-    render_smoke_summary,
+    planned_runs,
+    render_comparison_summary,
     score_comparison_run,
     token_summary,
 )
 
 
-class InvestigationModelSmokeScriptTests(unittest.TestCase):
+class InvestigationModelComparisonRunnerTests(unittest.TestCase):
     """The manual command's summaries must be usable without a provider call."""
 
-    def test_fixed_models_and_case_are_the_comparison_smoke_contract(self) -> None:
+    def test_frozen_plan_has_six_unique_runtime_cases_and_eighteen_runs(self) -> None:
         self.assertEqual(
             MODELS,
             ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.4-mini-2026-03-17"),
         )
-        self.assertEqual(SMOKE_CASE.case_id, "clear_promo_ring")
-        self.assertEqual(SMOKE_CASE.runtime_context_id, "eval_case_001")
-        self.assertIs(SMOKE_CASE.expected_pattern, InvestigationPattern.PROMO_RING)
+        self.assertEqual(len(COMPARISON_FIXTURES), 6)
+        self.assertEqual(len(planned_runs()), 18)
+        self.assertEqual(
+            tuple(fixture.case.runtime_context_id for fixture in COMPARISON_FIXTURES),
+            tuple(f"eval_case_{index:03d}" for index in range(1, 7)),
+        )
+        self.assertEqual(
+            len({fixture.case.runtime_context_id for fixture in COMPARISON_FIXTURES}),
+            6,
+        )
 
     def test_model_config_keeps_medium_effort_without_mutating_source_config(
         self,
@@ -50,42 +58,47 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
         outcomes = tuple(
             score_comparison_run(
                 model=model,
-                case=SMOKE_CASE,
+                case=fixture.case,
                 status=None,
                 pattern=None,
                 provider_request_failure=True,
             )
-            for model in MODELS
+            for fixture, model in planned_runs()
         )
         records = tuple(
             {
                 "model": model,
+                "case_id": fixture.case.case_id,
                 "success": False,
                 "token_usage": {},
                 "comparison_outcome": outcome.model_dump(mode="json"),
             }
-            for model, outcome in zip(MODELS, outcomes, strict=True)
+            for (fixture, model), outcome in zip(planned_runs(), outcomes, strict=True)
         )
 
-        summary = build_smoke_summary("fixture-run", records, outcomes)
-        markdown = render_smoke_summary(summary)
+        summary = build_comparison_summary("fixture-run", records, outcomes)
+        markdown = render_comparison_summary(summary)
 
         self.assertEqual(summary["completed_run_count"], 0)
-        self.assertEqual(summary["provider_failure_count"], 3)
+        self.assertEqual(summary["provider_failure_count"], 18)
         self.assertIn("PROVIDER_FAILED", markdown)
         self.assertIn("Alias refs valid", markdown)
         self.assertIn("Grounding failure", markdown)
         self.assertIn("Context reconciled", markdown)
 
-    def test_summary_requires_all_three_fixed_models(self) -> None:
+    def test_summary_requires_all_fixed_case_model_pairs(self) -> None:
         outcome = score_comparison_run(
             model=MODELS[0],
-            case=SMOKE_CASE,
+            case=COMPARISON_FIXTURES[0].case,
             status=InvestigationStatus.COMPLETED,
             pattern=InvestigationPattern.PROMO_RING,
         )
-        with self.assertRaisesRegex(ValueError, "exactly one run"):
-            build_smoke_summary("fixture-run", ({"model": MODELS[0]},), (outcome,))
+        with self.assertRaisesRegex(ValueError, "every fixed case/model pair"):
+            build_comparison_summary(
+                "fixture-run",
+                ({"model": MODELS[0], "case_id": COMPARISON_FIXTURES[0].case.case_id},),
+                (outcome,),
+            )
 
     def test_provider_and_harness_failures_are_classified_separately(self) -> None:
         self.assertTrue(_is_provider_request_failure(OpenAIError("provider")))
@@ -98,6 +111,7 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
             started_clock=0.0,
             error=RuntimeError("local artifact verification failed"),
             provider_request_failure=False,
+            case=COMPARISON_FIXTURES[0].case,
         )
 
         self.assertTrue(outcome.harness_failure)
@@ -105,13 +119,16 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
         self.assertIn("harness_failure", record)
         self.assertNotIn("provider_request_failure", record)
 
-    def test_smoke_status_labels_distinguish_failure_origins(self) -> None:
+    def test_comparison_status_labels_distinguish_failure_origins(self) -> None:
         self.assertEqual(
-            _smoke_status_label({"provider_request_failure": {}}), "PROVIDER_FAILED"
+            _comparison_status_label({"provider_request_failure": {}}),
+            "PROVIDER_FAILED",
         )
-        self.assertEqual(_smoke_status_label({"harness_failure": {}}), "HARNESS_FAILED")
         self.assertEqual(
-            _smoke_status_label(
+            _comparison_status_label({"harness_failure": {}}), "HARNESS_FAILED"
+        )
+        self.assertEqual(
+            _comparison_status_label(
                 {
                     "reported_status": "FAILED",
                     "grounding_failure_code": "INVALID_STRUCTURED_OUTPUT",
@@ -120,7 +137,7 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
             "FAILED / INVALID_STRUCTURED_OUTPUT",
         )
         self.assertEqual(
-            _smoke_status_label({"reported_status": "BUDGET_EXHAUSTED"}),
+            _comparison_status_label({"reported_status": "BUDGET_EXHAUSTED"}),
             "BUDGET_EXHAUSTED",
         )
 

@@ -1,5 +1,5 @@
 # Backend quality and test commands. Run `just --list` to discover recipes.
-
+set quiet
 default: check
 
 # Apply Ruff's formatter and safe lint fixes.
@@ -33,15 +33,15 @@ dead-code:
 
 # Run the schema unit-test suite.
 test:
-    uv run python -m unittest discover -s tests -v
+    @uv run python -m unittest discover -s tests -q
 
 # Generate Parquet tables from config.toml, or pass another config path.
 generate config="config.toml":
-    uv run python -m scripts.generate_dataset --config {{config}}
+    uv run python -m scripts.generate_dataset --config {{ config }}
 
 # Generate, resolve, and load the derived graph into local Neo4j.
 neo4j-load config="config.toml":
-    uv run python -m scripts.load_neo4j --config {{config}}
+    uv run python -m scripts.load_neo4j --config {{ config }}
 
 # Delete the dedicated derived graph before loading a different dataset.
 neo4j-reset:
@@ -49,39 +49,39 @@ neo4j-reset:
 
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
-    uv run python -m scripts.extract_features --config {{config}}
+    uv run python -m scripts.extract_features --config {{ config }}
 
 # Train and persist the deterministic CatBoost baseline plus SHAP summary.
 baseline-train config="config.toml":
-    uv run python -m scripts.train_baseline --config {{config}}
+    uv run python -m scripts.train_baseline --config {{ config }}
 
 # Run chronological train/validation/held-out CatBoost evaluation. For the
 # configured 10k benchmark: `just held-out-evaluate --full`.
 held-out-evaluate *args:
-    uv run python -m scripts.evaluate_held_out --config config.toml {{args}}
+    uv run python -m scripts.evaluate_held_out --config config.toml {{ args }}
 
 # Fit sigmoid calibration on chronological validation scores and evaluate it once
 # on held-out test scores. For the configured 10k benchmark add `--full`.
 calibration-evaluate *args:
-    uv run python -m scripts.evaluate_calibration --config config.toml {{args}}
+    uv run python -m scripts.evaluate_calibration --config config.toml {{ args }}
 
 # Make one cost-sensitive ALLOW / REVIEW / BLOCK decision from a verified
 # frozen evaluation sample (pass --sample-id from split_manifest.json).
 policy-decide *args:
-    uv run python -m scripts.decide_policy --config config.toml {{args}}
+    uv run python -m scripts.decide_policy --config config.toml {{ args }}
 
-# Run one fixed promo-ring case sequentially through the three investigation
-# comparison models. This intentionally makes live OpenAI calls.
-investigation-model-smoke *args:
-    uv run python -m scripts.run_investigation_model_smoke --config config.toml {{args}}
+# Run the frozen six-case/three-model investigation comparison sequentially.
+# This intentionally makes 18 live OpenAI calls.
+investigation-model-comparison *args:
+    uv run python -m scripts.run_investigation_model_comparison --config config.toml {{ args }}
 
 # Run multi-seed realism diagnostics; pass flags after the recipe name.
 synthetic-validate *args:
-    uv run python -m scripts.validate_synthetic --config config.toml {{args}}
+    uv run python -m scripts.validate_synthetic --config config.toml {{ args }}
 
 # Run diagnostics against a non-default profile, followed by optional flags.
 synthetic-validate-config config *args:
-    uv run python -m scripts.validate_synthetic --config {{config}} {{args}}
+    uv run python -m scripts.validate_synthetic --config {{ config }} {{ args }}
 
 # Run every non-mutating quality gate.
 check: format-check lint typecheck deps dead-code test

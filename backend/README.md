@@ -856,27 +856,34 @@ or investigation provenance. An evaluator outcome with `grounding_failure=true`
 is valid only with application-owned `FAILED` status; impossible combinations
 are rejected rather than being counted as analytical reports.
 
-### Manual three-model investigation smoke test
+### Frozen 18-run investigation-model comparison
 
-`just investigation-model-smoke` is a deliberately small live preflight: it
-runs the existing `clear_promo_ring` representative once, sequentially, through
-`gpt-5.6-luna`, `gpt-5.6-terra`, and `gpt-5.4-mini-2026-03-17`, always with
-`reasoning_effort = "medium"`. It reuses the frozen evaluation/calibration
-artifacts, the production bounded agent, five evidence tools, grounding,
-comparison scorer, and verified investigation artifacts. It makes no Admin
-Usage or Costs request and never retries a provider call after a usable result.
+`just investigation-model-comparison` runs six fixed representative cases
+sequentially through `gpt-5.6-luna`, `gpt-5.6-terra`, and
+`gpt-5.4-mini-2026-03-17`, for exactly 18 live runs with
+`reasoning_effort = "medium"` and `max_retries = 0`. The case-major order is:
+promo ring, refund ring, mixed abuse ring, shared household, office/NAT shared
+IP, then ambiguous/insufficient evidence; each is run through the three models
+in that order. It reuses the frozen evaluation/calibration artifacts, production
+bounded agent, five evidence tools, grounding, comparison scorer, and verified
+investigation artifacts. It makes no Admin Usage or Costs request.
 
-The command writes `artifacts/investigation-model-smoke/<UTC-run-id>/`, with a
-manifest, one `runs/<model>/` directory containing the normal verified
-investigation artifacts plus `comparison_record.json`, and concise
-`smoke_summary.json` / `smoke_summary.md`. The summary includes analytical
-acceptance, grounding diagnostics, artifact verification, context totals and
-per-tool metrics, provider-reported token metadata, latency, and the
-evaluator-only expected `PROMO_RING` result. `OPENAI_API_KEY` may be supplied
-by the environment or `backend/.env`; it is never written to these artifacts.
-Only OpenAI SDK request errors become provider failures. Local preparation,
-artifact verification, scoring, or summary failures are explicitly recorded as
-harness failures instead of being attributed to a model provider.
+Only neutral `eval_case_001` through `eval_case_006` context IDs enter trusted
+runtime lineage. The case names and expected patterns are evaluator-only and
+appear only in the comparison manifest, records, and summaries.
+
+The command writes
+`artifacts/investigation-model-comparison/<UTC-run-id>/`, with `manifest.json`,
+one `runs/<case>/<model>/` directory per attempt containing the normal verified
+investigation artifacts plus `comparison_record.json`, and
+`comparison_summary.json` / `comparison_summary.md`. The summary retains all
+per-run reliability, grounding, artifact-verification, context, token, and
+latency measurements, plus existing per-model aggregate comparison scores.
+`OPENAI_API_KEY` may be supplied by the environment or `backend/.env`; it is
+never written to artifacts. Only OpenAI SDK request errors become provider
+failures. Local preparation, artifact verification, scoring, or summary failures
+are explicitly recorded as harness failures instead of being attributed to a
+model provider.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and
