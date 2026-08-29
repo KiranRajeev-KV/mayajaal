@@ -6,6 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from mayajaal.api.db import Base, DatabaseConfig
+from mayajaal.api.db import models as _operational_models
 
 config = context.config
 
@@ -13,6 +14,10 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+# Importing this module registers all current operational tables on Base before
+# Alembic autogeneration compares metadata with PostgreSQL.
+_ = _operational_models
 
 
 def _database_url() -> str:

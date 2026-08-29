@@ -38,11 +38,13 @@ group.
 
 ## Operational PostgreSQL foundation
 
-Stage 11A adds only the synchronous operational database foundation in
-`mayajaal.api.db`; it deliberately creates no business tables, repositories,
-routes, ingestion, or realtime workers. Future operational ORM models will
-inherit the single `Base` metadata root and receive sessions from the
-application-owned `DatabaseRuntime`.
+Stages 11A–11B provide synchronous operational persistence in
+`mayajaal.api.db`. SQLAlchemy ORM records are strictly a storage
+representation; the existing Pydantic/dataclass lineage contracts remain the
+authoritative validation and provenance boundary. Repositories receive a
+caller-owned SQLAlchemy `Session`, never create engines or transactions, and
+never call models, scoring, policy, or investigation services. Use
+`session_scope()` as the transaction owner.
 
 Mayajaal keeps its storage responsibilities separate:
 
@@ -52,9 +54,29 @@ Neo4j       derived identity / temporal graph
 Parquet     deterministic synthetic + ML benchmark artifacts
 ```
 
-PostgreSQL is therefore not a second copy of the temporal graph and does not
-yet persist scores, cases, events, or investigation records. Those operational
-tables and repositories arrive in Stage 11B.
+PostgreSQL is therefore not a second copy of the temporal graph. Stage 11B
+persists only immutable runtime lineage:
+
+```text
+ScoreObservation
+→ ProbabilityEstimate
+→ PolicyDecision
+→ InvestigationRequest
+→ InvestigationReport
+```
+
+Each table keeps its full validated domain object in JSONB, alongside typed
+primary/foreign-key, subject, cutoff, action/status/pattern, and immediate
+lookup columns. This preserves lossless contract round-trips without
+over-normalizing nested immutable provenance. Repeating an identical immutable
+write is accepted; attempting to reuse its authoritative ID with a different
+payload fails. PostgreSQL foreign keys protect persisted parent lineage.
+
+`InvestigationReport` currently has no independent authoritative report field,
+so its row is one-to-one with the already-unique request `decision_id`. A later
+case-orchestration stage can add report-run lifecycle semantics deliberately.
+There is deliberately no `risk_cases` table yet, no synthetic account/event
+copy, no graph replication, no routes, and no realtime ingestion/workers.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable
@@ -78,12 +100,14 @@ just db-down     # stop only PostgreSQL; the named volume remains
 variables override its database/user/password settings. Never commit the
 resulting `.env` or use those local development values outside a local setup.
 
-Alembic lives in `backend/alembic/` and imports the same `Base.metadata` and
-`DatabaseConfig` as the application. There is intentionally no initial empty
-revision: with no operational tables yet, `alembic current` and `alembic upgrade
-head` validate wiring without inventing a baseline schema. Create the first
-revision alongside the real Stage 11B ORM model(s), then use
-`uv run alembic revision --autogenerate -m "..."` from `backend/`.
+Alembic lives in `backend/alembic/`, imports the same `Base.metadata` and
+`DatabaseConfig` as the application, and now has the first real autogen-reviewed
+revision for these five tables: `c263e0cacd3d_persist_operational_runtime_lineage`.
+The shared metadata applies deterministic names for indexes and primary, unique,
+check, and foreign-key constraints before migrations are generated. Future
+schema changes should continue with
+`uv run alembic revision --autogenerate -m "..."` from `backend/`, inspect the
+generated migration, and then run `just db-migrate`.
 
 ## Synthetic fraud world
 
