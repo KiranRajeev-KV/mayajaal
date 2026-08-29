@@ -15,6 +15,7 @@ from scripts.run_investigation_model_smoke import (
     CaptureHandler,
     _failed_run,  # pyright: ignore[reportPrivateUsage]
     _is_provider_request_failure,  # pyright: ignore[reportPrivateUsage]
+    _smoke_status_label,  # pyright: ignore[reportPrivateUsage]
     build_model_config,
     build_smoke_summary,
     render_smoke_summary,
@@ -70,7 +71,7 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
 
         self.assertEqual(summary["completed_run_count"], 0)
         self.assertEqual(summary["provider_failure_count"], 3)
-        self.assertIn("REQUEST_FAILED", markdown)
+        self.assertIn("PROVIDER_FAILED", markdown)
         self.assertIn("Alias refs valid", markdown)
         self.assertIn("Grounding failure", markdown)
         self.assertIn("Context reconciled", markdown)
@@ -102,6 +103,25 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
         self.assertFalse(outcome.provider_request_failure)
         self.assertIn("harness_failure", record)
         self.assertNotIn("provider_request_failure", record)
+
+    def test_smoke_status_labels_distinguish_failure_origins(self) -> None:
+        self.assertEqual(
+            _smoke_status_label({"provider_request_failure": {}}), "PROVIDER_FAILED"
+        )
+        self.assertEqual(_smoke_status_label({"harness_failure": {}}), "HARNESS_FAILED")
+        self.assertEqual(
+            _smoke_status_label(
+                {
+                    "reported_status": "FAILED",
+                    "grounding_failure_code": "INVALID_STRUCTURED_OUTPUT",
+                }
+            ),
+            "FAILED / INVALID_STRUCTURED_OUTPUT",
+        )
+        self.assertEqual(
+            _smoke_status_label({"reported_status": "BUDGET_EXHAUSTED"}),
+            "BUDGET_EXHAUSTED",
+        )
 
     def test_token_summary_keeps_provider_cache_and_reasoning_metadata(self) -> None:
         summary = token_summary(

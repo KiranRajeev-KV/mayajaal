@@ -29,7 +29,11 @@ class InvestigationStatus(StrEnum):
 
 
 class InvestigationPattern(StrEnum):
-    """Initial, deliberately broad investigation pattern taxonomy."""
+    """Authoritative investigation classification taxonomy for structured reports.
+
+    The model-facing output must explicitly select one value; application code
+    never infers this taxonomy from prose, findings, or evaluator labels.
+    """
 
     PROMO_RING = "PROMO_RING"
     REFUND_RING = "REFUND_RING"

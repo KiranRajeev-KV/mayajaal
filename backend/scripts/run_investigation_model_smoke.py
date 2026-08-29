@@ -207,10 +207,7 @@ def main() -> int:
         _write_json(
             output_directory / "runs" / model_name / "comparison_record.json", record
         )
-        print(
-            f"{model_name}: {record.get('reported_status', 'REQUEST_FAILED')}",
-            flush=True,
-        )
+        print(f"{model_name}: {_smoke_status_label(record)}", flush=True)
 
     summary = build_smoke_summary(run_id, records, outcomes)
     _write_json(output_directory / "smoke_summary.json", summary)
@@ -515,6 +512,30 @@ def _aliases_resolved(grounding_failure: object) -> bool:
     }
 
 
+def _smoke_status_label(run: Mapping[str, object]) -> str:
+    """Render provider, harness, budget, and grounded failures distinctly."""
+    if "provider_request_failure" in run:
+        return "PROVIDER_FAILED"
+    if "harness_failure" in run:
+        return "HARNESS_FAILED"
+    # The persisted per-run record carries the failure object above. This
+    # fallback keeps a summary accurate if it is reconstructed from its stable
+    # comparison outcome alone.
+    comparison = run.get("comparison_outcome")
+    if isinstance(comparison, Mapping):
+        if comparison.get("provider_request_failure") is True:
+            return "PROVIDER_FAILED"
+        if comparison.get("harness_failure") is True:
+            return "HARNESS_FAILED"
+    status = run.get("reported_status")
+    if status == InvestigationStatus.FAILED.value:
+        failure = run.get("grounding_failure_code")
+        return f"FAILED / {failure}" if isinstance(failure, str) else "FAILED"
+    if isinstance(status, str):
+        return status
+    return "HARNESS_FAILED"
+
+
 def build_smoke_summary(
     run_id: str,
     records: Iterable[Mapping[str, object]],
@@ -581,7 +602,7 @@ def render_smoke_summary(summary: Mapping[str, object]) -> str:
             "{verified} | {expected} | {tool_calls} | {input_tokens} | {output_tokens} | "
             "{reasoning_tokens} | {bytes} |".format(
                 model=model,
-                status=run.get("reported_status", "REQUEST_FAILED"),
+                status=_smoke_status_label(run),
                 pattern=run.get("reported_pattern", "—"),
                 grounded="yes" if grounded else "no",
                 aliases="yes" if run.get("aliases_resolved") else "no",

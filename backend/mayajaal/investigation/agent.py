@@ -10,6 +10,10 @@ from typing import Annotated, Protocol, cast
 from langchain.agents import create_agent  # pyright: ignore[reportUnknownVariableType]
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain.agents.structured_output import (
+    ProviderStrategy,
+    StructuredOutputValidationError,
+)
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
@@ -71,15 +75,10 @@ class InvestigationAgentRelatedEntity(SchemaModel):
 
 
 class InvestigationAgentOutput(SchemaModel):
-    """Only the bounded factual-analysis fields an investigation model may set."""
+    """Bounded model output; ``pattern`` is its required authoritative classification."""
 
     status: InvestigationAgentStatus
-    pattern: InvestigationPattern = Field(
-        description=(
-            "Required authoritative analytical classification selected by the model. "
-            "Do not infer it from prose, findings, or any external label."
-        )
-    )
+    pattern: InvestigationPattern
     key_findings: tuple[InvestigationAgentFinding, ...] = ()
     counterevidence: tuple[InvestigationAgentFinding, ...] = ()
     timeline_evidence_refs: tuple[EvidenceReference, ...] = Field(
@@ -244,7 +243,10 @@ class InvestigationAgentService:
                         exit_behavior="error",
                     ),
                 ),
-                response_format=InvestigationAgentOutput,
+                response_format=ProviderStrategy(
+                    schema=InvestigationAgentOutput,
+                    strict=True,
+                ),
                 name="bounded_investigation_agent",
             ),
         )
@@ -275,6 +277,26 @@ class InvestigationAgentService:
                     start_count=model_call_start,
                 ),
                 limitation="tool-call budget exhausted",
+            )
+        except StructuredOutputValidationError:
+            # Provider-native strict-schema rejection is an application-owned
+            # failed investigation, never a provider/harness failure. Keep the
+            # detail deliberately generic: raw model text is not trusted report
+            # content and may be unsuitable for diagnostics.
+            grounding_failure = GroundingFailureDiagnostic(
+                code=GroundingFailureCode.INVALID_STRUCTURED_OUTPUT,
+                detail="provider-native structured output validation failed",
+            )
+            report = _grounding_failed_report(
+                request,
+                InvestigationUsage(
+                    tool_calls=context.budget.used_tool_calls,
+                    iterations=_model_call_count(
+                        state=None,
+                        counter=self._model_call_counter,
+                        start_count=model_call_start,
+                    ),
+                ),
             )
         else:
             rejected_candidate: dict[str, JsonValue] | None = None

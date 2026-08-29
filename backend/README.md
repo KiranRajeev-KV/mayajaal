@@ -662,9 +662,13 @@ enforcement capability. The existing `InvestigationToolContext` keeps the
 same validated `InvestigationConfig` instance flowing from `EvidenceService`
 through the tool adapter and agent, so trusted bounds cannot drift.
 
-The model-facing Pydantic output can determine only the analytical statuses
-`COMPLETED` and `INSUFFICIENT_EVIDENCE`, plus pattern, evidence-referenced
-findings, counterevidence, related entities, summary, and limitations.
+The model-facing Pydantic output uses an explicit strict LangChain
+`ProviderStrategy`. Its OpenAI-compatible JSON Schema keeps enum references
+free of sibling keywords, because strict Structured Outputs accepts only a
+supported JSON Schema subset. It can determine only the analytical statuses
+`COMPLETED` and `INSUFFICIENT_EVIDENCE`, plus a required authoritative pattern,
+evidence-referenced findings, counterevidence, related entities, summary, and
+limitations.
 Application code alone assigns operational `BUDGET_EXHAUSTED` and `FAILED`
 statuses, and supplies the immutable request, its existing policy action, and
 actual budget usage when it constructs
@@ -684,8 +688,10 @@ remain exclusively inside the trusted, context-bound evidence tools.
 outside the prompt by `ModelCallLimitMiddleware(..., exit_behavior="error")`.
 Either exhausted budget returns a typed `BUDGET_EXHAUSTED` report with no model
 claims. Provider failures propagate rather than being disguised as
-evidence-based reports; invalid model report references fail closed as a
-claim-free application-owned `FAILED` result.
+evidence-based reports. Provider-native structured-output validation failures
+and invalid model report references fail closed as claim-free
+application-owned `FAILED` reports with an `INVALID_STRUCTURED_OUTPUT`
+diagnostic; they are neither provider nor local-harness failures.
 
 The optional non-secret `[investigation].model_name` must be explicitly set
 for a live run; Mayajaal deliberately supplies no default model because that is
@@ -781,7 +787,7 @@ records its configured model name; an injected/test model records an explicit
 `injected:<module>.<type>` identity instead, so provenance never claims an
 OpenAI model ran when it did not.
 
-`investigation_id` (provenance contract v2, agent prompt/interface v5) is SHA-256 over canonical JSON for the request/decision
+`investigation_id` (provenance contract v2, agent prompt/interface v7) is SHA-256 over canonical JSON for the request/decision
 lineage, validated investigation configuration (including reasoning effort),
 non-secret actual agent model identity, fixed tool allowlist, prompt-contract
 version, deterministic tool trace, and returned evidence IDs. It intentionally
