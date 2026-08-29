@@ -44,6 +44,7 @@ class EvaluationCase(SchemaModel):
     """
 
     case_id: str = Field(min_length=1)
+    runtime_context_id: str = Field(pattern=r"^eval_case_[0-9]{3,}$")
     expected_pattern: InvestigationPattern
 
 

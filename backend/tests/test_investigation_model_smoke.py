@@ -33,6 +33,7 @@ class InvestigationModelSmokeScriptTests(unittest.TestCase):
             ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.4-mini-2026-03-17"),
         )
         self.assertEqual(SMOKE_CASE.case_id, "clear_promo_ring")
+        self.assertEqual(SMOKE_CASE.runtime_context_id, "eval_case_001")
         self.assertIs(SMOKE_CASE.expected_pattern, InvestigationPattern.PROMO_RING)
 
     def test_model_config_keeps_medium_effort_without_mutating_source_config(

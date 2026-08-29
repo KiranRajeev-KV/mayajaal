@@ -823,6 +823,9 @@ model, probability, policy, and score lineage are unaffected.
 fixed-case model comparisons. Hidden synthetic expectations may enter this
 module only after an investigation run completes; they never enter an
 `InvestigationRequest`, prompt, tool, `EvidenceItem`, or persisted
+investigation artifact. Evaluator case names map to neutral deterministic
+runtime lineage IDs such as `eval_case_001`; only the neutral ID is used as a
+scoring/policy/decision context.
 investigation artifact. A run is analytically eligible only when it has no
 grounding failure and its status is `COMPLETED` or `INSUFFICIENT_EVIDENCE`.
 `FAILED`, `BUDGET_EXHAUSTED`, provider/request failures, and invalid structured

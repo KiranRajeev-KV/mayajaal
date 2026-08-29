@@ -16,7 +16,11 @@ from mayajaal.investigation import (
 
 def case(case_id: str, expected_pattern: InvestigationPattern) -> EvaluationCase:
     """Build one hidden evaluator expectation."""
-    return EvaluationCase(case_id=case_id, expected_pattern=expected_pattern)
+    return EvaluationCase(
+        case_id=case_id,
+        runtime_context_id="eval_case_999",
+        expected_pattern=expected_pattern,
+    )
 
 
 class InvestigationComparisonScoringTests(unittest.TestCase):

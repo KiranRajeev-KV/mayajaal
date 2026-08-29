@@ -57,6 +57,7 @@ MODELS = (
 )
 SMOKE_CASE = EvaluationCase(
     case_id="clear_promo_ring",
+    runtime_context_id="eval_case_001",
     expected_pattern=InvestigationPattern.PROMO_RING,
 )
 # This is the deterministic representative selected by the prior comparison's
@@ -271,7 +272,7 @@ def _run_one_model(
         probability = estimate_probability(
             verified_probability_model,
             score,
-            scoring_context_id=SMOKE_CASE.case_id,
+            scoring_context_id=SMOKE_CASE.runtime_context_id,
         )
         policy_model = build_policy_model(verified_probability_model, policy_config)
         decision = decide(
@@ -283,7 +284,7 @@ def _run_one_model(
                 exposure_paise=_exposure(
                     synthetic_world, SMOKE_ACCOUNT_ID, decision_cutoff
                 ),
-                context_id=SMOKE_CASE.case_id,
+                context_id=SMOKE_CASE.runtime_context_id,
             ),
         )
         request = InvestigationRequest.from_policy_decision(

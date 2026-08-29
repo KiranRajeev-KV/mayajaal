@@ -15,6 +15,7 @@ from mayajaal.calibration import (
     estimate_probability,
 )
 from mayajaal.investigation import (
+    EvaluationCase,
     EvidenceFinding,
     EvidenceItem,
     EvidenceSource,
@@ -53,7 +54,12 @@ def probability_model() -> ProbabilityModel:
     )
 
 
-def scored_decision(probability: float, *, exposure_paise: int = 250_000):
+def scored_decision(
+    probability: float,
+    *,
+    exposure_paise: int = 250_000,
+    context_id: str = "order-123",
+):
     """Create one verified policy decision without any model-training concern."""
     probability_parent = probability_model()
     raw_score = log(probability / (1.0 - probability))
@@ -76,7 +82,7 @@ def scored_decision(probability: float, *, exposure_paise: int = 250_000):
     estimate = estimate_probability(
         probability_parent,
         score_observation,
-        scoring_context_id="order-123",
+        scoring_context_id=context_id,
     )
     policy_model = build_policy_model(probability_parent, PolicyConfig())
     policy_decision = decide(
@@ -84,7 +90,7 @@ def scored_decision(probability: float, *, exposure_paise: int = 250_000):
         probability_parent,
         score_observation,
         estimate,
-        DecisionContext(exposure_paise=exposure_paise, context_id="order-123"),
+        DecisionContext(exposure_paise=exposure_paise, context_id=context_id),
     )
     return probability_parent, score_observation, estimate, policy_decision
 
@@ -100,6 +106,43 @@ def cutoff() -> datetime:
 
 
 class InvestigationContractTests(unittest.TestCase):
+    def test_evaluator_labels_are_excluded_from_trusted_runtime_lineage(self) -> None:
+        case = EvaluationCase(
+            case_id="clear_promo_ring",
+            runtime_context_id="eval_case_001",
+            expected_pattern=InvestigationPattern.PROMO_RING,
+        )
+        (
+            probability_parent,
+            score_observation,
+            probability_estimate,
+            policy_decision,
+        ) = scored_decision(0.05, context_id=case.runtime_context_id)
+        request = InvestigationRequest.from_policy_decision(
+            policy_decision,
+            probability_parent,
+            score_observation,
+            probability_estimate,
+        )
+
+        self.assertEqual(probability_estimate.scoring_context_id, "eval_case_001")
+        self.assertEqual(policy_decision.context.context_id, "eval_case_001")
+        self.assertEqual(request.context_id, "eval_case_001")
+        report = InvestigationReport(
+            request=request,
+            policy_action=request.policy_action,
+            status=InvestigationStatus.INSUFFICIENT_EVIDENCE,
+            pattern=InvestigationPattern.INCONCLUSIVE,
+        )
+        trusted_serialization = "\n".join(
+            (
+                request.model_dump_json(),
+                report.model_dump_json(),
+            )
+        )
+        self.assertNotIn(case.case_id, trusted_serialization)
+        self.assertNotIn(case.expected_pattern.value, trusted_serialization)
+
     def test_default_triggers_preserve_policy_and_cover_all_actions(self) -> None:
         review = decision(0.05)
         original_review = review
