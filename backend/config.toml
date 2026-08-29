@@ -157,7 +157,7 @@ max_risk_drivers = 5
 # Non-secret OpenAI model selected for live investigations. Model choice remains
 # a deployment cost/quality decision; OPENAI_API_KEY must come only from the
 # environment.
-model_name = "gpt-5.4-mini"
+model_name = "gpt-5.6-terra"
 # Non-secret reasoning budget for compatible OpenAI reasoning models. Supported
 # values are model-dependent; Mayajaal passes this through without guessing.
 reasoning_effort = "medium"

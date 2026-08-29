@@ -693,14 +693,13 @@ and invalid model report references fail closed as claim-free
 application-owned `FAILED` reports with an `INVALID_STRUCTURED_OUTPUT`
 diagnostic; they are neither provider nor local-harness failures.
 
-The optional non-secret `[investigation].model_name` must be explicitly set
-for a live run; Mayajaal deliberately supplies no default model because that is
-a deployment cost/quality decision. `[investigation].reasoning_effort` defaults
-to `"medium"` and accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
-or `max`; OpenAI model support is provider/model-dependent, so compatibility is
-validated by the provider rather than guessed by Mayajaal. Live bounded tool
-agents explicitly use the OpenAI Responses API, which supports reasoning-aware
-function calling; `ChatOpenAI` reads `OPENAI_API_KEY` only
+The checked-in live investigation configuration selects the non-secret
+`gpt-5.6-terra` model with `reasoning_effort = "medium"`. Future deployments
+may change these explicit settings after their own evaluation; OpenAI model
+support for `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max` is
+provider/model-dependent, so compatibility is validated by the provider rather
+than guessed by Mayajaal. Live bounded tool agents explicitly use the OpenAI
+Responses API, which supports reasoning-aware function calling; `ChatOpenAI` reads `OPENAI_API_KEY` only
 from the process environment. Keys are never stored in TOML, artifacts, logs,
 prompts, or source. Unit tests inject a fake chat model and make no OpenAI
 call. [`.env.example`](.env.example) is a shell template only (copy it to the
@@ -884,6 +883,30 @@ never written to artifacts. Only OpenAI SDK request errors become provider
 failures. Local preparation, artifact verification, scoring, or summary failures
 are explicitly recorded as harness failures instead of being attributed to a
 model provider.
+
+### Recorded investigation-model selection
+
+The completed, frozen v7 prompt/interface comparison selected
+`gpt-5.6-terra` with `reasoning_effort = "medium"` as the current production
+investigation model. It compared `gpt-5.6-luna`, `gpt-5.6-terra`, and
+`gpt-5.4-mini-2026-03-17` across six fixed cases (18 runs total).
+
+`gpt-5.6-terra` was selected because it produced 6/6 accepted grounded reports
+with zero provider, harness, budget, or grounding failures; made no fraud
+accusations on the legitimate cases; handled the ambiguous case conservatively;
+recognized every abuse case as abuse; and used fewer total tokens than the other
+candidates.
+
+Exact `PROMO_RING` / `REFUND_RING` / `MIXED_ABUSE` subtype accuracy is secondary:
+some presented evidence supports more than one abuse subtype. The comparison
+therefore gives greater weight to reliability, abuse-versus-non-abuse reasoning,
+conservative handling of benign cases, and operational efficiency.
+
+The comparison artifacts are local evaluation artifacts and are intentionally
+not committed to GitHub. The runner remains available as
+`just investigation-model-comparison`, and rerunning it makes live OpenAI API
+calls. Treat the recorded comparison as the basis for the current model choice;
+do not regenerate it during normal development.
 
 Historical availability currently follows the graph/event `occurred_at` cutoff:
 facts are eligible when `occurred_at <= request.cutoff_time`. `ingested_at` and

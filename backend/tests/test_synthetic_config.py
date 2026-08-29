@@ -58,7 +58,7 @@ class SyntheticConfigTests(unittest.TestCase):
         self.assertEqual(config.investigation.max_tool_calls, 8)
         self.assertEqual(config.investigation.max_risk_drivers, 5)
         self.assertEqual(config.investigation.max_timeline_events, 20)
-        self.assertEqual(config.investigation.model_name, "gpt-5.4-mini")
+        self.assertEqual(config.investigation.model_name, "gpt-5.6-terra")
         self.assertIs(config.investigation.reasoning_effort, ReasoningEffort.MEDIUM)
         self.assertTrue(config.investigation.triggers.investigate_review)
 
