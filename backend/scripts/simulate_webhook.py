@@ -10,7 +10,10 @@ from collections.abc import Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from mayajaal.api.env import load_environment
 from mayajaal.api.webhooks import RAZORPAY_WEBHOOK_SECRET_ENVIRONMENT_VARIABLE
+
+load_environment()
 
 DEFAULT_ENDPOINT = "http://127.0.0.1:8000"
 

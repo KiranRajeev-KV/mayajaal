@@ -3,7 +3,10 @@
 import argparse
 import os
 
+from mayajaal.api.env import load_environment
 from mayajaal.graph import Neo4jGraphRepository
+
+load_environment()
 
 
 def parse_arguments() -> argparse.Namespace:

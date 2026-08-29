@@ -3,11 +3,14 @@
 import argparse
 
 from mayajaal.api.db import DatabaseConfig, create_database_runtime
+from mayajaal.api.env import load_environment
 from mayajaal.api.event_processing import (
     Neo4jRuntimeConfig,
     WebhookEventProcessor,
 )
 from mayajaal.graph import Neo4jGraphRepository
+
+load_environment()
 
 
 def main() -> int:

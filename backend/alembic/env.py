@@ -7,6 +7,9 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from mayajaal.api.db import Base, DatabaseConfig
 from mayajaal.api.db import models as _operational_models
+from mayajaal.api.env import load_environment
+
+load_environment()
 
 config = context.config
 

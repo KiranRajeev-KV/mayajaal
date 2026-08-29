@@ -1,6 +1,9 @@
 """Verify that the configured operational PostgreSQL database is reachable."""
 
 from mayajaal.api.db import DatabaseConfig, create_database_runtime, ping_database
+from mayajaal.api.env import load_environment
+
+load_environment()
 
 
 def main() -> int:

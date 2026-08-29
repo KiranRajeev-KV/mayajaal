@@ -119,7 +119,7 @@ GET /webhooks/events/{provider_event_id}
 
 The app factory owns one `DatabaseRuntime` for its lifespan and disposes its
 engine pool on shutdown. Each request receives a short-lived synchronous
-SQLAlchemy session. Start it locally after exporting `.env` and migrating:
+SQLAlchemy session. Start it locally after copying `.env` and migrating:
 
 ```bash
 just api-run
@@ -219,11 +219,11 @@ required application setting is the secret-bearing environment variable
 `MAYAJAAL_DATABASE_URL`, using an explicit
 `postgresql+psycopg://user:password@host:port/database` URL. It is deliberately
 not read from `config.toml` or `alembic.ini`. Copy [`.env.example`](.env.example)
-to the gitignored `.env`, then export it before database commands:
+to the gitignored `.env`; Mayajaal auto-loads it via python-dotenv at startup,
+so no shell sourcing or `export` is required:
 
 ```bash
 cp .env.example .env
-set -a; source .env; set +a
 
 just db-up       # start only PostgreSQL, exposed as localhost:5433
 just db-ping     # SQLAlchemy connection + SELECT 1
@@ -916,8 +916,9 @@ than guessed by Mayajaal. Live bounded tool agents explicitly use the OpenAI
 Responses API, which supports reasoning-aware function calling; `ChatOpenAI` reads `OPENAI_API_KEY` only
 from the process environment. Keys are never stored in TOML, artifacts, logs,
 prompts, or source. Unit tests inject a fake chat model and make no OpenAI
-call. [`.env.example`](.env.example) is a shell template only (copy it to the
-gitignored `.env` and `source .env`); Mayajaal does not auto-load dotenv files.
+call. [`.env.example`](.env.example) is a plain template (copy it to the
+gitignored `.env`); Mayajaal auto-loads `backend/.env` via python-dotenv at each
+entry point (API factory, Alembic, and CLI scripts).
 This slice uses LangChain's agent runtime only through `create_agent`;
 Mayajaal contains no direct LangGraph orchestration code.
 

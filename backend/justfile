@@ -47,8 +47,8 @@ neo4j-load config="config.toml":
 neo4j-reset:
     uv run python -m scripts.reset_neo4j
 
-# PostgreSQL operational-storage foundation. Set MAYAJAAL_DATABASE_URL in the
-# shell (for example: `set -a; source .env; set +a`) before running these.
+# PostgreSQL operational-storage foundation. Mayajaal auto-loads backend/.env
+# via python-dotenv, so copy .env.example to .env and run these directly.
 db-migrate:
     uv run alembic upgrade head
 
@@ -58,12 +58,13 @@ db-current:
 db-ping:
     uv run python -m scripts.db_ping
 
-# Run the thin operational read API. It requires MAYAJAAL_DATABASE_URL.
+# Run the thin operational read API. It requires MAYAJAAL_DATABASE_URL from
+# backend/.env, which is auto-loaded at startup.
 api-run:
     uv run uvicorn mayajaal.api.app:create_app --factory --reload
 
 # Deliver deterministic Razorpay-shaped local webhook fixtures to api-run.
-# Source .env first so the simulator and endpoint share the local secret.
+# backend/.env is auto-loaded so the simulator and endpoint share the local secret.
 webhook-simulate mode="normal" endpoint="http://127.0.0.1:8000":
     uv run python -m scripts.simulate_webhook --mode {{mode}} --endpoint {{endpoint}}
 

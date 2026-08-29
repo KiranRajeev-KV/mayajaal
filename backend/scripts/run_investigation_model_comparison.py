@@ -21,6 +21,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 from openai import OpenAIError
 
+from mayajaal.api.env import load_environment
 from mayajaal.calibration import estimate_probability, load_probability_model
 from mayajaal.evaluation import load_frozen_full_evaluation
 from mayajaal.features import FeatureService
@@ -193,7 +194,7 @@ def main() -> int:
     arguments = parse_arguments()
     config_path = arguments.config.resolve()
     backend_directory = config_path.parent
-    _load_openai_api_key(backend_directory / ".env")
+    load_environment()
     if not os.environ.get("OPENAI_API_KEY"):
         raise ValueError(
             "OPENAI_API_KEY must be set in the environment or backend/.env"
@@ -827,20 +828,6 @@ def _exposure(world: object, account_id: str, cutoff: object) -> int:
         if str(order.id) in order_ids
     ]
     return int(amounts[-1]) if amounts else 100_000
-
-
-def _load_openai_api_key(path: Path) -> None:
-    """Load only the non-persisted runtime API key if the shell did not set it."""
-    if os.environ.get("OPENAI_API_KEY") or not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        name, value = stripped.split("=", 1)
-        if name.strip() == "OPENAI_API_KEY":
-            os.environ["OPENAI_API_KEY"] = value.strip().strip('"').strip("'")
-            return
 
 
 def _resolve_from_config(config_directory: Path, path: Path) -> Path:

@@ -28,6 +28,7 @@ from .db import (
     create_database_runtime,
     ping_database,
 )
+from .env import load_environment
 from .webhooks import (
     RazorpayWebhookEnvelope,
     WebhookConfig,
@@ -172,6 +173,7 @@ def create_app(
     webhook_config: WebhookConfig | None = None,
 ) -> FastAPI:
     """Create the operational read API with one shared runtime per lifespan."""
+    load_environment()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:

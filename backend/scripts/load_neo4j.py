@@ -4,10 +4,13 @@ import argparse
 import os
 from pathlib import Path
 
+from mayajaal.api.env import load_environment
 from mayajaal.graph import Neo4jGraphRepository, build_graph_projection
 from mayajaal.resolution import resolve_all
 from mayajaal.synthetic import generate_world
 from mayajaal.synthetic.config import load_generation_config
+
+load_environment()
 
 
 def parse_arguments() -> argparse.Namespace:
