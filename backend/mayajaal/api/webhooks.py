@@ -48,6 +48,7 @@ class WebhookProcessingStatus(StrEnum):
     """Minimal durable inbox lifecycle; Stage 12A accepts only RECEIVED rows."""
 
     RECEIVED = "RECEIVED"
+    PROCESSING = "PROCESSING"
     PROCESSED = "PROCESSED"
     FAILED = "FAILED"
 

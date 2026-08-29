@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import cast
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -17,12 +17,14 @@ from mayajaal.api.contracts import (
 from mayajaal.calibration import ProbabilityEstimate
 from mayajaal.investigation import InvestigationReport, InvestigationRequest, report_id
 from mayajaal.policy import PolicyDecision
+from mayajaal.schemas import Event
 from mayajaal.scoring import ScoreObservation
 
 from .models import (
     InvestigationReportRecord,
     InvestigationRequestRecord,
     InvestigationRunRecord,
+    NormalizedEventRecord,
     PolicyDecisionRecord,
     ProbabilityEstimateRecord,
     RiskCaseDecisionRecord,
@@ -39,6 +41,10 @@ class ImmutablePersistenceConflict(ValueError):
 
 class WebhookPayloadConflict(ValueError):
     """Raised when a provider delivery ID is reused with changed raw bytes."""
+
+
+class WebhookClaimUnavailable(ValueError):
+    """Raised when an inbox event cannot be claimed by this processor."""
 
 
 class _ImmutableRepository[
@@ -455,6 +461,7 @@ class WebhookEventRepository:
             "raw_body_sha256": raw_body_sha256,
             "payload": payload,
             "status": "RECEIVED",
+            "claimed_at": None,
             "processed_at": None,
             "failure_detail": None,
         }
@@ -482,6 +489,67 @@ class WebhookEventRepository:
             return record, False
         return record, True
 
+    def claim(
+        self, provider_event_id: str, *, claimed_at: datetime
+    ) -> WebhookEventRecord:
+        """Atomically claim a received or failed delivery for one processor."""
+        result = self._session.execute(
+            update(WebhookEventRecord)
+            .where(
+                WebhookEventRecord.provider_event_id == provider_event_id,
+                WebhookEventRecord.status.in_(("RECEIVED", "FAILED")),
+            )
+            .values(status="PROCESSING", claimed_at=claimed_at, failure_detail=None)
+        )
+        if result.rowcount != 1:  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            raise WebhookClaimUnavailable(
+                "webhook event is not available for processing"
+            )
+        record = self._session.get(WebhookEventRecord, provider_event_id)
+        if record is None:
+            raise RuntimeError("claimed webhook event disappeared")
+        return record
+
+    def claim_next(self, *, claimed_at: datetime) -> WebhookEventRecord | None:
+        """Claim the oldest ready row with ``SKIP LOCKED`` for concurrent workers."""
+        record = self._session.scalar(
+            select(WebhookEventRecord)
+            .where(WebhookEventRecord.status.in_(("RECEIVED", "FAILED")))
+            .order_by(
+                WebhookEventRecord.received_at.asc(),
+                WebhookEventRecord.provider_event_id.asc(),
+            )
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if record is None:
+            return None
+        record.status = "PROCESSING"
+        record.claimed_at = claimed_at
+        record.failure_detail = None
+        return record
+
+    def mark_processed(self, provider_event_id: str, *, processed_at: datetime) -> None:
+        record = self._require(provider_event_id)
+        if record.status not in {"PROCESSING", "PROCESSED"}:
+            raise WebhookClaimUnavailable("webhook event is not being processed")
+        record.status = "PROCESSED"
+        record.processed_at = processed_at
+        record.failure_detail = None
+
+    def mark_failed(self, provider_event_id: str, *, detail: str) -> None:
+        record = self._require(provider_event_id)
+        if record.status != "PROCESSING":
+            raise WebhookClaimUnavailable("webhook event is not being processed")
+        record.status = "FAILED"
+        record.failure_detail = detail[:1000]
+
+    def _require(self, provider_event_id: str) -> WebhookEventRecord:
+        record = self.get(provider_event_id)
+        if record is None:
+            raise ValueError("webhook event does not exist")
+        return record
+
     def get(self, provider_event_id: str) -> WebhookEventRecord | None:
         return self._session.get(WebhookEventRecord, provider_event_id)
 
@@ -499,6 +567,62 @@ class WebhookEventRepository:
                 .offset(_bounded_offset(offset))
             )
         )
+
+    def ready_ids(self, *, limit: int) -> tuple[str, ...]:
+        """Return a deterministic bounded snapshot; ``claim`` remains atomic."""
+        return tuple(
+            self._session.scalars(
+                select(WebhookEventRecord.provider_event_id)
+                .where(WebhookEventRecord.status.in_(("RECEIVED", "FAILED")))
+                .order_by(
+                    WebhookEventRecord.received_at.asc(),
+                    WebhookEventRecord.provider_event_id.asc(),
+                )
+                .limit(_bounded_limit(limit))
+            )
+        )
+
+
+class NormalizedEventRepository:
+    """Persist canonical provider facts without treating raw webhook JSON as graph data."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def persist(self, *, provider_event_id: str, event: Event) -> Event:
+        payload = event.model_dump(mode="json")
+        existing = self._session.get(NormalizedEventRecord, str(event.id))
+        by_provider = self._session.scalar(
+            select(NormalizedEventRecord).where(
+                NormalizedEventRecord.provider_event_id == provider_event_id
+            )
+        )
+        record = existing or by_provider
+        if record is None:
+            self._session.add(
+                NormalizedEventRecord(
+                    event_id=str(event.id),
+                    provider_event_id=provider_event_id,
+                    event_type=event.event_type.value,
+                    account_id=str(event.account_id),
+                    occurred_at=event.occurred_at,
+                    payload=payload,
+                )
+            )
+            return event
+        if record.event_id != str(event.id) or record.payload != payload:
+            raise ImmutablePersistenceConflict(
+                "provider event already has a different canonical event"
+            )
+        return Event.model_validate(record.payload)
+
+    def get_for_provider(self, provider_event_id: str) -> Event | None:
+        record = self._session.scalar(
+            select(NormalizedEventRecord).where(
+                NormalizedEventRecord.provider_event_id == provider_event_id
+            )
+        )
+        return None if record is None else Event.model_validate(record.payload)
 
 
 def _bounded_limit(limit: int) -> int:

@@ -67,6 +67,10 @@ api-run:
 webhook-simulate mode="normal" endpoint="http://127.0.0.1:8000":
     uv run python -m scripts.simulate_webhook --mode {{mode}} --endpoint {{endpoint}}
 
+# Normalize and incrementally project one durable event, or a bounded ready batch.
+webhook-process event_id="" limit="":
+    if [ -n "{{event_id}}" ]; then uv run python -m scripts.process_webhooks --event-id {{event_id}}; else uv run python -m scripts.process_webhooks --limit {{limit}}; fi
+
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
     uv run python -m scripts.extract_features --config {{ config }}

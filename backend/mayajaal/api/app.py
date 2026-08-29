@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, NoReturn, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -21,6 +22,7 @@ from .db import (
     InvestigationReportRepository,
     InvestigationRunRepository,
     RiskCaseRepository,
+    SessionFactory,
     WebhookEventRepository,
     WebhookPayloadConflict,
     create_database_runtime,
@@ -283,7 +285,6 @@ def create_app(
     @app.post("/webhooks/razorpay", response_model=WebhookIngestResult)
     async def receive_razorpay_webhook(
         request: Request,
-        session: Annotated[Session, Depends(get_session)],
     ) -> WebhookIngestResult:
         """Durably accept one signature-verified Razorpay-shaped delivery only."""
         raw_body = await request.body()
@@ -311,13 +312,13 @@ def create_app(
                 detail="invalid webhook envelope",
             ) from error
         try:
-            with session.begin():
-                result = WebhookInboxService(session).accept(
-                    provider_event_id=provider_event_id,
-                    envelope=envelope,
-                    raw_body=raw_body,
-                    received_at=datetime.now(tz=UTC),
-                )
+            result = await run_in_threadpool(
+                _accept_webhook_sync,
+                _runtime_from_request(request).sessions,
+                provider_event_id,
+                envelope,
+                raw_body,
+            )
         except WebhookPayloadConflict as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -398,6 +399,22 @@ def _is_valid_provider_event_id(value: str | None) -> bool:
         and value == value.strip()
         and len(value) <= 255
     )
+
+
+def _accept_webhook_sync(
+    sessions: SessionFactory,
+    provider_event_id: str,
+    envelope: RazorpayWebhookEnvelope,
+    raw_body: bytes,
+) -> WebhookIngestResult:
+    """Run synchronous SQLAlchemy/psycopg work in FastAPI's worker threadpool."""
+    with sessions.begin() as session:
+        return WebhookInboxService(session).accept(
+            provider_event_id=provider_event_id,
+            envelope=envelope,
+            raw_body=raw_body,
+            received_at=datetime.now(tz=UTC),
+        )
 
 
 def _not_found(resource: str) -> NoReturn:

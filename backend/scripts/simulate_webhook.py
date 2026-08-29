@@ -15,13 +15,22 @@ from mayajaal.api.webhooks import RAZORPAY_WEBHOOK_SECRET_ENVIRONMENT_VARIABLE
 DEFAULT_ENDPOINT = "http://127.0.0.1:8000"
 
 
-def _payload(*, event: str, created_at: int, payment_id: str) -> bytes:
+def _payload(
+    *,
+    event: str,
+    created_at: int,
+    payment_id: str,
+    mayajaal: dict[str, str] | None = None,
+) -> bytes:
+    payload: dict[str, object] = {"payment": {"entity": "payment", "id": payment_id}}
+    if mayajaal is not None:
+        payload["mayajaal"] = mayajaal
     return json.dumps(
         {
             "entity": "event",
             "event": event,
             "contains": ["payment"],
-            "payload": {"payment": {"entity": "payment", "id": payment_id}},
+            "payload": payload,
             "created_at": created_at,
         },
         separators=(",", ":"),
@@ -105,6 +114,48 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
             ),
             False,
         )
+    elif mode == "graph-demo":
+        # Namespaced fixture fields are Mayajaal demo metadata, not Razorpay claims.
+        shared_payment = "00000000-0000-0000-0000-0000000000aa"
+        yield (
+            "evt_mayajaal_graph_device_001",
+            _payload(
+                event="mayajaal.device.seen",
+                created_at=1_780_000_030,
+                payment_id="pay_demo_graph_001",
+                mayajaal={
+                    "account_id": "00000000-0000-0000-0000-000000000001",
+                    "device_id": "00000000-0000-0000-0000-0000000000d1",
+                },
+            ),
+            True,
+        )
+        yield (
+            "evt_mayajaal_graph_payment_001",
+            _payload(
+                event="mayajaal.payment.attached",
+                created_at=1_780_000_031,
+                payment_id="pay_demo_graph_002",
+                mayajaal={
+                    "account_id": "00000000-0000-0000-0000-000000000001",
+                    "payment_identity_id": shared_payment,
+                },
+            ),
+            True,
+        )
+        yield (
+            "evt_mayajaal_graph_payment_002",
+            _payload(
+                event="mayajaal.payment.attached",
+                created_at=1_780_000_029,
+                payment_id="pay_demo_graph_003",
+                mayajaal={
+                    "account_id": "00000000-0000-0000-0000-000000000002",
+                    "payment_identity_id": shared_payment,
+                },
+            ),
+            True,
+        )
     else:
         raise ValueError(f"unsupported mode: {mode}")
 
@@ -113,7 +164,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("normal", "duplicate", "out-of-order", "invalid-signature"),
+        choices=(
+            "normal",
+            "duplicate",
+            "out-of-order",
+            "invalid-signature",
+            "graph-demo",
+        ),
         default="normal",
     )
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)

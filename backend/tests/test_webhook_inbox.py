@@ -8,11 +8,13 @@ import unittest
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 from starlette.requests import Request
 
 from mayajaal.api.app import create_app
@@ -31,7 +33,7 @@ from mayajaal.api.webhooks import (
 )
 
 SECRET = "test-webhook-secret"
-WebhookEndpoint = Callable[[Request, Session], Any]
+WebhookEndpoint = Callable[[Request], Any]
 
 
 class WebhookInboxTests(unittest.TestCase):
@@ -89,32 +91,26 @@ class WebhookInboxTests(unittest.TestCase):
         endpoint = _route(app, "/webhooks/razorpay")
         body = _body("payment.captured", 1_780_000_000)
         try:
-            with session_scope(sessions) as session:
+            with patch(
+                "mayajaal.api.app.run_in_threadpool",
+                new=AsyncMock(side_effect=_run_synchronously_for_test),
+            ) as threadpool:
                 with self.assertRaises(HTTPException) as failure:
                     asyncio.run(
-                        _call_endpoint(
-                            endpoint, app, session, body, "evt_invalid", "bad"
-                        )
+                        _call_endpoint(endpoint, app, body, "evt_invalid", "bad")
                     )
                 self.assertEqual(failure.exception.status_code, 401)
-                self.assertEqual(
-                    len(WebhookEventRepository(session).list_recent(limit=10)), 0
-                )
-
-            signature = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
-            with session_scope(sessions) as session:
+                signature = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
                 first = asyncio.run(
-                    _call_endpoint(
-                        endpoint, app, session, body, "evt_duplicate", signature
-                    )
+                    _call_endpoint(endpoint, app, body, "evt_duplicate", signature)
                 )
                 second = asyncio.run(
-                    _call_endpoint(
-                        endpoint, app, session, body, "evt_duplicate", signature
-                    )
+                    _call_endpoint(endpoint, app, body, "evt_duplicate", signature)
                 )
-                self.assertTrue(first.accepted_new)
-                self.assertFalse(second.accepted_new)
+                self.assertEqual(threadpool.await_count, 2)
+            self.assertTrue(first.accepted_new)
+            self.assertFalse(second.accepted_new)
+            with sessions() as session:
                 self.assertEqual(
                     len(WebhookEventRepository(session).list_recent(limit=10)), 1
                 )
@@ -148,7 +144,9 @@ class WebhookInboxTests(unittest.TestCase):
 
 
 def _database() -> tuple[Engine, sessionmaker[Session]]:
-    engine = create_engine("sqlite://")
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
     Base.metadata.create_all(engine)
     return engine, sessionmaker(bind=engine, expire_on_commit=False)
 
@@ -191,7 +189,6 @@ def _route(app: FastAPI, path: str) -> WebhookEndpoint:
 async def _call_endpoint(
     endpoint: WebhookEndpoint,
     app: FastAPI,
-    session: Session,
     body: bytes,
     event_id: str,
     signature: str,
@@ -218,4 +215,9 @@ async def _call_endpoint(
         },
         receive,
     )
-    return cast(WebhookIngestResult, await endpoint(request, session))
+    return cast(WebhookIngestResult, await endpoint(request))
+
+
+async def _run_synchronously_for_test(function: Callable[..., Any], *args: Any) -> Any:
+    """Avoid SQLite in-memory cross-thread limits while asserting the thread boundary."""
+    return function(*args)

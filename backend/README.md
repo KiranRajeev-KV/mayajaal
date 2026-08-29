@@ -133,7 +133,7 @@ recreates the report table instead of inventing fake historical executions.
 The local hackathon database is disposable; upgrade/downgrade has the same
 constraint for Stage 11C reports.
 
-### Stage 12A: durable webhook inbox
+### Stage 12A and 12B: durable inbox, canonical facts, derived graph
 
 The first realtime boundary is deliberately limited to durable ingestion:
 
@@ -151,8 +151,34 @@ deduplication identity. PostgreSQL `INSERT ... ON CONFLICT DO NOTHING` makes
 at-least-once concurrent duplicate deliveries idempotent; reusing an event ID
 with different raw bytes is rejected rather than overwritten. The inbox accepts
 out-of-order provider timestamps and stores both provider `created_at` and local
-receipt time. Stage 12A stops at `RECEIVED`: it does not normalize events,
-update Neo4j, extract features, score, decide policy, open cases, or investigate.
+receipt time. The asynchronous route reads the body, then hands synchronous
+SQLAlchemy/psycopg persistence to FastAPI's worker threadpool; the application
+otherwise remains synchronous SQLAlchemy.
+
+Stage 12A stops at `RECEIVED`. Stage 12B is an explicit CLI operation: it
+claims one `RECEIVED`/`FAILED` delivery, supports only the named synthetic
+fixtures `mayajaal.account.created`, `mayajaal.device.seen`,
+`mayajaal.ip.seen`, and `mayajaal.payment.attached`, and stores a validated
+canonical `Event` in `normalized_events`. `payload.mayajaal` contains local
+simulator metadata, not Razorpay fields; unsupported provider events fail
+closed rather than being guessed.
+
+Canonical event IDs are deterministic UUIDv5 values derived from the provider
+delivery ID. Each one-event incremental projection uses the offline graph's
+same nodes, relationship types, event IDs, and occurrence times. The fixture
+uses exact stable UUID identity normalization only; it never reruns resolution
+over a synthetic world or invents identities.
+
+```text
+RECEIVED → normalized canonical Event → idempotent Neo4j MERGE → PROCESSED
+                                               failure → FAILED
+```
+
+PostgreSQL and Neo4j are intentionally not a distributed transaction. A failed
+row retains bounded diagnostic text and is retryable; reapplying a canonical
+event is safe because event-backed Neo4j relationships merge on `event_id`.
+There is no clear or full graph reload. Stage 12B still does not extract
+features, score, calibrate, decide policy, create cases, or investigate.
 
 The input shape is **Razorpay-compatible/Razorpay-shaped synthetic local input**;
 the simulator does not call Razorpay. Set the additional environment-only
@@ -169,12 +195,15 @@ just webhook-simulate                         # normal accepted delivery
 just webhook-simulate mode=duplicate          # two successful deliveries, one row
 just webhook-simulate mode=out-of-order       # delivery order differs from provider time
 just webhook-simulate mode=invalid-signature  # rejected, no durable row
+just webhook-simulate mode=graph-demo         # device + shared-payment graph fixtures
+just webhook-process event_id=<provider-id>   # normalize/project one event
+just webhook-process limit=10                 # bounded oldest-ready batch
 ```
 
-There is still deliberately no synthetic account/event copy, graph replication,
-incremental Neo4j update, realtime scoring, SSE/WebSocket delivery,
-authentication, workers, or generic CRUD layer. Stage 12B will consume durable
-`RECEIVED` events for normalization and incremental graph processing.
+There is still deliberately no synthetic-world copy, realtime scoring,
+SSE/WebSocket delivery, authentication, workers, or generic CRUD layer.
+Stage 12C will consume `PROCESSED` facts for features, CatBoost, calibration,
+and policy.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable
@@ -202,7 +231,8 @@ Alembic lives in `backend/alembic/`, imports the same `Base.metadata` and
 `DatabaseConfig` as the application, and now has the first real autogen-reviewed
 revision for the lineage tables: `c263e0cacd3d_persist_operational_runtime_lineage`,
 followed by `57142160cad9_add_operational_case_investigation_runs` and
-`ce8de48b5f07_add_durable_webhook_inbox`.
+`ce8de48b5f07_add_durable_webhook_inbox` and
+`a5b7d6e8f901_add_normalized_events`.
 The shared metadata applies deterministic names for indexes and primary, unique,
 check, and foreign-key constraints before migrations are generated. Future
 schema changes should continue with

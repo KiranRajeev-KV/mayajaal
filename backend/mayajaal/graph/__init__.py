@@ -7,7 +7,7 @@ from .models import (
     GraphRelationship,
     GraphRelationshipType,
 )
-from .projection import build_graph_projection
+from .projection import build_graph_projection, build_incremental_graph_projection
 from .repository import GraphLoadReport, Neo4jGraphRepository
 
 __all__ = [
@@ -19,4 +19,5 @@ __all__ = [
     "GraphRelationshipType",
     "Neo4jGraphRepository",
     "build_graph_projection",
+    "build_incremental_graph_projection",
 ]

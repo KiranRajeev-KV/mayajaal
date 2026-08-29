@@ -122,6 +122,7 @@ class DatabaseFoundationTests(unittest.TestCase):
                 "risk_cases",
                 "risk_case_decisions",
                 "webhook_events",
+                "normalized_events",
             },
         )
 

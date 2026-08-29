@@ -244,5 +244,28 @@ class WebhookEventRecord(Base):
     raw_body_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_detail: Mapped[str | None] = mapped_column(String(1000))
+
+
+class NormalizedEventRecord(Base):
+    """Trusted canonical event derived from one durable provider delivery."""
+
+    __tablename__ = "normalized_events"
+    __table_args__ = (
+        Index(
+            "ix_normalized_events_account_id_occurred_at", "account_id", "occurred_at"
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider_event_id: Mapped[str] = mapped_column(
+        ForeignKey("webhook_events.provider_event_id"), unique=True, nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)

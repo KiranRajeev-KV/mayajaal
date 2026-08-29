@@ -6,7 +6,7 @@ from typing import Protocol
 from uuid import UUID
 
 from mayajaal.resolution import ResolutionBundle, ResolutionEntityType
-from mayajaal.schemas import EventType
+from mayajaal.schemas import Event, EventType
 from mayajaal.synthetic.world import SyntheticWorld
 
 from .models import (
@@ -340,3 +340,80 @@ def build_graph_projection(
             )
         ),
     )
+
+
+def build_incremental_graph_projection(event: Event) -> GraphProjection:
+    """Project one already-canonical runtime fact using the offline graph schema.
+
+    Runtime provider fixtures supply canonical UUIDs, so this narrow adapter uses
+    the same exact-identifier semantics as resolution's stable-ID normalizer. It
+    intentionally does not fabricate entity attributes from raw provider JSON.
+    """
+    account_id = str(event.account_id)
+    nodes: list[GraphNode] = [
+        GraphNode(
+            node_type=GraphNodeType.ACCOUNT,
+            canonical_id=account_id,
+            properties=_properties(
+                canonical_id=account_id,
+                created_at=(
+                    event.occurred_at
+                    if event.event_type is EventType.ACCOUNT_CREATED
+                    else None
+                ),
+            ),
+        )
+    ]
+    relationships: list[GraphRelationship] = []
+
+    def add_identity(
+        node_type: GraphNodeType,
+        identity_id: UUID,
+        relationship_type: GraphRelationshipType,
+    ) -> None:
+        canonical_id = str(identity_id)
+        nodes.append(
+            GraphNode(
+                node_type=node_type,
+                canonical_id=canonical_id,
+                properties={"canonical_id": canonical_id},
+            )
+        )
+        relationships.append(
+            _relationship(
+                relationship_type,
+                GraphNodeType.ACCOUNT,
+                account_id,
+                node_type,
+                canonical_id,
+                event.id,
+                event.event_type,
+                event.occurred_at,
+            )
+        )
+
+    if event.event_type is EventType.DEVICE_SEEN and event.device_id is not None:
+        add_identity(
+            GraphNodeType.DEVICE, event.device_id, GraphRelationshipType.USED_DEVICE
+        )
+    elif event.event_type is EventType.IP_SEEN and event.ip_address_id is not None:
+        add_identity(
+            GraphNodeType.IP_ADDRESS,
+            event.ip_address_id,
+            GraphRelationshipType.SEEN_FROM,
+        )
+    elif (
+        event.event_type is EventType.PAYMENT_ATTACHED
+        and event.payment_identity_id is not None
+    ):
+        add_identity(
+            GraphNodeType.PAYMENT_IDENTITY,
+            event.payment_identity_id,
+            GraphRelationshipType.PAID_WITH,
+        )
+    else:
+        if event.event_type is not EventType.ACCOUNT_CREATED:
+            raise ValueError(
+                f"runtime incremental projection does not support {event.event_type.value}"
+            )
+    return GraphProjection(nodes=tuple(nodes), relationships=tuple(relationships))

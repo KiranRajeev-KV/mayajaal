@@ -80,6 +80,9 @@ neo4j-load config="config.toml":
 neo4j-reset:
     just --justfile {{backend_justfile}} neo4j-reset
 
+webhook-process event_id="" limit="":
+    just --justfile {{backend_justfile}} webhook-process event_id={{event_id}} limit={{limit}}
+
 features-extract config="config.toml":
     just --justfile {{backend_justfile}} features-extract {{config}}
 
