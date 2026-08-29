@@ -3,18 +3,27 @@
 from collections.abc import Callable
 from typing import cast
 
+from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
+from mayajaal.api.contracts import (
+    InvestigationRun,
+    PersistedInvestigationReport,
+    RiskCase,
+)
 from mayajaal.calibration import ProbabilityEstimate
-from mayajaal.investigation import InvestigationReport, InvestigationRequest
+from mayajaal.investigation import InvestigationReport, InvestigationRequest, report_id
 from mayajaal.policy import PolicyDecision
 from mayajaal.scoring import ScoreObservation
 
 from .models import (
     InvestigationReportRecord,
     InvestigationRequestRecord,
+    InvestigationRunRecord,
     PolicyDecisionRecord,
     ProbabilityEstimateRecord,
+    RiskCaseDecisionRecord,
+    RiskCaseRecord,
     ScoreObservationRecord,
 )
 from .serialization import from_payload, payload_for
@@ -30,14 +39,16 @@ class _ImmutableRepository[
         ProbabilityEstimate,
         PolicyDecision,
         InvestigationRequest,
-        InvestigationReport,
+        InvestigationRun,
+        RiskCase,
     ),
     Record: (
         ScoreObservationRecord,
         ProbabilityEstimateRecord,
         PolicyDecisionRecord,
         InvestigationRequestRecord,
-        InvestigationReportRecord,
+        InvestigationRunRecord,
+        RiskCaseRecord,
     ),
 ]:
     """Shared immutable insert/get behavior; subclasses define their boundary."""
@@ -181,22 +192,213 @@ class InvestigationRequestRepository(
         )
 
 
-class InvestigationReportRepository(
-    _ImmutableRepository[InvestigationReport, InvestigationReportRecord]
-):
-    """Persistence boundary for one immutable report per existing request."""
+class RiskCaseRepository(_ImmutableRepository[RiskCase, RiskCaseRecord]):
+    """Persistence and bounded lookup boundary for operational risk cases."""
 
     def __init__(self, session: Session) -> None:
         super().__init__(
             session,
-            record_type=InvestigationReportRecord,
-            domain_type=InvestigationReport,
-            key_for=lambda value: value.request.decision_id,
-            make_record=lambda value, payload: InvestigationReportRecord(
-                decision_id=value.request.decision_id,
-                policy_action=value.policy_action.value,
+            record_type=RiskCaseRecord,
+            domain_type=RiskCase,
+            key_for=lambda value: value.case_id,
+            make_record=lambda value, payload: RiskCaseRecord(
+                case_id=value.case_id,
+                subject_type=value.subject_type.value,
+                subject_id=value.subject_id,
                 status=value.status.value,
-                pattern=value.pattern.value,
+                opened_at=value.opened_at,
+                closed_at=value.closed_at,
+                opening_decision_id=value.opening_decision_id,
                 payload=payload,
             ),
         )
+
+    def persist(self, value: RiskCase) -> RiskCase:
+        persisted = super().persist(value)
+        self.attach_decision(value.case_id, value.opening_decision_id)
+        return persisted
+
+    def attach_decision(self, case_id: str, decision_id: str) -> None:
+        """Attach an existing decision without granting it case lifecycle authority."""
+        key = {"case_id": case_id, "decision_id": decision_id}
+        if self._session.get(RiskCaseDecisionRecord, key) is None:
+            self._session.add(RiskCaseDecisionRecord(**key))
+
+    def list_recent(self, *, limit: int, offset: int = 0) -> tuple[RiskCase, ...]:
+        return tuple(
+            cast(RiskCase, from_payload(RiskCase, row.payload))
+            for row in self._session.scalars(
+                select(RiskCaseRecord)
+                .order_by(RiskCaseRecord.opened_at.desc(), RiskCaseRecord.case_id.asc())
+                .limit(_bounded_limit(limit))
+                .offset(_bounded_offset(offset))
+            )
+        )
+
+    def list_for_subject(
+        self, subject_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[RiskCase, ...]:
+        return tuple(
+            cast(RiskCase, from_payload(RiskCase, row.payload))
+            for row in self._session.scalars(
+                select(RiskCaseRecord)
+                .where(RiskCaseRecord.subject_id == subject_id)
+                .order_by(RiskCaseRecord.opened_at.desc(), RiskCaseRecord.case_id.asc())
+                .limit(_bounded_limit(limit))
+                .offset(_bounded_offset(offset))
+            )
+        )
+
+
+class InvestigationRunRepository(
+    _ImmutableRepository[InvestigationRun, InvestigationRunRecord]
+):
+    """Persistence and bounded lookup boundary for execution attempts."""
+
+    def __init__(self, session: Session) -> None:
+        super().__init__(
+            session,
+            record_type=InvestigationRunRecord,
+            domain_type=InvestigationRun,
+            key_for=lambda value: value.run_id,
+            make_record=lambda value, payload: InvestigationRunRecord(
+                run_id=value.run_id,
+                decision_id=value.decision_id,
+                case_id=value.case_id,
+                investigation_id=value.investigation_id,
+                agent_model_id=value.agent_model_id,
+                status=value.status.value,
+                started_at=value.started_at,
+                completed_at=value.completed_at,
+                payload=payload,
+            ),
+        )
+
+    def list_for_case(
+        self, case_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[InvestigationRun, ...]:
+        return self._list(
+            select(InvestigationRunRecord)
+            .where(InvestigationRunRecord.case_id == case_id)
+            .order_by(
+                InvestigationRunRecord.started_at.desc(),
+                InvestigationRunRecord.run_id.asc(),
+            )
+            .limit(_bounded_limit(limit))
+            .offset(_bounded_offset(offset))
+        )
+
+    def list_for_decision(
+        self, decision_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[InvestigationRun, ...]:
+        return self._list(
+            select(InvestigationRunRecord)
+            .where(InvestigationRunRecord.decision_id == decision_id)
+            .order_by(
+                InvestigationRunRecord.started_at.desc(),
+                InvestigationRunRecord.run_id.asc(),
+            )
+            .limit(_bounded_limit(limit))
+            .offset(_bounded_offset(offset))
+        )
+
+    def _list(
+        self, statement: Select[tuple[InvestigationRunRecord]]
+    ) -> tuple[InvestigationRun, ...]:
+        return tuple(
+            cast(InvestigationRun, from_payload(InvestigationRun, row.payload))
+            for row in self._session.scalars(statement)
+        )
+
+
+class InvestigationReportRepository:
+    """Persist trusted reports by report ID, with one report per run."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def persist(
+        self, value: PersistedInvestigationReport
+    ) -> PersistedInvestigationReport:
+        expected_report_id = report_id(value.investigation_id, value.report)
+        if value.report_id != expected_report_id:
+            raise ValueError("report_id does not match trusted report provenance")
+        run = self._session.get(InvestigationRunRecord, value.run_id)
+        if run is None:
+            raise ValueError("investigation report requires a persisted run")
+        if (
+            run.investigation_id != value.investigation_id
+            or run.decision_id != value.report.request.decision_id
+        ):
+            raise ValueError("investigation report does not match its operational run")
+        payload = payload_for(value.report)
+        existing = self._session.get(InvestigationReportRecord, value.report_id)
+        if existing is None:
+            self._session.add(
+                InvestigationReportRecord(
+                    report_id=value.report_id,
+                    run_id=value.run_id,
+                    investigation_id=value.investigation_id,
+                    policy_action=value.report.policy_action.value,
+                    status=value.report.status.value,
+                    pattern=value.report.pattern.value,
+                    payload=payload,
+                )
+            )
+            return value
+        if (
+            existing.run_id != value.run_id
+            or existing.investigation_id != value.investigation_id
+            or existing.payload != payload
+        ):
+            raise ImmutablePersistenceConflict(
+                f"immutable object {value.report_id} already exists with different payload"
+            )
+        return self._from_record(existing)
+
+    def get(self, report_id: str) -> PersistedInvestigationReport | None:
+        record = self._session.get(InvestigationReportRecord, report_id)
+        return None if record is None else self._from_record(record)
+
+    def get_for_run(self, run_id: str) -> PersistedInvestigationReport | None:
+        record = self._session.scalar(
+            select(InvestigationReportRecord).where(
+                InvestigationReportRecord.run_id == run_id
+            )
+        )
+        return None if record is None else self._from_record(record)
+
+    def _from_record(
+        self, record: InvestigationReportRecord
+    ) -> PersistedInvestigationReport:
+        report = cast(
+            InvestigationReport, from_payload(InvestigationReport, record.payload)
+        )
+        if record.report_id != report_id(record.investigation_id, report):
+            raise ValueError("stored report_id failed provenance validation")
+        run = self._session.get(InvestigationRunRecord, record.run_id)
+        if run is None:
+            raise ValueError("stored report references a missing investigation run")
+        if (
+            run.investigation_id != record.investigation_id
+            or run.decision_id != report.request.decision_id
+        ):
+            raise ValueError("stored report does not match its operational run")
+        return PersistedInvestigationReport(
+            report_id=record.report_id,
+            run_id=record.run_id,
+            investigation_id=record.investigation_id,
+            report=report,
+        )
+
+
+def _bounded_limit(limit: int) -> int:
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    return limit
+
+
+def _bounded_offset(offset: int) -> int:
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
+    return offset

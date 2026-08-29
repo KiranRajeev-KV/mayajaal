@@ -6,16 +6,21 @@ from .engine import DatabaseRuntime, create_database_runtime, ping_database
 from .models import (
     InvestigationReportRecord,
     InvestigationRequestRecord,
+    InvestigationRunRecord,
     PolicyDecisionRecord,
     ProbabilityEstimateRecord,
+    RiskCaseDecisionRecord,
+    RiskCaseRecord,
     ScoreObservationRecord,
 )
 from .repositories import (
     ImmutablePersistenceConflict,
     InvestigationReportRepository,
     InvestigationRequestRepository,
+    InvestigationRunRepository,
     PolicyDecisionRepository,
     ProbabilityEstimateRepository,
+    RiskCaseRepository,
     ScoreObservationRepository,
 )
 from .session import SessionFactory, session_scope
@@ -30,10 +35,15 @@ __all__ = [
     "InvestigationReportRepository",
     "InvestigationRequestRecord",
     "InvestigationRequestRepository",
+    "InvestigationRunRecord",
+    "InvestigationRunRepository",
     "PolicyDecisionRecord",
     "PolicyDecisionRepository",
     "ProbabilityEstimateRecord",
     "ProbabilityEstimateRepository",
+    "RiskCaseDecisionRecord",
+    "RiskCaseRecord",
+    "RiskCaseRepository",
     "ScoreObservationRecord",
     "ScoreObservationRepository",
     "SessionFactory",

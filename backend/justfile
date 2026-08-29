@@ -58,6 +58,10 @@ db-current:
 db-ping:
     uv run python -m scripts.db_ping
 
+# Run the thin operational read API. It requires MAYAJAAL_DATABASE_URL.
+api-run:
+    uv run uvicorn mayajaal.api.app:create_app --factory --reload
+
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
     uv run python -m scripts.extract_features --config {{ config }}

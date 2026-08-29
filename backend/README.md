@@ -36,9 +36,9 @@ the only targeted deptry unused-dependency exceptions. CatBoost and SHAP are
 direct baseline dependencies. Production tooling lives in the `dev` dependency
 group.
 
-## Operational PostgreSQL foundation
+## Operational PostgreSQL and read API
 
-Stages 11A–11B provide synchronous operational persistence in
+Stages 11A–11C provide synchronous operational persistence in
 `mayajaal.api.db`. SQLAlchemy ORM records are strictly a storage
 representation; the existing Pydantic/dataclass lineage contracts remain the
 authoritative validation and provenance boundary. Repositories receive a
@@ -54,15 +54,18 @@ Neo4j       derived identity / temporal graph
 Parquet     deterministic synthetic + ML benchmark artifacts
 ```
 
-PostgreSQL is therefore not a second copy of the temporal graph. Stage 11B
-persists only immutable runtime lineage:
+PostgreSQL is therefore not a second copy of the temporal graph. The immutable
+runtime lineage remains storage-neutral, while Stage 11C adds the smallest
+operational lifecycle around it:
 
 ```text
 ScoreObservation
 → ProbabilityEstimate
 → PolicyDecision
+→ RiskCase (optional long-lived subject/risk episode)
 → InvestigationRequest
-→ InvestigationReport
+→ InvestigationRun(s)
+→ verified InvestigationReport
 ```
 
 Each table keeps its full validated domain object in JSONB, alongside typed
@@ -72,11 +75,63 @@ over-normalizing nested immutable provenance. Repeating an identical immutable
 write is accepted; attempting to reuse its authoritative ID with a different
 payload fails. PostgreSQL foreign keys protect persisted parent lineage.
 
-`InvestigationReport` currently has no independent authoritative report field,
-so its row is one-to-one with the already-unique request `decision_id`. A later
-case-orchestration stage can add report-run lifecycle semantics deliberately.
-There is deliberately no `risk_cases` table yet, no synthetic account/event
-copy, no graph replication, no routes, and no realtime ingestion/workers.
+`RiskCase` is deliberately small: an opaque `case_id`, account subject, open or
+closed state, opening decision, and operational timestamps. It is a long-lived
+container, not a model output. `risk_case_decisions` permits additional policy
+decisions for the same case over time. It does **not** imply one account has one
+case forever.
+
+Operational IDs stay distinct:
+
+```text
+decision_id       immutable policy-decision identity
+run_id            opaque operational execution-attempt identity
+investigation_id  deterministic investigation provenance identity
+report_id         deterministic grounded-report identity
+case_id           opaque business/runtime case identity
+```
+
+One decision/request may therefore have zero or many `InvestigationRun`s.
+`investigation_reports.report_id` is its primary key and each run currently has
+at most one report (`run_id` is unique). The persistence coordinator derives
+`investigation_id` and `report_id` through the existing trusted provenance
+functions; callers never supply those IDs independently.
+
+The thin application service `RuntimeLineagePersistenceService` coordinates
+already-produced trusted objects within one caller-owned transaction. It does
+not score, call models, invoke investigations, or commit. The FastAPI layer is
+read-only and exposes stable response models rather than ORM rows or arbitrary
+JSONB payloads:
+
+```text
+GET /health
+GET /cases
+GET /cases/{case_id}
+GET /cases/{case_id}/investigations
+GET /investigations/{run_id}
+GET /investigations/{run_id}/report
+```
+
+The app factory owns one `DatabaseRuntime` for its lifespan and disposes its
+engine pool on shutdown. Each request receives a short-lived synchronous
+SQLAlchemy session. Start it locally after exporting `.env` and migrating:
+
+```bash
+just api-run
+```
+
+Alembic revision `57142160cad9_add_operational_case_investigation_runs` adds
+the case/run tables and replaces Stage 11B's development-only report table.
+Stage 11B reports could not be safely backfilled because they contained neither
+a run identity nor the provenance required to derive one, so that migration
+recreates the report table instead of inventing fake historical executions.
+The local hackathon database is disposable; upgrade/downgrade has the same
+constraint for Stage 11C reports.
+
+There is still deliberately no synthetic account/event copy, graph replication,
+webhook ingestion, realtime scoring, incremental Neo4j update, SSE/WebSocket
+delivery, authentication, workers, or generic CRUD layer. Atomic webhook
+deduplication and `ON CONFLICT` ingestion belong to the later realtime stage.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable
@@ -102,7 +157,8 @@ resulting `.env` or use those local development values outside a local setup.
 
 Alembic lives in `backend/alembic/`, imports the same `Base.metadata` and
 `DatabaseConfig` as the application, and now has the first real autogen-reviewed
-revision for these five tables: `c263e0cacd3d_persist_operational_runtime_lineage`.
+revision for the lineage tables: `c263e0cacd3d_persist_operational_runtime_lineage`,
+followed by `57142160cad9_add_operational_case_investigation_runs`.
 The shared metadata applies deterministic names for indexes and primary, unique,
 check, and foreign-key constraints before migrations are generated. Future
 schema changes should continue with

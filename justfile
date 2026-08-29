@@ -67,6 +67,9 @@ db-current:
 db-ping:
     just --justfile {{backend_justfile}} db-ping
 
+api-run:
+    just --justfile {{backend_justfile}} api-run
+
 neo4j-load config="config.toml":
     just --justfile {{backend_justfile}} neo4j-load {{config}}
 

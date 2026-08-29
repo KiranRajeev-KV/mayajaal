@@ -4,6 +4,7 @@ from typing import Any, cast
 
 from pydantic import TypeAdapter
 
+from mayajaal.api.contracts import InvestigationRun, RiskCase
 from mayajaal.calibration import ProbabilityEstimate
 from mayajaal.investigation import InvestigationReport, InvestigationRequest
 from mayajaal.policy import PolicyDecision
@@ -15,6 +16,8 @@ DomainObject = (
     | PolicyDecision
     | InvestigationRequest
     | InvestigationReport
+    | InvestigationRun
+    | RiskCase
 )
 
 _SCORE_ADAPTER = TypeAdapter(ScoreObservation)
@@ -22,6 +25,8 @@ _ESTIMATE_ADAPTER = TypeAdapter(ProbabilityEstimate)
 _DECISION_ADAPTER = TypeAdapter(PolicyDecision)
 _REQUEST_ADAPTER = TypeAdapter(InvestigationRequest)
 _REPORT_ADAPTER = TypeAdapter(InvestigationReport)
+_RUN_ADAPTER = TypeAdapter(InvestigationRun)
+_CASE_ADAPTER = TypeAdapter(RiskCase)
 
 
 def payload_for(value: DomainObject) -> dict[str, object]:
@@ -53,6 +58,8 @@ def _adapter_for_type(model: type[DomainObject]) -> TypeAdapter[Any]:
         PolicyDecision: _DECISION_ADAPTER,
         InvestigationRequest: _REQUEST_ADAPTER,
         InvestigationReport: _REPORT_ADAPTER,
+        InvestigationRun: _RUN_ADAPTER,
+        RiskCase: _CASE_ADAPTER,
     }
     try:
         return adapters[model]

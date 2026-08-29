@@ -8,7 +8,7 @@ identity, lineage, and the immediate subject/time/status lookup paths.
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, String
+from sqlalchemy import DateTime, Float, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -135,20 +135,79 @@ class InvestigationRequestRecord(Base):
 
 
 class InvestigationReportRecord(Base):
-    """One immutable report keyed by its already-unique request decision ID.
-
-    The current authoritative report contract has no independent report field;
-    it is therefore persisted as a one-to-one child of its request. Future case
-    orchestration can introduce a report-run identifier without overloading this
-    operational lineage boundary.
-    """
+    """One trusted report for one operational investigation run."""
 
     __tablename__ = "investigation_reports"
+    __table_args__ = (UniqueConstraint("run_id"),)
 
-    decision_id: Mapped[str] = mapped_column(
-        ForeignKey("investigation_requests.decision_id"), primary_key=True
+    report_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("investigation_runs.run_id"), nullable=False
     )
+    investigation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     policy_action: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     pattern: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
+
+
+class RiskCaseRecord(Base):
+    """Storage representation of an operational, long-lived risk case."""
+
+    __tablename__ = "risk_cases"
+    __table_args__ = (
+        Index("ix_risk_cases_subject_id_opened_at", "subject_id", "opened_at"),
+        Index("ix_risk_cases_status_opened_at", "status", "opened_at"),
+    )
+
+    case_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    opening_decision_id: Mapped[str] = mapped_column(
+        ForeignKey("policy_decisions.decision_id"), nullable=False
+    )
+    payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
+
+
+class RiskCaseDecisionRecord(Base):
+    """Association allowing a risk case to retain policy decisions over time."""
+
+    __tablename__ = "risk_case_decisions"
+
+    case_id: Mapped[str] = mapped_column(
+        ForeignKey("risk_cases.case_id"), primary_key=True
+    )
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("policy_decisions.decision_id"), primary_key=True
+    )
+
+
+class InvestigationRunRecord(Base):
+    """Operational execution attempt; provenance identity is not its primary key."""
+
+    __tablename__ = "investigation_runs"
+    __table_args__ = (
+        Index(
+            "ix_investigation_runs_decision_id_started_at", "decision_id", "started_at"
+        ),
+        Index("ix_investigation_runs_case_id_started_at", "case_id", "started_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("investigation_requests.decision_id"), nullable=False
+    )
+    case_id: Mapped[str | None] = mapped_column(
+        ForeignKey("risk_cases.case_id"), nullable=True
+    )
+    investigation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_model_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)

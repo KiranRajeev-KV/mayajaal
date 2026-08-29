@@ -1,18 +1,35 @@
 """High-value tests for immutable operational database persistence."""
 
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import cast
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from fastapi import FastAPI, HTTPException
+from fastapi.routing import APIRoute
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+from starlette.requests import Request
 
+from mayajaal.api.app import (
+    CaseListResponse,
+    HealthResponse,
+    InvestigationReportResponse,
+    InvestigationRunListResponse,
+    create_app,
+    get_session,
+)
+from mayajaal.api.contracts import RiskCase
 from mayajaal.api.db import (
     Base,
     DatabaseConfig,
+    DatabaseRuntime,
     ImmutablePersistenceConflict,
     InvestigationReportRepository,
     InvestigationRequestRepository,
+    InvestigationRunRepository,
     PolicyDecisionRepository,
     ProbabilityEstimateRepository,
     ScoreObservationRepository,
@@ -20,6 +37,7 @@ from mayajaal.api.db import (
 )
 from mayajaal.api.db.base import NAMING_CONVENTION
 from mayajaal.api.db.models import ScoreObservationRecord
+from mayajaal.api.orchestration import RuntimeLineagePersistenceService
 from mayajaal.calibration import (
     CalibrationConfig,
     ProbabilityEstimate,
@@ -28,11 +46,17 @@ from mayajaal.calibration import (
     estimate_probability,
 )
 from mayajaal.investigation import (
+    InvestigationConfig,
+    InvestigationExecution,
     InvestigationPattern,
     InvestigationReport,
     InvestigationRequest,
     InvestigationStatus,
+    InvestigationSubjectType,
+    investigation_id,
+    report_id,
 )
+from mayajaal.investigation.ledger import EvidenceLedgerSnapshot
 from mayajaal.policy import (
     DecisionContext,
     PolicyConfig,
@@ -93,6 +117,9 @@ class DatabaseFoundationTests(unittest.TestCase):
                 "policy_decisions",
                 "investigation_requests",
                 "investigation_reports",
+                "investigation_runs",
+                "risk_cases",
+                "risk_case_decisions",
             },
         )
 
@@ -102,14 +129,21 @@ class DatabaseFoundationTests(unittest.TestCase):
         engine = create_engine("sqlite://")
         Base.metadata.create_all(engine)
         sessions = sessionmaker(bind=engine, expire_on_commit=False)
-        score, estimate, decision, request, report = _lineage()
+        score, estimate, decision, request, execution = _lineage()
+        case = _case(decision)
         try:
             with session_scope(sessions) as session:
-                ScoreObservationRepository(session).persist(score)
-                ProbabilityEstimateRepository(session).persist(estimate)
-                PolicyDecisionRepository(session).persist(decision)
-                InvestigationRequestRepository(session).persist(request)
-                InvestigationReportRepository(session).persist(report)
+                persisted = RuntimeLineagePersistenceService(session).persist_execution(
+                    score_observation=score,
+                    probability_estimate=estimate,
+                    policy_decision=decision,
+                    investigation_request=request,
+                    execution=execution,
+                    run_id="run-fixture-001",
+                    started_at=datetime(2026, 8, 29, 12, 1, tzinfo=UTC),
+                    completed_at=datetime(2026, 8, 29, 12, 2, tzinfo=UTC),
+                    risk_case=case,
+                )
 
             with session_scope(sessions) as session:
                 self.assertEqual(
@@ -130,8 +164,28 @@ class DatabaseFoundationTests(unittest.TestCase):
                     request,
                 )
                 self.assertEqual(
-                    InvestigationReportRepository(session).get(decision.decision_id),
-                    report,
+                    InvestigationRunRepository(session).get("run-fixture-001"),
+                    persisted.investigation_run,
+                )
+                self.assertEqual(
+                    InvestigationReportRepository(session).get(
+                        persisted.investigation_report.report_id
+                    ),
+                    persisted.investigation_report,
+                )
+                expected_investigation_id = investigation_id(
+                    request=request,
+                    config=execution.config,
+                    agent_model_id=execution.agent_model_id,
+                    snapshot=execution.snapshot,
+                )
+                self.assertEqual(
+                    persisted.investigation_run.investigation_id,
+                    expected_investigation_id,
+                )
+                self.assertEqual(
+                    persisted.investigation_report.report_id,
+                    report_id(expected_investigation_id, execution.report),
                 )
                 with self.assertRaises(ImmutablePersistenceConflict):
                     ScoreObservationRepository(session).persist(
@@ -161,13 +215,138 @@ class DatabaseFoundationTests(unittest.TestCase):
         finally:
             engine.dispose()
 
+    def test_one_decision_supports_multiple_runs_reports_and_read_api(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        score, estimate, decision, request, first_execution = _lineage()
+        second_execution = replace(first_execution, agent_model_id="injected:second")
+        case = _case(decision)
+        try:
+            with session_scope(sessions) as session:
+                service = RuntimeLineagePersistenceService(session)
+                first = service.persist_execution(
+                    score_observation=score,
+                    probability_estimate=estimate,
+                    policy_decision=decision,
+                    investigation_request=request,
+                    execution=first_execution,
+                    run_id="run-fixture-001",
+                    started_at=datetime(2026, 8, 29, 12, 1, tzinfo=UTC),
+                    risk_case=case,
+                )
+                second = service.persist_execution(
+                    score_observation=score,
+                    probability_estimate=estimate,
+                    policy_decision=decision,
+                    investigation_request=request,
+                    execution=second_execution,
+                    run_id="run-fixture-002",
+                    started_at=datetime(2026, 8, 29, 12, 3, tzinfo=UTC),
+                    risk_case=case,
+                )
+                self.assertNotEqual(
+                    first.investigation_report.report_id,
+                    second.investigation_report.report_id,
+                )
+                self.assertEqual(
+                    len(
+                        InvestigationRunRepository(session).list_for_case(
+                            case.case_id, limit=10
+                        )
+                    ),
+                    2,
+                )
+
+            runtime = _runtime(engine, sessions)
+            app = create_app(runtime)
+            app.state.database_runtime = runtime
+            request = Request({"type": "http", "app": app})
+            session_dependency = get_session(request)
+            request_session = next(session_dependency)
+            try:
+                health = cast(
+                    Callable[[Request], HealthResponse], _endpoint(app, "/health")
+                )
+                self.assertEqual(health(request).status, "ready")
+                list_cases = cast(
+                    Callable[..., CaseListResponse], _endpoint(app, "/cases")
+                )
+                cases = list_cases(request_session, limit=50, offset=0)
+                self.assertEqual([item.case_id for item in cases.items], [case.case_id])
+                list_runs = cast(
+                    Callable[..., InvestigationRunListResponse],
+                    _endpoint(app, "/cases/{case_id}/investigations"),
+                )
+                runs = list_runs(case.case_id, request_session, limit=50, offset=0)
+                self.assertEqual(
+                    [item.run_id for item in runs.items],
+                    ["run-fixture-002", "run-fixture-001"],
+                )
+                get_report = cast(
+                    Callable[..., InvestigationReportResponse],
+                    _endpoint(app, "/investigations/{run_id}/report"),
+                )
+                report = get_report("run-fixture-001", request_session)
+                self.assertEqual(report.report_id, first.investigation_report.report_id)
+                get_case = cast(
+                    Callable[..., object], _endpoint(app, "/cases/{case_id}")
+                )
+                with self.assertRaises(HTTPException) as error:
+                    get_case("missing", request_session)
+                self.assertEqual(error.exception.status_code, 404)
+            finally:
+                session_dependency.close()
+        finally:
+            engine.dispose()
+
+    def test_orchestration_rolls_back_complete_lineage_on_late_conflict(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        score, estimate, decision, request, execution = _lineage()
+        try:
+            with (
+                self.assertRaises(ImmutablePersistenceConflict),
+                session_scope(sessions) as session,
+            ):
+                service = RuntimeLineagePersistenceService(session)
+                service.persist_execution(
+                    score_observation=score,
+                    probability_estimate=estimate,
+                    policy_decision=decision,
+                    investigation_request=request,
+                    execution=execution,
+                    run_id="run-rollback-001",
+                    started_at=datetime(2026, 8, 29, 12, 1, tzinfo=UTC),
+                )
+                service.persist_execution(
+                    score_observation=score,
+                    probability_estimate=estimate,
+                    policy_decision=decision,
+                    investigation_request=request,
+                    execution=execution,
+                    run_id="run-rollback-002",
+                    started_at=datetime(2026, 8, 29, 12, 2, tzinfo=UTC),
+                )
+            with session_scope(sessions) as session:
+                self.assertIsNone(
+                    ScoreObservationRepository(session).get(score.score_id)
+                )
+        finally:
+            engine.dispose()
+
 
 def _lineage() -> tuple[
     ScoreObservation,
     ProbabilityEstimate,
     PolicyDecision,
     InvestigationRequest,
-    InvestigationReport,
+    InvestigationExecution,
 ]:
     cutoff = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
     score_semantics = score_observation_semantics(
@@ -216,4 +395,51 @@ def _lineage() -> tuple[
         pattern=InvestigationPattern.INCONCLUSIVE,
         summary="No factual investigation evidence was supplied.",
     )
-    return score, estimate, decision, request, report
+    return (
+        score,
+        estimate,
+        decision,
+        request,
+        InvestigationExecution(
+            report=report,
+            snapshot=EvidenceLedgerSnapshot(evidence=(), tool_trace=()),
+            agent_model_id="injected:fixture",
+            config=InvestigationConfig(),
+        ),
+    )
+
+
+def _case(decision: PolicyDecision) -> RiskCase:
+    return RiskCase(
+        case_id="case-fixture-001",
+        subject_type=InvestigationSubjectType.ACCOUNT,
+        subject_id=decision.subject_id,
+        opened_at=datetime(2026, 8, 29, 12, 0, tzinfo=UTC),
+        opening_decision_id=decision.decision_id,
+    )
+
+
+def _runtime(
+    engine: Engine,
+    sessions: sessionmaker[Session],
+) -> DatabaseRuntime:
+    return DatabaseRuntime(
+        config=DatabaseConfig.from_environment(
+            {
+                "MAYAJAAL_DATABASE_URL": (
+                    "postgresql+psycopg://user:password@localhost:5433/mayajaal"
+                )
+            }
+        ),
+        engine=engine,
+        sessions=sessions,
+    )
+
+
+def _endpoint(app: object, path: str) -> object:
+    """Locate one registered endpoint without a live HTTP client dependency."""
+    routes = cast(FastAPI, app).routes
+    for route in cast(list[object], routes):
+        if isinstance(route, APIRoute) and route.path == path:
+            return route.endpoint
+    raise AssertionError(f"missing route: {path}")
