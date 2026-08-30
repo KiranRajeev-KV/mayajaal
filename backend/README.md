@@ -271,7 +271,10 @@ Terra/investigations remain explicitly user-triggered.
 
 ### Stage 12E: user-triggered Terra investigations
 
-`POST /cases/{case_id}/investigations` accepts only an immutable `decision_id`.
+`POST /cases/{case_id}/investigations` accepts only an immutable `decision_id`
+and a required bounded `Idempotency-Key` header. Reusing the same key for the
+same case and decision returns the original job without scheduling Terra again;
+a new key intentionally starts a separate investigation.
 It verifies that the decision belongs to the case and that score, calibrated
 probability, and policy lineage can construct the existing
 `InvestigationRequest`. It commits an `investigation_jobs` row before scheduling
@@ -285,8 +288,9 @@ and report read endpoints remain the source of completed trusted results.
 `just investigation-process run_id=<run-id>` explicitly reclaims/retries a
 durable job after a process restart.
 
-At the decision cutoff, the runtime evidence factory combines the existing
-Neo4j cutoff-safe feature projection with normalized PostgreSQL facts whose
+At the decision cutoff, TreeSHAP and score verification use the immutable
+Stage 12C `FeatureVector` snapshot, while the runtime evidence factory combines
+the existing Neo4j cutoff-safe feature projection with normalized PostgreSQL facts whose
 `occurred_at` and Mayajaal receipt/knowledge time are both at or before that
 cutoff. It then passes the existing `EvidenceService` and a fresh per-run
 `InvestigationAgentService` (configured as `gpt-5.6-terra`, medium reasoning)
@@ -327,7 +331,10 @@ followed by `57142160cad9_add_operational_case_investigation_runs` and
 `ce8de48b5f07_add_durable_webhook_inbox` and
 `a5b7d6e8f901_add_normalized_events`.
 Stage 12D adds `d12d00000001_add_risk_processing_failures`; Stage 12E adds
-`d12e00000001_add_investigation_jobs`.
+`d12e00000001_add_investigation_jobs` and
+`d12e00000002_add_investigation_job_idempotency`.
+`just postgres-investigation-concurrency-test` is the opt-in real PostgreSQL
+race check for duplicate manual trigger requests.
 The shared metadata applies deterministic names for indexes and primary, unique,
 check, and foreign-key constraints before migrations are generated. Future
 schema changes should continue with

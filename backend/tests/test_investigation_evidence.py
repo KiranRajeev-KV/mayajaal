@@ -776,6 +776,90 @@ class EvidenceServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match investigation request"):
             _ = evidence_service.get_risk_explanation(request(), score)
 
+    def test_risk_explanation_uses_persisted_snapshot_not_changed_graph_features(
+        self,
+    ) -> None:
+        schema = FeatureSchema(
+            (
+                FeatureDefinition(
+                    "latest_payment_method", FeatureKind.CATEGORICAL, "Fixture."
+                ),
+            )
+        )
+        vectors = tuple(
+            FeatureVector(
+                f"account-{index}",
+                at(3),
+                {"latest_payment_method": value},
+            )
+            for index, value in enumerate(
+                ("__missing__", "card", "card", "__missing__")
+            )
+        )
+        baseline = train_baseline(
+            tuple(
+                LabeledFeatureVector(vector, index > 1)
+                for index, vector in enumerate(vectors)
+            ),
+            schema,
+            BaselineConfig(iterations=4, depth=2, learning_rate=0.1),
+        )
+        frozen = FrozenFullEvaluation(
+            evaluation_directory=Path("."),
+            manifest=SplitManifest(at(1), at(2), at(3), ()),
+            records=(),
+            raw_scores={},
+            baseline=baseline,
+            provenance={"base_model_id": "base-model-fixture"},
+        )
+        persisted_vector = vectors[3]
+        score = score_feature_vector(frozen, persisted_vector)
+        probability_model = ProbabilityModel(
+            base_model_id=frozen.base_model_id,
+            probability_model_id="probability-model-fixture",
+            calibration_config=CalibrationConfig(
+                minimum_positive_samples=1, minimum_negative_samples=1
+            ),
+            calibrator=SigmoidCalibrator(coefficient=1.0, intercept=0.0),
+            frozen_provenance={"base_model_id": frozen.base_model_id},
+        )
+        estimate = estimate_probability(probability_model, score)
+        decision = decide(
+            build_policy_model(probability_model, PolicyConfig()),
+            probability_model,
+            score,
+            estimate,
+            DecisionContext(exposure_paise=250_000),
+        )
+        investigation_request = InvestigationRequest.from_policy_decision(
+            decision, probability_model, score, estimate
+        )
+
+        class ChangedGraphFeatureService:
+            def extract(self, *_: object) -> FeatureVector:
+                raise AssertionError("mutable graph feature extraction must not run")
+
+        evidence_service = EvidenceService(
+            projection=self.projection,
+            events=self.events,
+            feature_service=cast(FeatureService, ChangedGraphFeatureService()),
+            frozen_evaluation=frozen,
+            config=InvestigationConfig(max_risk_drivers=1),
+            feature_vector=persisted_vector,
+        )
+        explanations = evidence_service.get_risk_explanation(
+            investigation_request, score
+        )
+        self.assertEqual(
+            evidence_service._verified_feature_vector(  # pyright: ignore[reportPrivateUsage]
+                investigation_request, score
+            ).values["latest_payment_method"],
+            "__missing__",
+        )
+        self.assertTrue(
+            all(item.facts["feature_value"] == "__missing__" for item in explanations)
+        )
+
 
 if __name__ == "__main__":
     _ = unittest.main()

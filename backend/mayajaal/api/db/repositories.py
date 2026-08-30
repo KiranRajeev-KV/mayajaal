@@ -17,7 +17,7 @@ from mayajaal.api.contracts import (
     RiskCase,
 )
 from mayajaal.calibration import ProbabilityEstimate
-from mayajaal.features import FeatureSchema, FeatureVector
+from mayajaal.features import FeatureKind, FeatureSchema, FeatureVector
 from mayajaal.investigation import InvestigationReport, InvestigationRequest, report_id
 from mayajaal.policy import PolicyDecision
 from mayajaal.schemas import Event
@@ -207,6 +207,61 @@ class FeatureVectorRepository:
                 f"immutable feature vector {vector_id} already exists with different payload"
             )
         return vector_id
+
+    def get(self, vector_id: str) -> FeatureVector | None:
+        """Load and verify one exact persisted vector against this schema."""
+        record = self._session.get(FeatureVectorRecord, vector_id)
+        if record is None:
+            return None
+        payload = record.payload
+        try:
+            raw_values = payload["values"]
+            if not isinstance(raw_values, dict):
+                raise TypeError("feature vector values must be an object")
+            raw_feature_values = cast(dict[str, float | int | str], raw_values)
+            # JSONB object storage does not preserve insertion order. Rebuild
+            # the authoritative FeatureVector mapping in frozen-schema order.
+            values = {
+                definition.name: raw_feature_values[definition.name]
+                for definition in self._schema.definitions
+            }
+            for definition in self._schema.definitions:
+                value = values.get(definition.name)
+                if (
+                    definition.kind is FeatureKind.NUMERIC
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                ):
+                    # PostgreSQL JSONB can deserialize 1.0 as the integer 1;
+                    # restore the authoritative FeatureVector numeric contract.
+                    values[definition.name] = float(value)
+            vector = FeatureVector(
+                account_id=str(payload["account_id"]),
+                cutoff=datetime.fromisoformat(str(payload["cutoff"])),
+                values=cast(dict[str, float | str], values),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ImmutablePersistenceConflict(
+                "persisted feature vector is malformed"
+            ) from error
+        if (
+            vector.account_id != record.account_id
+            or vector.cutoff != _require_aware_datetime(record.scoring_cutoff)
+        ):
+            raise ImmutablePersistenceConflict(
+                "persisted feature vector columns disagree"
+            )
+        try:
+            trusted_vector_id = feature_vector_id(self._schema, vector)
+        except (TypeError, ValueError) as error:
+            raise ImmutablePersistenceConflict(
+                "persisted feature vector does not satisfy the frozen schema"
+            ) from error
+        if trusted_vector_id != vector_id:
+            raise ImmutablePersistenceConflict(
+                "persisted feature vector ID/schema mismatch"
+            )
+        return vector
 
 
 class RiskEvaluationRepository:
@@ -577,26 +632,53 @@ class InvestigationJobRepository:
         row = self._session.get(InvestigationJobRecord, run_id)
         return None if row is None else self._from_record(row)
 
-    def enqueue(self, value: InvestigationJob) -> InvestigationJob:
+    def enqueue(self, value: InvestigationJob) -> tuple[InvestigationJob, bool]:
         values = {
             "run_id": value.run_id,
             "decision_id": value.decision_id,
             "case_id": value.case_id,
+            "idempotency_key": value.idempotency_key,
             "status": value.status.value,
             "created_at": value.created_at,
             "last_attempt_at": value.last_attempt_at,
             "claimed_at": value.claimed_at,
             "failure_detail": value.failure_detail,
         }
-        self._session.execute(
-            _conflict_ignored_insert(self._session, InvestigationJobRecord, values)
+        statement = _conflict_ignored_insert(
+            self._session,
+            InvestigationJobRecord,
+            values,
+            index_elements=["case_id", "decision_id", "idempotency_key"],
         )
-        stored = self.get(value.run_id)
+        if self._session.get_bind().dialect.name == "postgresql":
+            inserted = (
+                self._session.execute(
+                    statement.returning(InvestigationJobRecord.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+        else:
+            inserted = cast(Any, self._session.execute(statement)).rowcount == 1
+        stored = self.get_for_idempotency(
+            value.case_id, value.decision_id, value.idempotency_key
+        )
         if stored is None:
             raise RuntimeError("investigation job insert did not yield a durable row")
-        if stored != value:
+        if inserted and stored != value:
             raise ImmutablePersistenceConflict("investigation job ID already exists")
-        return stored
+        return stored, inserted
+
+    def get_for_idempotency(
+        self, case_id: str, decision_id: str, idempotency_key: str
+    ) -> InvestigationJob | None:
+        row = self._session.scalar(
+            select(InvestigationJobRecord).where(
+                InvestigationJobRecord.case_id == case_id,
+                InvestigationJobRecord.decision_id == decision_id,
+                InvestigationJobRecord.idempotency_key == idempotency_key,
+            )
+        )
+        return None if row is None else self._from_record(row)
 
     def claim(
         self, run_id: str, *, claimed_at: datetime, lease_timeout: timedelta
@@ -659,6 +741,7 @@ class InvestigationJobRepository:
             run_id=row.run_id,
             decision_id=row.decision_id,
             case_id=row.case_id,
+            idempotency_key=row.idempotency_key,
             status=InvestigationJobStatus(row.status),
             created_at=_require_aware_datetime(row.created_at),
             last_attempt_at=_aware_datetime(row.last_attempt_at),

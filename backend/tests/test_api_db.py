@@ -27,6 +27,7 @@ from mayajaal.api.db import (
     Base,
     DatabaseConfig,
     DatabaseRuntime,
+    FeatureVectorRepository,
     ImmutablePersistenceConflict,
     InvestigationJobRepository,
     InvestigationReportRepository,
@@ -39,7 +40,7 @@ from mayajaal.api.db import (
     session_scope,
 )
 from mayajaal.api.db.base import NAMING_CONVENTION
-from mayajaal.api.db.models import ScoreObservationRecord
+from mayajaal.api.db.models import FeatureVectorRecord, ScoreObservationRecord
 from mayajaal.api.investigations import InvestigationExecutionService
 from mayajaal.api.orchestration import RuntimeLineagePersistenceService
 from mayajaal.calibration import (
@@ -48,6 +49,12 @@ from mayajaal.calibration import (
     ProbabilityModel,
     SigmoidCalibrator,
     estimate_probability,
+)
+from mayajaal.features import (
+    FeatureDefinition,
+    FeatureKind,
+    FeatureSchema,
+    FeatureVector,
 )
 from mayajaal.graph import GraphProjection
 from mayajaal.investigation import (
@@ -69,7 +76,12 @@ from mayajaal.policy import (
     build_policy_model,
     decide,
 )
-from mayajaal.scoring import ScoreObservation, score_id, score_observation_semantics
+from mayajaal.scoring import (
+    ScoreObservation,
+    feature_vector_id,
+    score_id,
+    score_observation_semantics,
+)
 
 
 class DatabaseFoundationTests(unittest.TestCase):
@@ -387,6 +399,7 @@ class DatabaseFoundationTests(unittest.TestCase):
         sessions = sessionmaker(bind=engine, expire_on_commit=False)
         score, estimate, decision, request, execution = _lineage()
         case = _case(decision)
+        schema, vector = _feature_vector_for(score.subject_id, score.scoring_cutoff)
 
         class Graph:
             def feature_projection_at(self, cutoff: datetime) -> GraphProjection:
@@ -404,12 +417,14 @@ class DatabaseFoundationTests(unittest.TestCase):
                 ProbabilityEstimateRepository(session).persist(estimate)
                 PolicyDecisionRepository(session).persist(decision)
                 InvestigationRequestRepository(session).persist(request)
+                FeatureVectorRepository(session, schema).persist(vector)
                 RiskCaseRepository(session).persist(case)
                 InvestigationJobRepository(session).enqueue(
                     InvestigationJob(
                         run_id="run-job-001",
                         decision_id=decision.decision_id,
                         case_id=case.case_id,
+                        idempotency_key="job-completed",
                         status=InvestigationJobStatus.QUEUED,
                         created_at=datetime(2026, 8, 30, tzinfo=UTC),
                     )
@@ -417,7 +432,7 @@ class DatabaseFoundationTests(unittest.TestCase):
             service = InvestigationExecutionService(
                 sessions,
                 cast(object, graph),  # type: ignore[arg-type]
-                cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+                cast(object, SimpleNamespace(baseline=SimpleNamespace(schema=schema))),  # type: ignore[arg-type]
                 cast(object, SimpleNamespace()),  # type: ignore[arg-type]
                 execution.config,
                 agent_factory=lambda _: cast(object, Agent()),  # type: ignore[arg-type]
@@ -443,18 +458,21 @@ class DatabaseFoundationTests(unittest.TestCase):
         sessions = sessionmaker(bind=engine, expire_on_commit=False)
         score, estimate, decision, request, execution = _lineage()
         case = _case(decision)
+        schema, vector = _feature_vector_for(score.subject_id, score.scoring_cutoff)
         try:
             with session_scope(sessions) as session:
                 ScoreObservationRepository(session).persist(score)
                 ProbabilityEstimateRepository(session).persist(estimate)
                 PolicyDecisionRepository(session).persist(decision)
                 InvestigationRequestRepository(session).persist(request)
+                FeatureVectorRepository(session, schema).persist(vector)
                 RiskCaseRepository(session).persist(case)
                 InvestigationJobRepository(session).enqueue(
                     InvestigationJob(
                         run_id="run-job-failed",
                         decision_id=decision.decision_id,
                         case_id=case.case_id,
+                        idempotency_key="job-failed",
                         status=InvestigationJobStatus.QUEUED,
                         created_at=datetime(2026, 8, 30, tzinfo=UTC),
                     )
@@ -471,7 +489,7 @@ class DatabaseFoundationTests(unittest.TestCase):
             service = InvestigationExecutionService(
                 sessions,
                 cast(object, EmptyGraph()),  # type: ignore[arg-type]
-                cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+                cast(object, SimpleNamespace(baseline=SimpleNamespace(schema=schema))),  # type: ignore[arg-type]
                 cast(object, SimpleNamespace()),  # type: ignore[arg-type]
                 execution.config,
                 agent_factory=cast(
@@ -492,6 +510,87 @@ class DatabaseFoundationTests(unittest.TestCase):
         finally:
             engine.dispose()
 
+    def test_feature_vector_load_fails_closed_when_missing_or_corrupt(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        schema, vector = _feature_vector_for(
+            "account-fixture", datetime(2026, 8, 29, 12, tzinfo=UTC)
+        )
+        try:
+            with session_scope(sessions) as session:
+                repository = FeatureVectorRepository(session, schema)
+                vector_id = repository.persist(vector)
+                self.assertIsNone(repository.get("missing-vector"))
+                restored = repository.get(vector_id)
+                assert restored is not None
+                self.assertEqual(tuple(restored.values), schema.names)
+                self.assertIsInstance(restored.values["payment_identity_count"], float)
+                record = session.get(FeatureVectorRecord, vector_id)
+                assert record is not None
+                record.payload = {**record.payload, "account_id": "forged-account"}
+            with (
+                session_scope(sessions) as session,
+                self.assertRaisesRegex(
+                    ImmutablePersistenceConflict, "columns disagree"
+                ),
+            ):
+                FeatureVectorRepository(session, schema).get(vector_id)
+        finally:
+            engine.dispose()
+
+    def test_investigation_job_idempotency_reuses_only_matching_key(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        score, estimate, decision, request, _ = _lineage()
+        case = _case(decision)
+        try:
+            with session_scope(sessions) as session:
+                ScoreObservationRepository(session).persist(score)
+                ProbabilityEstimateRepository(session).persist(estimate)
+                PolicyDecisionRepository(session).persist(decision)
+                InvestigationRequestRepository(session).persist(request)
+                RiskCaseRepository(session).persist(case)
+                jobs = InvestigationJobRepository(session)
+                first, first_created = jobs.enqueue(
+                    InvestigationJob(
+                        run_id="run-key-a",
+                        decision_id=decision.decision_id,
+                        case_id=case.case_id,
+                        idempotency_key="key-a",
+                        status=InvestigationJobStatus.QUEUED,
+                        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+                    )
+                )
+                repeated, repeated_created = jobs.enqueue(
+                    InvestigationJob(
+                        run_id="run-key-a-retry",
+                        decision_id=decision.decision_id,
+                        case_id=case.case_id,
+                        idempotency_key="key-a",
+                        status=InvestigationJobStatus.QUEUED,
+                        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+                    )
+                )
+                rerun, rerun_created = jobs.enqueue(
+                    InvestigationJob(
+                        run_id="run-key-b",
+                        decision_id=decision.decision_id,
+                        case_id=case.case_id,
+                        idempotency_key="key-b",
+                        status=InvestigationJobStatus.QUEUED,
+                        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+                    )
+                )
+            self.assertTrue(first_created)
+            self.assertFalse(repeated_created)
+            self.assertTrue(rerun_created)
+            self.assertEqual(first.run_id, repeated.run_id)
+            self.assertNotEqual(first.run_id, rerun.run_id)
+        finally:
+            engine.dispose()
+
 
 def _lineage() -> tuple[
     ScoreObservation,
@@ -501,13 +600,15 @@ def _lineage() -> tuple[
     InvestigationExecution,
 ]:
     cutoff = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+    schema, vector = _feature_vector_for("account-fixture", cutoff)
+    vector_id = feature_vector_id(schema, vector)
     score_semantics = score_observation_semantics(
         score_contract_version=1,
         base_model_id="base-model-fixture",
         subject_id="account-fixture",
         scoring_cutoff=cutoff,
         raw_model_score=0.5,
-        feature_vector_id="feature-vector-fixture",
+        feature_vector_id=vector_id,
     )
     score = ScoreObservation(
         score_id=score_id(**score_semantics),
@@ -515,7 +616,7 @@ def _lineage() -> tuple[
         subject_id="account-fixture",
         scoring_cutoff=cutoff,
         raw_model_score=0.5,
-        feature_vector_id="feature-vector-fixture",
+        feature_vector_id=vector_id,
     )
     probability_model = ProbabilityModel(
         base_model_id=score.base_model_id,
@@ -558,6 +659,27 @@ def _lineage() -> tuple[
             agent_model_id="injected:fixture",
             config=InvestigationConfig(),
         ),
+    )
+
+
+def _feature_vector_for(
+    account_id: str, cutoff: datetime
+) -> tuple[FeatureSchema, FeatureVector]:
+    schema = FeatureSchema(
+        definitions=(
+            FeatureDefinition(
+                "latest_payment_method", FeatureKind.CATEGORICAL, "fixture"
+            ),
+            FeatureDefinition("payment_identity_count", FeatureKind.NUMERIC, "fixture"),
+        )
+    )
+    return schema, FeatureVector(
+        account_id=account_id,
+        cutoff=cutoff,
+        values={
+            "latest_payment_method": "__missing__",
+            "payment_identity_count": 1.0,
+        },
     )
 
 

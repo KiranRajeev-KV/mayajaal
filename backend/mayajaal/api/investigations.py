@@ -17,6 +17,7 @@ from mayajaal.investigation import (
 
 from .contracts import InvestigationJobStatus
 from .db import (
+    FeatureVectorRepository,
     InvestigationJobRepository,
     InvestigationJobUnavailable,
     InvestigationRequestRepository,
@@ -102,14 +103,30 @@ class InvestigationExecutionService:
                     job.decision_id
                 )
                 decision = PolicyDecisionRepository(session).get(job.decision_id)
+                vector = (
+                    FeatureVectorRepository(session, self._frozen.baseline.schema).get(
+                        request.feature_vector_id
+                    )
+                    if request is not None
+                    else None
+                )
                 if (
                     request is None
                     or score is None
                     or probability is None
                     or decision is None
+                    or vector is None
                 ):
                     raise ValueError(
                         "investigation job has incomplete decision lineage"
+                    )
+                if (
+                    vector.account_id != request.subject_id
+                    or vector.cutoff != request.cutoff_time
+                    or score.feature_vector_id != request.feature_vector_id
+                ):
+                    raise ValueError(
+                        "persisted feature vector does not match investigation lineage"
                     )
                 events = NormalizedEventRepository(session).known_at(
                     request.cutoff_time
@@ -122,6 +139,7 @@ class InvestigationExecutionService:
                 feature_service=FeatureService(projection),
                 frozen_evaluation=self._frozen,
                 config=self._config,
+                feature_vector=vector,
             )
             execution = self._agent_factory(self._config).run_execution(
                 request=request, evidence_service=evidence, score_observation=score

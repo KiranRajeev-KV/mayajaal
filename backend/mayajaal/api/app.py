@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Annotated, NoReturn, cast
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
 from sqlalchemy.orm import Session
@@ -398,17 +398,22 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
     )
     async def trigger_investigation(
-        case_id: str, body: InvestigationTriggerRequest, request: Request
+        case_id: str,
+        body: InvestigationTriggerRequest,
+        request: Request,
+        idempotency_key: Annotated[str | None, Header()] = None,
     ) -> InvestigationTriggerResponse:
         """Durably enqueue a manual investigation before any model work begins."""
+        key = _validated_idempotency_key(idempotency_key)
         run_id = str(uuid4())
         try:
-            job = await run_in_threadpool(
+            job, created = await run_in_threadpool(
                 _enqueue_investigation_sync,
                 _realtime_runtime_from_request(request),
                 run_id,
                 case_id,
                 body.decision_id,
+                key,
             )
         except LookupError as error:
             raise HTTPException(
@@ -418,14 +423,15 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
             ) from error
-        task = asyncio.create_task(
-            _run_investigation(
-                _realtime_runtime_from_request(request).investigations, run_id
+        if created:
+            task = asyncio.create_task(
+                _run_investigation(
+                    _realtime_runtime_from_request(request).investigations, job.run_id
+                )
             )
-        )
-        tasks = cast(set[asyncio.Task[None]], request.app.state.investigation_tasks)
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+            tasks = cast(set[asyncio.Task[None]], request.app.state.investigation_tasks)
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
         return InvestigationTriggerResponse(
             run_id=job.run_id,
             case_id=job.case_id,
@@ -631,8 +637,12 @@ def _pipeline_from_request(
 
 
 def _enqueue_investigation_sync(
-    runtime: RealtimeApplicationRuntime, run_id: str, case_id: str, decision_id: str
-) -> InvestigationJob:
+    runtime: RealtimeApplicationRuntime,
+    run_id: str,
+    case_id: str,
+    decision_id: str,
+    idempotency_key: str,
+) -> tuple[InvestigationJob, bool]:
     """Validate immutable lineage and commit the operational job in one scope."""
     with runtime.database.sessions.begin() as session:
         case_repository = RiskCaseRepository(session)
@@ -654,10 +664,20 @@ def _enqueue_investigation_sync(
                 run_id=run_id,
                 decision_id=decision_id,
                 case_id=case_id,
+                idempotency_key=idempotency_key,
                 status=InvestigationJobStatus.QUEUED,
                 created_at=datetime.now(tz=UTC),
             )
         )
+
+
+def _validated_idempotency_key(value: str | None) -> str:
+    if value is None or not value.strip() or value != value.strip() or len(value) > 255:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key must be a non-empty value up to 255 characters",
+        )
+    return value
 
 
 def _is_valid_provider_event_id(value: str | None) -> bool:

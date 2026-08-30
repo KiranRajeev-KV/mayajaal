@@ -40,6 +40,7 @@ class InvestigationJob(SchemaModel):
     run_id: NonEmptyId
     decision_id: NonEmptyId
     case_id: NonEmptyId
+    idempotency_key: str = Field(min_length=1, max_length=255)
     status: InvestigationJobStatus
     created_at: AwareDatetime
     last_attempt_at: AwareDatetime | None = None

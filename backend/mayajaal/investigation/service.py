@@ -94,12 +94,14 @@ class EvidenceService:
         feature_service: FeatureService,
         frozen_evaluation: FrozenFullEvaluation,
         config: InvestigationConfig,
+        feature_vector: FeatureVector | None = None,
     ) -> None:
         self._projection = projection
         self._events = tuple(
             sorted(events, key=lambda event: (event.occurred_at, str(event.id)))
         )
         self._feature_service = feature_service
+        self._feature_vector = feature_vector
         self._frozen_evaluation = frozen_evaluation
         # Evidence limits are fixed when the service is built; later caller
         # mutation must not alter a running investigation or its provenance.
@@ -396,7 +398,16 @@ class EvidenceService:
             or score_observation.feature_vector_id != request.feature_vector_id
         ):
             raise ValueError("score observation does not match investigation request")
-        vector = self._feature_service.extract(request.subject_id, request.cutoff_time)
+        vector = self._feature_vector
+        if vector is None:
+            vector = self._feature_service.extract(
+                request.subject_id, request.cutoff_time
+            )
+        if (
+            vector.account_id != request.subject_id
+            or vector.cutoff != request.cutoff_time
+        ):
+            raise ValueError("feature vector does not match investigation request")
         verify_score_from_feature_vector(
             score_observation, self._frozen_evaluation, vector
         )

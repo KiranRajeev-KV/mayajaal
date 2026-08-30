@@ -275,6 +275,7 @@ class InvestigationJobRecord(Base):
     __tablename__ = "investigation_jobs"
     __table_args__ = (
         Index("ix_investigation_jobs_status_created_at", "status", "created_at"),
+        UniqueConstraint("case_id", "decision_id", "idempotency_key"),
     )
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -284,6 +285,7 @@ class InvestigationJobRecord(Base):
     case_id: Mapped[str] = mapped_column(
         ForeignKey("risk_cases.case_id"), nullable=False
     )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
