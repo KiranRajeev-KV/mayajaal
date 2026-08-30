@@ -10,6 +10,7 @@ from pydantic import Field, field_validator
 
 from mayajaal.graph import (
     GraphLoadReport,
+    RuntimeIdentityAttributes,
     build_incremental_graph_projection,
 )
 from mayajaal.resolution.normalizers import normalize_stable_identifier
@@ -113,6 +114,19 @@ class RazorpayEventNormalizer:
             values[identity[0]] = _fixture_uuid(fixture_values, identity[1])
         return Event.model_validate(values)
 
+    def runtime_identity_attributes(
+        self, record: WebhookEventRecord
+    ) -> RuntimeIdentityAttributes:
+        """Map optional namespaced fixture facts to storage-neutral node metadata."""
+        envelope = RazorpayWebhookEnvelope.model_validate(record.payload)
+        fixture = envelope.payload.get("mayajaal")
+        values = cast(dict[str, object], fixture) if isinstance(fixture, dict) else {}
+        return RuntimeIdentityAttributes(
+            device_platform=_optional_fixture_string(values, "device_platform"),
+            device_type=_optional_fixture_string(values, "device_type"),
+            payment_method=_optional_fixture_string(values, "payment_method"),
+        )
+
 
 def _fixture_uuid(values: dict[str, object], key: str) -> UUID:
     value = values.get(key)
@@ -125,6 +139,15 @@ def _fixture_uuid(values: dict[str, object], key: str) -> UUID:
         return UUID(normalize_stable_identifier(value))
     except ValueError as error:
         raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}") from error
+
+
+def _optional_fixture_string(values: dict[str, object], key: str) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -185,6 +208,7 @@ class WebhookEventProcessor:
             claim_token = _claim_token(record)
             try:
                 event = self._normalizer.normalize(record)
+                attributes = self._normalizer.runtime_identity_attributes(record)
                 NormalizedEventRepository(session).persist(
                     provider_event_id=provider_event_id, event=event
                 )
@@ -198,7 +222,7 @@ class WebhookEventProcessor:
                     provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
                 )
         try:
-            projection = build_incremental_graph_projection(event)
+            projection = build_incremental_graph_projection(event, attributes)
             report = self._graph.load_incremental(projection)
         except Exception as error:
             with self._sessions.begin() as session:
@@ -247,7 +271,11 @@ class WebhookEventProcessor:
     def _project_existing(
         self, record: WebhookEventRecord, event: Event
     ) -> ProcessedWebhookEvent:
-        report = self._graph.load_incremental(build_incremental_graph_projection(event))
+        report = self._graph.load_incremental(
+            build_incremental_graph_projection(
+                event, self._normalizer.runtime_identity_attributes(record)
+            )
+        )
         return _result(record.provider_event_id, event, report)
 
     def _process_claimed(
@@ -267,6 +295,7 @@ class WebhookEventProcessor:
                 )
             try:
                 event = self._normalizer.normalize(record)
+                attributes = self._normalizer.runtime_identity_attributes(record)
                 NormalizedEventRepository(session).persist(
                     provider_event_id=provider_event_id, event=event
                 )
@@ -280,7 +309,7 @@ class WebhookEventProcessor:
                     provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
                 )
         try:
-            projection = build_incremental_graph_projection(event)
+            projection = build_incremental_graph_projection(event, attributes)
             report = self._graph.load_incremental(projection)
         except Exception as error:
             with self._sessions.begin() as session:

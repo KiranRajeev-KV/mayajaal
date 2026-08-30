@@ -16,6 +16,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -191,6 +192,14 @@ class RiskCaseRecord(Base):
     __table_args__ = (
         Index("ix_risk_cases_subject_id_opened_at", "subject_id", "opened_at"),
         Index("ix_risk_cases_status_opened_at", "status", "opened_at"),
+        Index(
+            "uq_risk_cases_open_subject",
+            "subject_type",
+            "subject_id",
+            unique=True,
+            postgresql_where=text("status = 'OPEN'"),
+            sqlite_where=text("status = 'OPEN'"),
+        ),
     )
 
     case_id: Mapped[str] = mapped_column(String(64), primary_key=True)

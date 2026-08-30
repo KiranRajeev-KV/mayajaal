@@ -149,6 +149,8 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
                 mayajaal={
                     "account_id": "00000000-0000-0000-0000-000000000001",
                     "device_id": "00000000-0000-0000-0000-0000000000d1",
+                    "device_platform": "ANDROID",
+                    "device_type": "MOBILE",
                     "exposure_paise": 250_000,
                     "context_id": "graph-demo-001",
                 },
@@ -164,6 +166,7 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
                 mayajaal={
                     "account_id": "00000000-0000-0000-0000-000000000001",
                     "payment_identity_id": shared_payment,
+                    "payment_method": "CARD",
                     "exposure_paise": 250_000,
                     "context_id": "graph-demo-002",
                 },
@@ -179,6 +182,7 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
                 mayajaal={
                     "account_id": "00000000-0000-0000-0000-000000000002",
                     "payment_identity_id": shared_payment,
+                    "payment_method": "CARD",
                     "exposure_paise": 250_000,
                     "context_id": "graph-demo-003",
                 },

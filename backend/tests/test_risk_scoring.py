@@ -163,6 +163,52 @@ class RuntimeRiskScoringTests(TestCase):
             )
         self.assertIsNone(case_id)
 
+    def test_runtime_identity_attributes_feed_existing_categorical_features(
+        self,
+    ) -> None:
+        self._accept("account", "mayajaal.account.created", {"account_id": ACCOUNT})
+        self._accept(
+            "device",
+            "mayajaal.device.seen",
+            {
+                "account_id": ACCOUNT,
+                "device_id": DEVICE,
+                "device_platform": "ANDROID",
+                "device_type": "MOBILE",
+            },
+        )
+        self._accept(
+            "payment",
+            "mayajaal.payment.attached",
+            {
+                "account_id": ACCOUNT,
+                "payment_identity_id": "00000000-0000-0000-0000-0000000000aa",
+                "payment_method": "CARD",
+            },
+        )
+        processor = WebhookEventProcessor(self.sessions, self.graph)
+        for provider_event_id in ("account", "device", "payment"):
+            processor.process(provider_event_id)
+        values = (
+            FeatureService(self.graph.feature_projection_at(NOW))
+            .extract(ACCOUNT, NOW)
+            .values
+        )
+        self.assertEqual(values["latest_device_platform"], "ANDROID")
+        self.assertEqual(values["latest_device_type"], "MOBILE")
+        self.assertEqual(values["latest_payment_method"], "CARD")
+
+    def test_missing_runtime_identity_attributes_remain_missing_features(self) -> None:
+        self._prepare_identity()
+        values = (
+            FeatureService(self.graph.feature_projection_at(NOW))
+            .extract(ACCOUNT, NOW)
+            .values
+        )
+        self.assertEqual(values["latest_device_platform"], "__missing__")
+        self.assertEqual(values["latest_device_type"], "__missing__")
+        self.assertEqual(values["latest_payment_method"], "__missing__")
+
     def _prepare_identity(self) -> None:
         self._accept("account", "mayajaal.account.created", {"account_id": ACCOUNT})
         self._accept(

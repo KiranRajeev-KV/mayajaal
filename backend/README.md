@@ -227,7 +227,9 @@ decision made before it arrived. Account nodes carry the same explicit
 `created_at` and `created_known_at` pair and are excluded unless both precede
 the cutoff. Account creation/history gaps fail closed. The graph demo emits
 both account setup events before its risk events; setup is processed but is not
-scored.
+scored. Its namespaced runtime fixtures can also supply truthful stable device
+platform/type and payment-method attributes; missing attributes intentionally
+remain missing for the existing categorical feature extractors.
 
 Runtime loads the verified frozen CatBoost full evaluation, sigmoid calibrator,
 and policy artifact without retraining. The runtime CLI selects the verified
@@ -239,7 +241,9 @@ immutable feature snapshot (by trusted feature-vector ID), score, probability,
 policy decision, and a durable provider-event evaluation link. Replays reuse
 that link. `REVIEW` and `BLOCK` create or attach the subject's open RiskCase;
 a new episode is deterministically keyed by its opening decision, so a later
-decision can open a distinct case after close. `ALLOW` does not. No
+decision can open a distinct case after close. PostgreSQL enforces at most one
+open case per subject with a partial unique index, and conflict-safe inserts
+converge concurrent risk-evaluation retries. `ALLOW` does not. No
 investigation is started by this stage.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only

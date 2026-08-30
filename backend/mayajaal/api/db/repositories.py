@@ -1,10 +1,10 @@
 """Small session-owned repositories for immutable operational lineage."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
-from sqlalchemy import Select, or_, select, update
+from sqlalchemy import Select, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -51,6 +51,30 @@ class WebhookClaimUnavailable(ValueError):
     """Raised when an inbox event cannot be claimed by this processor."""
 
 
+def _conflict_ignored_insert(
+    session: Session,
+    record_type: type[object],
+    values: Mapping[str, object],
+    *,
+    index_elements: list[str] | None = None,
+    index_where: object | None = None,
+) -> Any:
+    """Use the database's atomic no-overwrite insert for immutable rows."""
+    dialect = session.get_bind().dialect.name
+    table = cast(Any, record_type.__table__)  # type: ignore[attr-defined]
+    if dialect == "postgresql":
+        statement: Any = postgresql_insert(table).values(**values)
+        return statement.on_conflict_do_nothing(
+            index_elements=index_elements, index_where=cast(Any, index_where)
+        )
+    if dialect == "sqlite":
+        statement = sqlite_insert(table).values(**values)
+        return statement.on_conflict_do_nothing(
+            index_elements=index_elements, index_where=cast(Any, index_where)
+        )
+    raise ValueError("immutable lineage requires PostgreSQL or SQLite")
+
+
 class _ImmutableRepository[
     Domain: (
         ScoreObservation,
@@ -92,8 +116,17 @@ class _ImmutableRepository[
         payload = payload_for(value)
         existing = self._session.get(self._record_type, key)
         if existing is None:
-            self._session.add(self._make_record(value, payload))
-            return value
+            candidate = self._make_record(value, payload)
+            values = {
+                column.name: cast(object, getattr(candidate, column.name))
+                for column in candidate.__table__.columns
+            }
+            self._session.execute(
+                _conflict_ignored_insert(self._session, self._record_type, values)
+            )
+            existing = self._session.get(self._record_type, key)
+            if existing is None:
+                raise RuntimeError("immutable insert did not yield a durable row")
         if existing.payload != payload:
             raise ImmutablePersistenceConflict(
                 f"immutable object {key} already exists with different payload"
@@ -146,14 +179,21 @@ class FeatureVectorRepository:
         }
         existing = self._session.get(FeatureVectorRecord, vector_id)
         if existing is None:
-            self._session.add(
-                FeatureVectorRecord(
-                    feature_vector_id=vector_id,
-                    account_id=vector.account_id,
-                    scoring_cutoff=vector.cutoff,
-                    payload=payload,
+            self._session.execute(
+                _conflict_ignored_insert(
+                    self._session,
+                    FeatureVectorRecord,
+                    {
+                        "feature_vector_id": vector_id,
+                        "account_id": vector.account_id,
+                        "scoring_cutoff": vector.cutoff,
+                        "payload": payload,
+                    },
                 )
             )
+            existing = self._session.get(FeatureVectorRecord, vector_id)
+            if existing is None:
+                raise RuntimeError("feature vector insert did not yield a durable row")
         elif existing.payload != payload:
             raise ImmutablePersistenceConflict(
                 f"immutable feature vector {vector_id} already exists with different payload"
@@ -173,20 +213,25 @@ class RiskEvaluationRepository:
 
     def persist(
         self, provider_event_id: str, decision_id: str, case_id: str | None
-    ) -> None:
+    ) -> tuple[str, str | None, bool]:
+        values = {
+            "provider_event_id": provider_event_id,
+            "decision_id": decision_id,
+            "case_id": case_id,
+        }
+        statement = _conflict_ignored_insert(
+            self._session, RiskEvaluationRecord, values
+        )
+        result = cast(Any, self._session.execute(statement))
+        inserted: bool = result.rowcount == 1
         row = self._session.get(RiskEvaluationRecord, provider_event_id)
         if row is None:
-            self._session.add(
-                RiskEvaluationRecord(
-                    provider_event_id=provider_event_id,
-                    decision_id=decision_id,
-                    case_id=case_id,
-                )
-            )
-        elif row.decision_id != decision_id or row.case_id != case_id:
+            raise RuntimeError("risk evaluation insert did not yield a durable row")
+        if row.decision_id != decision_id or row.case_id != case_id:
             raise ImmutablePersistenceConflict(
                 "risk evaluation replay has different lineage"
             )
+        return row.decision_id, row.case_id, inserted
 
 
 class ProbabilityEstimateRepository(
@@ -311,6 +356,35 @@ class RiskCaseRepository(_ImmutableRepository[RiskCase, RiskCaseRecord]):
         return (
             None if row is None else cast(RiskCase, from_payload(RiskCase, row.payload))
         )
+
+    def open_or_create(self, value: RiskCase) -> RiskCase:
+        """Return the one open episode, tolerating a concurrent opener."""
+        existing = self.open_for_subject(value.subject_id)
+        if existing is not None:
+            return existing
+        payload = payload_for(value)
+        values = {
+            "case_id": value.case_id,
+            "subject_type": value.subject_type.value,
+            "subject_id": value.subject_id,
+            "status": value.status.value,
+            "opened_at": value.opened_at,
+            "closed_at": value.closed_at,
+            "opening_decision_id": value.opening_decision_id,
+            "payload": payload,
+        }
+        statement = _conflict_ignored_insert(
+            self._session,
+            RiskCaseRecord,
+            values,
+            index_elements=["subject_type", "subject_id"],
+            index_where=text("status = 'OPEN'"),
+        )
+        self._session.execute(statement)
+        opened = self.open_for_subject(value.subject_id)
+        if opened is None:
+            raise RuntimeError("open case insert did not yield an open episode")
+        return opened
 
     def close_case(self, case_id: str, closed_at: datetime) -> RiskCase:
         """Apply the sole mutable case transition: OPEN to CLOSED.

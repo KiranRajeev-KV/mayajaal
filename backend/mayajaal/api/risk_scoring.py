@@ -1,5 +1,6 @@
 """Stage 12C orchestration: processed event to persisted risk decision only."""
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
@@ -49,6 +50,15 @@ class RiskEvaluationResult:
     reused: bool
 
 
+@dataclass(frozen=True)
+class _ScoringInput:
+    """Immutable values copied during the short eligibility read."""
+
+    account_id: str
+    cutoff: datetime
+    context: DecisionContext
+
+
 class RuntimeRiskScoringService:
     """Compose feature, frozen scoring, calibration, policy, and persistence.
 
@@ -77,12 +87,10 @@ class RuntimeRiskScoringService:
         self._probability_model, self._policy_model = probability_model, policy_model
 
     def process(self, provider_event_id: str) -> RiskEvaluationResult:
-        with self._sessions.begin() as session:
+        with self._sessions() as session:
             existing = RiskEvaluationRepository(session).get(provider_event_id)
             if existing is not None:
-                return RiskEvaluationResult(
-                    provider_event_id, existing[0], existing[1], True
-                )
+                return self._existing_result(session, provider_event_id, existing)
             delivery = WebhookEventRepository(session).get(provider_event_id)
             if (
                 delivery is None
@@ -100,29 +108,49 @@ class RuntimeRiskScoringService:
                 )
             if event.event_type is EventType.ACCOUNT_CREATED:
                 return RiskEvaluationResult(provider_event_id, None, None, False)
-            context = _decision_context(delivery.payload)
-            cutoff = event.ingested_at
-            projection = self._graph.feature_projection_at(cutoff)
-            feature_service = FeatureService(projection)
-            vector = feature_service.extract(str(event.account_id), cutoff)
-            score = score_feature_vector(self._frozen, vector)
-            estimate = estimate_probability(
-                self._probability_model, score, scoring_context_id=context.context_id
+            inputs = _ScoringInput(
+                account_id=str(event.account_id),
+                cutoff=event.ingested_at,
+                context=_decision_context(deepcopy(delivery.payload)),
             )
-            decision = decide(
-                self._policy_model, self._probability_model, score, estimate, context
-            )
+
+        projection = self._graph.feature_projection_at(inputs.cutoff)
+        feature_service = FeatureService(projection)
+        vector = feature_service.extract(inputs.account_id, inputs.cutoff)
+        score = score_feature_vector(self._frozen, vector)
+        estimate = estimate_probability(
+            self._probability_model, score, scoring_context_id=inputs.context.context_id
+        )
+        decision = decide(
+            self._policy_model,
+            self._probability_model,
+            score,
+            estimate,
+            inputs.context,
+        )
+
+        with self._sessions.begin() as session:
             FeatureVectorRepository(session, feature_service.schema).persist(vector)
             ScoreObservationRepository(session).persist(score)
             ProbabilityEstimateRepository(session).persist(estimate)
             PolicyDecisionRepository(session).persist(decision)
-            case_id = self._link_case(session, decision, cutoff)
-            RiskEvaluationRepository(session).persist(
-                provider_event_id, decision.decision_id, case_id
-            )
+            case_id = self._link_case(session, decision, inputs.cutoff)
+            decision_id, persisted_case_id, inserted = RiskEvaluationRepository(
+                session
+            ).persist(provider_event_id, decision.decision_id, case_id)
             return RiskEvaluationResult(
-                provider_event_id, decision.decision_id, case_id, False
+                provider_event_id, decision_id, persisted_case_id, not inserted
             )
+
+    @staticmethod
+    def _existing_result(
+        session: Session,
+        provider_event_id: str,
+        evaluation: tuple[str, str | None],
+    ) -> RiskEvaluationResult:
+        if PolicyDecisionRepository(session).get(evaluation[0]) is None:
+            raise RiskEvaluationUnavailable("risk evaluation references no decision")
+        return RiskEvaluationResult(provider_event_id, *evaluation, True)
 
     def _link_case(
         self, session: Session, decision: PolicyDecision, cutoff: datetime
@@ -132,10 +160,6 @@ class RuntimeRiskScoringService:
         if decision.chosen_action is PolicyAction.ALLOW:
             return None
         repository = RiskCaseRepository(session)
-        existing = repository.open_for_subject(decision.subject_id)
-        if existing is not None:
-            repository.attach_decision(existing.case_id, decision.decision_id)
-            return existing.case_id
         case = RiskCase(
             case_id=str(
                 uuid5(
@@ -148,9 +172,9 @@ class RuntimeRiskScoringService:
             opened_at=cutoff,
             opening_decision_id=decision.decision_id,
         )
-        repository.persist(case)
-        repository.attach_decision(case.case_id, decision.decision_id)
-        return case.case_id
+        opened = repository.open_or_create(case)
+        repository.attach_decision(opened.case_id, decision.decision_id)
+        return opened.case_id
 
 
 def _decision_context(payload: dict[str, object]) -> DecisionContext:

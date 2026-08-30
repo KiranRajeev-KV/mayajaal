@@ -1,6 +1,7 @@
 """Build the graph payload without importing Neo4j or fraud labels."""
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -43,6 +44,15 @@ def _canonical(
 def _properties(**values: object) -> dict[str, object]:
     """Neo4j properties cannot be null; omit optional values instead."""
     return {key: value for key, value in values.items() if value is not None}
+
+
+@dataclass(frozen=True)
+class RuntimeIdentityAttributes:
+    """Optional truthful identity metadata supplied by a runtime adapter."""
+
+    device_platform: str | None = None
+    device_type: str | None = None
+    payment_method: str | None = None
 
 
 class _HasId(Protocol):
@@ -357,7 +367,10 @@ def build_graph_projection(
     )
 
 
-def build_incremental_graph_projection(event: Event) -> GraphProjection:
+def build_incremental_graph_projection(
+    event: Event,
+    attributes: RuntimeIdentityAttributes | None = None,
+) -> GraphProjection:
     """Project one already-canonical runtime fact using the offline graph schema.
 
     Runtime provider fixtures supply canonical UUIDs, so this narrow adapter uses
@@ -365,6 +378,7 @@ def build_incremental_graph_projection(event: Event) -> GraphProjection:
     intentionally does not fabricate entity attributes from raw provider JSON.
     """
     account_id = str(event.account_id)
+    attributes = attributes or RuntimeIdentityAttributes()
     nodes: list[GraphNode] = [
         GraphNode(
             node_type=GraphNodeType.ACCOUNT,
@@ -390,13 +404,14 @@ def build_incremental_graph_projection(event: Event) -> GraphProjection:
         node_type: GraphNodeType,
         identity_id: UUID,
         relationship_type: GraphRelationshipType,
+        properties: dict[str, object] | None = None,
     ) -> None:
         canonical_id = str(identity_id)
         nodes.append(
             GraphNode(
                 node_type=node_type,
                 canonical_id=canonical_id,
-                properties={"canonical_id": canonical_id},
+                properties={"canonical_id": canonical_id, **(properties or {})},
             )
         )
         relationships.append(
@@ -415,7 +430,13 @@ def build_incremental_graph_projection(event: Event) -> GraphProjection:
 
     if event.event_type is EventType.DEVICE_SEEN and event.device_id is not None:
         add_identity(
-            GraphNodeType.DEVICE, event.device_id, GraphRelationshipType.USED_DEVICE
+            GraphNodeType.DEVICE,
+            event.device_id,
+            GraphRelationshipType.USED_DEVICE,
+            _properties(
+                platform=attributes.device_platform,
+                device_type=attributes.device_type,
+            ),
         )
     elif event.event_type is EventType.IP_SEEN and event.ip_address_id is not None:
         add_identity(
@@ -431,6 +452,7 @@ def build_incremental_graph_projection(event: Event) -> GraphProjection:
             GraphNodeType.PAYMENT_IDENTITY,
             event.payment_identity_id,
             GraphRelationshipType.PAID_WITH,
+            _properties(method=attributes.payment_method),
         )
     else:
         if event.event_type is not EventType.ACCOUNT_CREATED:
