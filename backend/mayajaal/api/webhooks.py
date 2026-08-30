@@ -107,7 +107,7 @@ class WebhookInboxService:
         received_at: datetime,
     ) -> WebhookIngestResult:
         digest = hashlib.sha256(raw_body).hexdigest()
-        _, accepted_new = self._repository.persist_received(
+        record, accepted_new = self._repository.persist_received(
             provider_event_id=provider_event_id,
             provider=RAZORPAY_PROVIDER,
             event_type=envelope.event,
@@ -120,7 +120,7 @@ class WebhookInboxService:
         return WebhookIngestResult(
             provider_event_id=provider_event_id,
             accepted_new=accepted_new,
-            status=WebhookProcessingStatus.RECEIVED,
+            status=webhook_record_status(record),
         )
 
 

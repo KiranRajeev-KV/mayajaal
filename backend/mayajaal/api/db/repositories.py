@@ -784,6 +784,34 @@ class WebhookEventRepository:
             )
         )
 
+    def unscored_processed_ids(self, *, limit: int) -> tuple[str, ...]:
+        """Find projected non-setup canonical events with no durable evaluation."""
+        return tuple(
+            self._session.scalars(
+                select(WebhookEventRecord.provider_event_id)
+                .join(
+                    NormalizedEventRecord,
+                    NormalizedEventRecord.provider_event_id
+                    == WebhookEventRecord.provider_event_id,
+                )
+                .outerjoin(
+                    RiskEvaluationRecord,
+                    RiskEvaluationRecord.provider_event_id
+                    == WebhookEventRecord.provider_event_id,
+                )
+                .where(
+                    WebhookEventRecord.status == "PROCESSED",
+                    NormalizedEventRecord.event_type != "ACCOUNT_CREATED",
+                    RiskEvaluationRecord.provider_event_id.is_(None),
+                )
+                .order_by(
+                    WebhookEventRecord.received_at.asc(),
+                    WebhookEventRecord.provider_event_id.asc(),
+                )
+                .limit(_bounded_limit(limit))
+            )
+        )
+
 
 def _lease_expires_at(claimed_at: datetime, lease_timeout: timedelta) -> datetime:
     if claimed_at.tzinfo is None:

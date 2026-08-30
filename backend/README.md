@@ -205,9 +205,9 @@ just webhook-simulate                         # normal accepted delivery
 just webhook-simulate mode=duplicate          # two successful deliveries, one row
 just webhook-simulate mode=out-of-order       # delivery order differs from provider time
 just webhook-simulate mode=invalid-signature  # rejected, no durable row
-just webhook-simulate mode=graph-demo         # account setup, then device + shared-payment fixtures
-just webhook-process event_id=<provider-id>   # normalize/project one event
-just webhook-process limit=10                 # bounded oldest-ready batch
+just webhook-simulate mode=graph-demo         # accepted then automatically processed/scored
+just realtime-process event_id=<provider-id>  # recover one durable event
+just realtime-process limit=10                # bounded webhook + score catch-up
 ```
 
 There is still deliberately no synthetic-world copy, SSE/WebSocket delivery,
@@ -248,6 +248,19 @@ decision can open a distinct case after close. PostgreSQL enforces at most one
 open case per subject with a partial unique index, and conflict-safe inserts
 converge concurrent risk-evaluation retries. `ALLOW` does not. No
 investigation is started by this stage.
+
+### Stage 12D: continuous webhook-to-risk orchestration
+
+The FastAPI lifespan loads the Neo4j driver and verified frozen scoring,
+calibration, and policy artifacts once, then constructs one
+`RealtimeRiskPipelineService`. A verified webhook is first committed to the
+PostgreSQL inbox and acknowledged; only after that commit does an application
+background task run Stage 12B followed by Stage 12C. Background failure leaves
+the durable row unchanged (`FAILED` for Stage 12B failures, `PROCESSED` for
+Stage 12C failures), so `just realtime-process limit=10` safely catches it up.
+`GET /webhooks/events/{provider_event_id}/result` exposes only processing,
+canonical-event, decision, case, action, and calibrated-probability fields.
+Terra/investigations remain explicitly user-triggered.
 
 The fast suite skips PostgreSQL race contracts. With the local database migrated,
 run `just postgres-risk-concurrency-test` to verify same-event and same-subject

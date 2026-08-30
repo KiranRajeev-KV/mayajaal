@@ -1,5 +1,7 @@
-"""Thin, read-only FastAPI application for operational cases and investigations."""
+"""Operational FastAPI application with post-commit realtime orchestration."""
 
+import asyncio
+import logging
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -17,19 +19,21 @@ from mayajaal.schemas.common import SchemaModel
 
 from .contracts import InvestigationRun, RiskCase, RiskCaseStatus
 from .db import (
-    DatabaseConfig,
     DatabaseRuntime,
     InvestigationReportRepository,
     InvestigationRunRepository,
+    NormalizedEventRepository,
     PolicyDecisionRepository,
     RiskCaseRepository,
+    RiskEvaluationRepository,
     SessionFactory,
     WebhookEventRepository,
     WebhookPayloadConflict,
-    create_database_runtime,
     ping_database,
 )
 from .env import load_environment
+from .realtime_pipeline import RealtimeRiskPipelineService
+from .runtime import RealtimeApplicationRuntime, create_realtime_application_runtime
 from .webhooks import (
     RazorpayWebhookEnvelope,
     WebhookConfig,
@@ -42,6 +46,7 @@ from .webhooks import (
 
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
+LOGGER = logging.getLogger(__name__)
 
 
 class HealthResponse(SchemaModel):
@@ -201,20 +206,34 @@ class WebhookEventListResponse(SchemaModel):
     offset: int = Field(ge=0)
 
 
+class WebhookPipelineResultResponse(SchemaModel):
+    """Trusted event outcome for the frontend; no raw webhook payload leaks."""
+
+    provider_event_id: str
+    processing_status: WebhookProcessingStatus
+    canonical_event_type: str | None
+    decision_id: str | None
+    case_id: str | None
+    policy_action: PolicyAction | None
+    calibrated_probability: float | None
+
+
 def create_app(
     database_runtime: DatabaseRuntime | None = None,
     webhook_config: WebhookConfig | None = None,
+    realtime_runtime: RealtimeApplicationRuntime | None = None,
 ) -> FastAPI:
     """Create the operational read API with one shared runtime per lifespan."""
     load_environment()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-        runtime = database_runtime
-        owns_runtime = runtime is None
-        if runtime is None:
-            runtime = create_database_runtime(DatabaseConfig.from_environment())
-        app.state.database_runtime = runtime
+        operational = realtime_runtime
+        if operational is None:
+            operational = create_realtime_application_runtime(database=database_runtime)
+        app.state.realtime_runtime = operational
+        app.state.database_runtime = operational.database
+        app.state.realtime_tasks = set()
         app.state.webhook_config = (
             webhook_config
             if webhook_config is not None
@@ -223,8 +242,11 @@ def create_app(
         try:
             yield
         finally:
-            if owns_runtime:
-                runtime.dispose()
+            tasks = cast(set[asyncio.Task[None]], app.state.realtime_tasks)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            if realtime_runtime is None:
+                operational.dispose()
 
     app = FastAPI(title="Mayajaal operational API", version="0.1.0", lifespan=lifespan)
 
@@ -369,6 +391,14 @@ def create_app(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="conflicting duplicate delivery",
             ) from error
+        pipeline = _pipeline_from_request(request, required=False)
+        if pipeline is not None:
+            # The inbox transaction above has returned, so this task can never
+            # make an accepted delivery disappear. It owns fresh sessions.
+            task = asyncio.create_task(_run_pipeline(pipeline, provider_event_id))
+            tasks = cast(set[asyncio.Task[None]], request.app.state.realtime_tasks)
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
         return result
 
     @app.get("/webhooks/events", response_model=WebhookEventListResponse)
@@ -399,6 +429,37 @@ def create_app(
         assert record is not None
         return WebhookEventResponse.from_record(record)
 
+    @app.get(
+        "/webhooks/events/{provider_event_id}/result",
+        response_model=WebhookPipelineResultResponse,
+    )
+    def get_webhook_pipeline_result(
+        provider_event_id: str,
+        session: Annotated[Session, Depends(get_session)],
+    ) -> WebhookPipelineResultResponse:
+        record = WebhookEventRepository(session).get(provider_event_id)
+        if record is None:
+            _not_found("webhook event")
+        assert record is not None
+        event = NormalizedEventRepository(session).get_for_provider(provider_event_id)
+        evaluation = RiskEvaluationRepository(session).get(provider_event_id)
+        decision = (
+            None
+            if evaluation is None
+            else PolicyDecisionRepository(session).get(evaluation[0])
+        )
+        return WebhookPipelineResultResponse(
+            provider_event_id=provider_event_id,
+            processing_status=webhook_record_status(record),
+            canonical_event_type=None if event is None else event.event_type.value,
+            decision_id=None if evaluation is None else evaluation[0],
+            case_id=None if evaluation is None else evaluation[1],
+            policy_action=None if decision is None else decision.chosen_action,
+            calibrated_probability=(
+                None if decision is None else decision.calibrated_fraud_probability
+            ),
+        )
+
     _ = (
         health,
         list_cases,
@@ -410,6 +471,7 @@ def create_app(
         receive_razorpay_webhook,
         list_webhook_events,
         get_webhook_event,
+        get_webhook_pipeline_result,
     )
     return app
 
@@ -437,6 +499,19 @@ def _webhook_config_from_request(request: Request) -> WebhookConfig:
         raise RuntimeError("webhook configuration is not initialized") from error
 
 
+def _pipeline_from_request(
+    request: Request, *, required: bool = True
+) -> RealtimeRiskPipelineService | None:
+    try:
+        return cast(
+            RealtimeApplicationRuntime, request.app.state.realtime_runtime
+        ).pipeline
+    except AttributeError:
+        if required:
+            raise RuntimeError("realtime pipeline is not initialized") from None
+        return None
+
+
 def _is_valid_provider_event_id(value: str | None) -> bool:
     """Accept a provider ID only when it is nonempty, bounded, and unambiguous."""
     return (
@@ -461,6 +536,16 @@ def _accept_webhook_sync(
             raw_body=raw_body,
             received_at=datetime.now(tz=UTC),
         )
+
+
+async def _run_pipeline(
+    pipeline: RealtimeRiskPipelineService, provider_event_id: str
+) -> None:
+    """Isolate best-effort post-commit work from the accepted webhook response."""
+    try:
+        await run_in_threadpool(pipeline.process, provider_event_id)
+    except Exception:
+        LOGGER.exception("realtime webhook pipeline failed for %s", provider_event_id)
 
 
 def _not_found(resource: str) -> NoReturn:

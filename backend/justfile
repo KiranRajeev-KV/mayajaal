@@ -75,6 +75,10 @@ webhook-process event_id="" limit="":
 risk-process event_id:
     uv run python -m scripts.process_risk --event-id {{event_id}}
 
+# Recover bounded durable Stage 12B/12C work after an API background failure.
+realtime-process event_id="" limit="":
+    if [ -n "{{event_id}}" ]; then uv run python -m scripts.process_realtime --event-id {{event_id}}; else uv run python -m scripts.process_realtime --limit {{limit}}; fi
+
 # Opt-in real PostgreSQL race contracts; requires local db-migrate first.
 postgres-risk-concurrency-test:
     MAYAJAAL_RUN_POSTGRES_TESTS=1 uv run python -m unittest tests.test_postgres_risk_concurrency -q

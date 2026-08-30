@@ -10,6 +10,7 @@ from pydantic import Field, field_validator
 
 from mayajaal.graph import (
     GraphLoadReport,
+    GraphProjection,
     RuntimeIdentityAttributes,
     build_incremental_graph_projection,
 )
@@ -69,7 +70,7 @@ class UnsupportedProviderEvent(ValueError):
 class IncrementalGraphWriter(Protocol):
     """The narrow idempotent graph-write boundary used by the processor."""
 
-    def load_incremental(self, projection: object) -> GraphLoadReport: ...
+    def load_incremental(self, projection: GraphProjection) -> GraphLoadReport: ...
 
 
 class RazorpayEventNormalizer:
@@ -193,6 +194,11 @@ class WebhookEventProcessor:
         self._graph = graph_repository
         self._normalizer = normalizer or RazorpayEventNormalizer()
         self._processing_lease_timeout = processing_lease_timeout
+
+    @property
+    def processing_lease_timeout(self) -> timedelta:
+        """Expose the existing claim lease to the bounded recovery coordinator."""
+        return self._processing_lease_timeout
 
     def process(self, provider_event_id: str) -> ProcessedWebhookEvent:
         with self._sessions() as session:

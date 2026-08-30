@@ -86,6 +86,9 @@ webhook-process event_id="" limit="":
 risk-process event_id:
     just --justfile {{backend_justfile}} risk-process event_id={{event_id}}
 
+realtime-process event_id="" limit="":
+    just --justfile {{backend_justfile}} realtime-process event_id={{event_id}} limit={{limit}}
+
 postgres-risk-concurrency-test:
     just --justfile {{backend_justfile}} postgres-risk-concurrency-test
 
