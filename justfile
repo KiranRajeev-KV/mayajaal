@@ -86,6 +86,9 @@ webhook-process event_id="" limit="":
 risk-process event_id:
     just --justfile {{backend_justfile}} risk-process event_id={{event_id}}
 
+postgres-risk-concurrency-test:
+    just --justfile {{backend_justfile}} postgres-risk-concurrency-test
+
 features-extract config="config.toml":
     just --justfile {{backend_justfile}} features-extract {{config}}
 

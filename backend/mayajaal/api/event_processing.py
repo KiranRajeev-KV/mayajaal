@@ -14,7 +14,7 @@ from mayajaal.graph import (
     build_incremental_graph_projection,
 )
 from mayajaal.resolution.normalizers import normalize_stable_identifier
-from mayajaal.schemas import Event, EventType
+from mayajaal.schemas import DevicePlatform, DeviceType, Event, EventType, PaymentMethod
 from mayajaal.schemas.common import SchemaModel
 
 from .db import (
@@ -122,9 +122,13 @@ class RazorpayEventNormalizer:
         fixture = envelope.payload.get("mayajaal")
         values = cast(dict[str, object], fixture) if isinstance(fixture, dict) else {}
         return RuntimeIdentityAttributes(
-            device_platform=_optional_fixture_string(values, "device_platform"),
-            device_type=_optional_fixture_string(values, "device_type"),
-            payment_method=_optional_fixture_string(values, "payment_method"),
+            device_platform=_optional_enum_value(
+                values, "device_platform", DevicePlatform
+            ),
+            device_type=_optional_enum_value(values, "device_type", DeviceType),
+            payment_method=_optional_enum_value(
+                values, "payment_method", PaymentMethod
+            ),
         )
 
 
@@ -141,13 +145,18 @@ def _fixture_uuid(values: dict[str, object], key: str) -> UUID:
         raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}") from error
 
 
-def _optional_fixture_string(values: dict[str, object], key: str) -> str | None:
+def _optional_enum_value[EnumT: DevicePlatform | DeviceType | PaymentMethod](
+    values: dict[str, object], key: str, enum_type: type[EnumT]
+) -> str | None:
     value = values.get(key)
     if value is None:
         return None
     if not isinstance(value, str) or not value:
         raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}")
-    return value
+    try:
+        return enum_type(value.lower()).value
+    except ValueError as error:
+        raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}") from error
 
 
 @dataclass(frozen=True)

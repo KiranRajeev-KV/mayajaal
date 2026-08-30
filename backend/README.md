@@ -229,7 +229,10 @@ the cutoff. Account creation/history gaps fail closed. The graph demo emits
 both account setup events before its risk events; setup is processed but is not
 scored. Its namespaced runtime fixtures can also supply truthful stable device
 platform/type and payment-method attributes; missing attributes intentionally
-remain missing for the existing categorical feature extractors.
+remain missing for the existing categorical feature extractors. Inputs are
+validated through the canonical `DevicePlatform`, `DeviceType`, and
+`PaymentMethod` enums, so uppercase-compatible fixture input is stored as the
+same lowercase categorical value used during training.
 
 Runtime loads the verified frozen CatBoost full evaluation, sigmoid calibrator,
 and policy artifact without retraining. The runtime CLI selects the verified
@@ -245,6 +248,10 @@ decision can open a distinct case after close. PostgreSQL enforces at most one
 open case per subject with a partial unique index, and conflict-safe inserts
 converge concurrent risk-evaluation retries. `ALLOW` does not. No
 investigation is started by this stage.
+
+The fast suite skips PostgreSQL race contracts. With the local database migrated,
+run `just postgres-risk-concurrency-test` to verify same-event and same-subject
+OPEN-case convergence against PostgreSQL itself.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable

@@ -110,6 +110,44 @@ class EventProcessingTests(TestCase):
         projection = build_incremental_graph_projection(event)
         self.assertEqual(projection.relationships[0].event_time, event.occurred_at)
 
+    def test_runtime_categorical_metadata_is_canonical_or_fails_closed(self) -> None:
+        self._accept(
+            "evt_categorical",
+            "mayajaal.device.seen",
+            {
+                "account_id": ACCOUNT,
+                "device_id": DEVICE,
+                "device_platform": "ANDROID",
+                "device_type": "MOBILE",
+            },
+        )
+        graph = _Graph()
+        self.assertEqual(
+            WebhookEventProcessor(self.sessions, graph)
+            .process("evt_categorical")
+            .status,
+            WebhookProcessingStatus.PROCESSED,
+        )
+        device = graph.projections[0].nodes[1]
+        self.assertEqual(device.properties["platform"], "android")
+        self.assertEqual(device.properties["device_type"], "mobile")
+
+        self._accept(
+            "evt_bad_categorical",
+            "mayajaal.device.seen",
+            {
+                "account_id": ACCOUNT,
+                "device_id": DEVICE,
+                "device_platform": "ANDRIOD",
+            },
+        )
+        self.assertEqual(
+            WebhookEventProcessor(self.sessions, _Graph())
+            .process("evt_bad_categorical")
+            .status,
+            WebhookProcessingStatus.FAILED,
+        )
+
     def test_identity_projection_does_not_clear_account_creation_metadata(self) -> None:
         self._accept("evt_account", "mayajaal.account.created", {"account_id": ACCOUNT})
         self._accept(

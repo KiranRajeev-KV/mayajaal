@@ -75,6 +75,10 @@ webhook-process event_id="" limit="":
 risk-process event_id:
     uv run python -m scripts.process_risk --event-id {{event_id}}
 
+# Opt-in real PostgreSQL race contracts; requires local db-migrate first.
+postgres-risk-concurrency-test:
+    MAYAJAAL_RUN_POSTGRES_TESTS=1 uv run python -m unittest tests.test_postgres_risk_concurrency -q
+
 # Export cutoff-safe account graph features as Parquet.
 features-extract config="config.toml":
     uv run python -m scripts.extract_features --config {{ config }}

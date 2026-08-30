@@ -194,9 +194,9 @@ class RuntimeRiskScoringTests(TestCase):
             .extract(ACCOUNT, NOW)
             .values
         )
-        self.assertEqual(values["latest_device_platform"], "ANDROID")
-        self.assertEqual(values["latest_device_type"], "MOBILE")
-        self.assertEqual(values["latest_payment_method"], "CARD")
+        self.assertEqual(values["latest_device_platform"], "android")
+        self.assertEqual(values["latest_device_type"], "mobile")
+        self.assertEqual(values["latest_payment_method"], "card")
 
     def test_missing_runtime_identity_attributes_remain_missing_features(self) -> None:
         self._prepare_identity()
