@@ -257,9 +257,15 @@ calibration, and policy artifacts once, then constructs one
 PostgreSQL inbox and acknowledged; only after that commit does an application
 background task run Stage 12B followed by Stage 12C. Background failure leaves
 the durable row unchanged (`FAILED` for Stage 12B failures, `PROCESSED` for
-Stage 12C failures), so `just realtime-process limit=10` safely catches it up.
-`GET /webhooks/events/{provider_event_id}/result` exposes only processing,
-canonical-event, decision, case, action, and calibrated-probability fields.
+Stage 12C failures). A bounded `risk_processing_failures` row records the
+latest Stage 12C failure without creating trusted model lineage; catch-up
+skips it by default, while `just realtime-process event_id=<provider-id>`
+explicitly retries it. A successful retry clears the marker. Startup verifies
+the long-lived Neo4j driver once, and `/health` verifies both PostgreSQL and
+that same driver. `GET /webhooks/events/{provider_event_id}/result` exposes
+only processing, canonical-event, pipeline state (`PROCESSING`, `SETUP`,
+`SCORING_FAILED`, or `SCORED`), decision, case, action, and
+calibrated-probability fields.
 Terra/investigations remain explicitly user-triggered.
 
 The fast suite skips PostgreSQL race contracts. With the local database migrated,

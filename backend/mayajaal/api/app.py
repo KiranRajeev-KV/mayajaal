@@ -10,11 +10,11 @@ from typing import Annotated, NoReturn, cast
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from mayajaal.investigation import InvestigationPattern, InvestigationStatus
 from mayajaal.policy import PolicyAction
+from mayajaal.schemas import Event, EventType
 from mayajaal.schemas.common import SchemaModel
 
 from .contracts import InvestigationRun, RiskCase, RiskCaseStatus
@@ -26,13 +26,14 @@ from .db import (
     PolicyDecisionRepository,
     RiskCaseRepository,
     RiskEvaluationRepository,
+    RiskProcessingFailureRepository,
     SessionFactory,
     WebhookEventRepository,
     WebhookPayloadConflict,
     ping_database,
 )
 from .env import load_environment
-from .realtime_pipeline import RealtimeRiskPipelineService
+from .realtime_pipeline import RealtimePipelineState, RealtimeRiskPipelineService
 from .runtime import RealtimeApplicationRuntime, create_realtime_application_runtime
 from .webhooks import (
     RazorpayWebhookEnvelope,
@@ -211,6 +212,7 @@ class WebhookPipelineResultResponse(SchemaModel):
 
     provider_event_id: str
     processing_status: WebhookProcessingStatus
+    pipeline_state: RealtimePipelineState
     canonical_event_type: str | None
     decision_id: str | None
     case_id: str | None
@@ -254,10 +256,11 @@ def create_app(
     def health(request: Request) -> HealthResponse:
         try:
             ping_database(_runtime_from_request(request).engine)
-        except SQLAlchemyError as error:
+            _realtime_runtime_from_request(request).graph.verify_connectivity()
+        except Exception as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="database is not ready",
+                detail="required dependency is not ready",
             ) from error
         return HealthResponse(status="ready")
 
@@ -443,6 +446,7 @@ def create_app(
         assert record is not None
         event = NormalizedEventRepository(session).get_for_provider(provider_event_id)
         evaluation = RiskEvaluationRepository(session).get(provider_event_id)
+        failure = RiskProcessingFailureRepository(session).get(provider_event_id)
         decision = (
             None
             if evaluation is None
@@ -451,6 +455,7 @@ def create_app(
         return WebhookPipelineResultResponse(
             provider_event_id=provider_event_id,
             processing_status=webhook_record_status(record),
+            pipeline_state=_pipeline_state(record.status, event, evaluation, failure),
             canonical_event_type=None if event is None else event.event_type.value,
             decision_id=None if evaluation is None else evaluation[0],
             case_id=None if evaluation is None else evaluation[1],
@@ -490,6 +495,13 @@ def _runtime_from_request(request: Request) -> DatabaseRuntime:
         return cast(DatabaseRuntime, request.app.state.database_runtime)
     except AttributeError as error:
         raise RuntimeError("database runtime is not initialized") from error
+
+
+def _realtime_runtime_from_request(request: Request) -> RealtimeApplicationRuntime:
+    try:
+        return cast(RealtimeApplicationRuntime, request.app.state.realtime_runtime)
+    except AttributeError as error:
+        raise RuntimeError("realtime runtime is not initialized") from error
 
 
 def _webhook_config_from_request(request: Request) -> WebhookConfig:
@@ -552,3 +564,20 @@ def _not_found(resource: str) -> NoReturn:
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND, detail=f"{resource} not found"
     )
+
+
+def _pipeline_state(
+    webhook_status: str,
+    event: Event | None,
+    evaluation: tuple[str, str | None] | None,
+    failure: object | None,
+) -> RealtimePipelineState:
+    if evaluation is not None:
+        return RealtimePipelineState.SCORED
+    if failure is not None:
+        return RealtimePipelineState.SCORING_FAILED
+    if event is not None and event.event_type is EventType.ACCOUNT_CREATED:
+        return RealtimePipelineState.SETUP
+    if webhook_status == WebhookProcessingStatus.FAILED.value:
+        return RealtimePipelineState.WEBHOOK_FAILED
+    return RealtimePipelineState.PROCESSING

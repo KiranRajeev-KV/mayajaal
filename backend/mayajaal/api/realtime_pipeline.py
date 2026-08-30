@@ -1,12 +1,14 @@
 """Stage 12D composition of durable webhook processing and risk scoring."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from mayajaal.schemas import EventType
 
 from .db import (
     NormalizedEventRepository,
+    RiskProcessingFailureRepository,
     WebhookClaimUnavailable,
     WebhookEventRepository,
 )
@@ -50,7 +52,9 @@ class RealtimeRiskPipelineService:
         self._webhook_processor = webhook_processor
         self._risk_scoring = risk_scoring
 
-    def process(self, provider_event_id: str) -> RealtimePipelineResult:
+    def process(
+        self, provider_event_id: str, *, retry_failed: bool = True
+    ) -> RealtimePipelineResult:
         """Advance one durable delivery as far as its current state permits."""
         processed = self._existing_processed(provider_event_id)
         if processed is None:
@@ -76,11 +80,7 @@ class RealtimeRiskPipelineService:
                 None,
                 RealtimePipelineState.SETUP,
             )
-        try:
-            scored = self._risk_scoring.process(provider_event_id)
-        except Exception:
-            # Stage 12C has no webhook-state ownership. Its atomic persistence
-            # boundary guarantees there is no partial trusted lineage to clean up.
+        if not retry_failed and self._has_scoring_failure(provider_event_id):
             return RealtimePipelineResult(
                 provider_event_id,
                 processed.status,
@@ -89,6 +89,27 @@ class RealtimeRiskPipelineService:
                 None,
                 RealtimePipelineState.SCORING_FAILED,
             )
+        try:
+            scored = self._risk_scoring.process(provider_event_id)
+        except Exception as error:
+            # Stage 12C has no webhook-state ownership. Its atomic persistence
+            # boundary guarantees there is no partial trusted lineage to clean up.
+            with self._sessions.begin() as session:
+                RiskProcessingFailureRepository(session).persist_failed(
+                    provider_event_id,
+                    attempted_at=datetime.now(tz=UTC),
+                    detail=_failure_detail(error),
+                )
+            return RealtimePipelineResult(
+                provider_event_id,
+                processed.status,
+                processed.canonical_event_type,
+                None,
+                None,
+                RealtimePipelineState.SCORING_FAILED,
+            )
+        with self._sessions.begin() as session:
+            RiskProcessingFailureRepository(session).clear(provider_event_id)
         return self._scored_result(processed, scored)
 
     def process_next(self, *, limit: int) -> tuple[RealtimePipelineResult, ...]:
@@ -101,7 +122,10 @@ class RealtimeRiskPipelineService:
                 now=_now(),
                 lease_timeout=self._webhook_processor.processing_lease_timeout,
             )
-        results = [self.process(provider_event_id) for provider_event_id in ready]
+        results = [
+            self.process(provider_event_id, retry_failed=False)
+            for provider_event_id in ready
+        ]
         remaining = limit - len(results)
         if remaining:
             with self._sessions() as session:
@@ -109,7 +133,8 @@ class RealtimeRiskPipelineService:
                     limit=remaining
                 )
             results.extend(
-                self.process(provider_event_id) for provider_event_id in pending_scores
+                self.process(provider_event_id, retry_failed=False)
+                for provider_event_id in pending_scores
             )
         return tuple(results)
 
@@ -153,6 +178,13 @@ class RealtimeRiskPipelineService:
             RealtimePipelineState.PROCESSING,
         )
 
+    def _has_scoring_failure(self, provider_event_id: str) -> bool:
+        with self._sessions() as session:
+            return (
+                RiskProcessingFailureRepository(session).get(provider_event_id)
+                is not None
+            )
+
     @staticmethod
     def _scored_result(
         processed: ProcessedWebhookEvent, scored: RiskEvaluationResult
@@ -169,7 +201,11 @@ class RealtimeRiskPipelineService:
         )
 
 
-def _now():
-    from datetime import UTC, datetime
-
+def _now() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def _failure_detail(error: Exception) -> str:
+    """Persist only a bounded exception summary, never a traceback."""
+    detail = f"{type(error).__name__}: {error}".strip()
+    return detail[:1000] or "risk scoring failed"

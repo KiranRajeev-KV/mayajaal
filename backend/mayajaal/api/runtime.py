@@ -75,6 +75,13 @@ def create_realtime_application_runtime(
     graph = Neo4jGraphRepository(
         graph_config.uri, (graph_config.username, graph_config.password)
     )
+    try:
+        graph.verify_connectivity()
+    except Exception:
+        graph.close()
+        if database is None:
+            runtime.dispose()
+        raise
     webhook_processor = WebhookEventProcessor(runtime.sessions, graph)
     scoring = RuntimeRiskScoringService(
         runtime.sessions, graph, frozen, probability, policy

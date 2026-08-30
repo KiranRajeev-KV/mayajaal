@@ -4,6 +4,7 @@ import unittest
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import cast
 
 from fastapi import FastAPI, HTTPException
@@ -125,6 +126,7 @@ class DatabaseFoundationTests(unittest.TestCase):
                 "webhook_events",
                 "normalized_events",
                 "risk_evaluations",
+                "risk_processing_failures",
             },
         )
 
@@ -297,6 +299,9 @@ class DatabaseFoundationTests(unittest.TestCase):
             runtime = _runtime(engine, sessions)
             app = create_app(runtime)
             app.state.database_runtime = runtime
+            app.state.realtime_runtime = SimpleNamespace(
+                graph=SimpleNamespace(verify_connectivity=lambda: None)
+            )
             request = Request({"type": "http", "app": app})
             session_dependency = get_session(request)
             request_session = next(session_dependency)

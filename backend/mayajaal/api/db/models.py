@@ -76,6 +76,20 @@ class RiskEvaluationRecord(Base):
     case_id: Mapped[str | None] = mapped_column(ForeignKey("risk_cases.case_id"))
 
 
+class RiskProcessingFailureRecord(Base):
+    """Latest bounded Stage 12C failure; success remains ``risk_evaluations``."""
+
+    __tablename__ = "risk_processing_failures"
+    provider_event_id: Mapped[str] = mapped_column(
+        ForeignKey("webhook_events.provider_event_id"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    failure_detail: Mapped[str] = mapped_column(String(1000), nullable=False)
+
+
 class ProbabilityEstimateRecord(Base):
     """Stored representation of one calibrated child of a score observation."""
 

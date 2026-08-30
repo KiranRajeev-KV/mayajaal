@@ -12,13 +12,19 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from mayajaal.api.app import create_app
-from mayajaal.api.db import Base, RiskEvaluationRecord, WebhookEventRepository
+from mayajaal.api.db import (
+    Base,
+    RiskEvaluationRecord,
+    RiskProcessingFailureRepository,
+    WebhookEventRepository,
+)
 from mayajaal.api.event_processing import WebhookEventProcessor
 from mayajaal.api.realtime_pipeline import (
     RealtimePipelineState,
     RealtimeRiskPipelineService,
 )
 from mayajaal.api.risk_scoring import RiskEvaluationResult
+from mayajaal.api.runtime import create_realtime_application_runtime
 from mayajaal.api.webhooks import (
     RazorpayWebhookEnvelope,
     WebhookConfig,
@@ -86,7 +92,9 @@ class RealtimePipelineTests(TestCase):
         self.assertEqual(failed.state, RealtimePipelineState.WEBHOOK_FAILED)
         self.assertEqual(self.scoring.calls, 0)
 
-    def test_scoring_failure_keeps_projected_event_for_catch_up(self) -> None:
+    def test_scoring_failure_is_durable_skipped_by_catch_up_and_explicitly_recovers(
+        self,
+    ) -> None:
         self._accept("device", "mayajaal.device.seen", device_fixture())
         failing = RealtimeRiskPipelineService(
             self.sessions,
@@ -105,9 +113,15 @@ class RealtimePipelineTests(TestCase):
                 ),
                 0,
             )
-        recovered = self.pipeline.process_next(limit=10)
-        self.assertEqual(len(recovered), 1)
-        self.assertEqual(recovered[0].state, RealtimePipelineState.SCORED)
+            failure = RiskProcessingFailureRepository(session).get("device")
+            assert failure is not None
+            self.assertEqual(failure.status, "FAILED")
+            self.assertIn("frozen model unavailable", failure.failure_detail)
+        self.assertEqual(self.pipeline.process_next(limit=10), ())
+        recovered = self.pipeline.process("device")
+        self.assertEqual(recovered.state, RealtimePipelineState.SCORED)
+        with self.sessions() as session:
+            self.assertIsNone(RiskProcessingFailureRepository(session).get("device"))
 
     def test_runtime_factory_runs_once_per_application_lifecycle(self) -> None:
         application_runtime = SimpleNamespace(
@@ -132,6 +146,76 @@ class RealtimePipelineTests(TestCase):
             run(exercise())
         factory.assert_called_once()
 
+    def test_runtime_startup_verifies_neo4j_once_and_health_rejects_unavailable_graph(
+        self,
+    ) -> None:
+        graph = SimpleNamespace(verify_connectivity=lambda: None, close=lambda: None)
+        database = SimpleNamespace(sessions=self.sessions, dispose=lambda: None)
+        frozen = SimpleNamespace(base_model_id="base")
+        probability = SimpleNamespace(base_model_id="base")
+        policy = SimpleNamespace(
+            base_model_id="base", probability_model_id="probability"
+        )
+        probability.probability_model_id = "probability"
+        configuration = SimpleNamespace(
+            synthetic_world=SimpleNamespace(
+                validation=SimpleNamespace(full_account_count=1)
+            ),
+            evaluation=object(),
+        )
+        with (
+            patch(
+                "mayajaal.api.runtime.load_generation_config",
+                return_value=configuration,
+            ),
+            patch(
+                "mayajaal.api.runtime.profile_for_total_accounts", return_value=object()
+            ),
+            patch(
+                "mayajaal.api.runtime.load_frozen_full_evaluation", return_value=frozen
+            ),
+            patch(
+                "mayajaal.api.runtime.load_probability_model", return_value=probability
+            ),
+            patch("mayajaal.api.runtime.load_policy_model", return_value=policy),
+            patch(
+                "mayajaal.api.runtime.Neo4jRuntimeConfig.from_environment",
+                return_value=SimpleNamespace(
+                    uri="bolt://test", username="neo4j", password="test"
+                ),
+            ),
+            patch("mayajaal.api.runtime.Neo4jGraphRepository", return_value=graph),
+            patch("mayajaal.api.runtime.WebhookEventProcessor"),
+            patch("mayajaal.api.runtime.RuntimeRiskScoringService"),
+            patch.object(
+                graph, "verify_connectivity", wraps=graph.verify_connectivity
+            ) as verify,
+        ):
+            runtime = create_realtime_application_runtime(database=database)  # type: ignore[arg-type]
+        self.assertIs(runtime.graph, graph)
+        verify.assert_called_once()
+
+        unavailable = create_app()
+        unavailable.state.database_runtime = SimpleNamespace(
+            engine=create_engine("sqlite://"), sessions=self.sessions
+        )
+        unavailable.state.realtime_runtime = SimpleNamespace(
+            graph=SimpleNamespace(
+                verify_connectivity=lambda: (_ for _ in ()).throw(RuntimeError("down"))
+            )
+        )
+        endpoint = next(
+            route.endpoint
+            for route in unavailable.routes
+            if isinstance(route, APIRoute) and route.path == "/health"
+        )
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        with self.assertRaises(HTTPException) as failure:
+            endpoint(Request({"type": "http", "app": unavailable}))
+        self.assertEqual(failure.exception.status_code, 503)
+
     def test_result_endpoint_exposes_only_persisted_outcome(self) -> None:
         self._accept("received", "mayajaal.device.seen", device_fixture())
         app = create_app()
@@ -147,6 +231,14 @@ class RealtimePipelineTests(TestCase):
         self.assertEqual(response.processing_status.value, "RECEIVED")
         self.assertIsNone(response.decision_id)
         self.assertIsNone(response.calibrated_probability)
+        self.assertEqual(response.pipeline_state, RealtimePipelineState.PROCESSING)
+        with self.sessions.begin() as session:
+            RiskProcessingFailureRepository(session).persist_failed(
+                "received", attempted_at=datetime.now(tz=UTC), detail="unavailable"
+            )
+        with self.sessions() as session:
+            failed = endpoint("received", session)
+        self.assertEqual(failed.pipeline_state, RealtimePipelineState.SCORING_FAILED)
 
     def _accept(
         self, event_id: str, event_type: str, fixture: dict[str, object]

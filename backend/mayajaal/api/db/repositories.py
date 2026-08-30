@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import Select, or_, select, text, update
+from sqlalchemy import Select, delete, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -33,6 +33,7 @@ from .models import (
     RiskCaseDecisionRecord,
     RiskCaseRecord,
     RiskEvaluationRecord,
+    RiskProcessingFailureRecord,
     ScoreObservationRecord,
     WebhookEventRecord,
 )
@@ -232,6 +233,50 @@ class RiskEvaluationRepository:
                 "risk evaluation replay has different lineage"
             )
         return row.decision_id, row.case_id, inserted
+
+
+class RiskProcessingFailureRepository:
+    """Small mutable marker for bounded, non-successful Stage 12C attempts."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, provider_event_id: str) -> RiskProcessingFailureRecord | None:
+        return self._session.get(RiskProcessingFailureRecord, provider_event_id)
+
+    def persist_failed(
+        self, provider_event_id: str, *, attempted_at: datetime, detail: str
+    ) -> None:
+        values = {
+            "provider_event_id": provider_event_id,
+            "status": "FAILED",
+            "last_attempt_at": attempted_at,
+            "failure_detail": detail[:1000],
+        }
+        dialect = self._session.get_bind().dialect.name
+        if dialect == "postgresql":
+            statement = postgresql_insert(RiskProcessingFailureRecord).values(**values)
+        elif dialect == "sqlite":
+            statement = sqlite_insert(RiskProcessingFailureRecord).values(**values)
+        else:
+            raise ValueError("risk processing failures require PostgreSQL or SQLite")
+        self._session.execute(
+            statement.on_conflict_do_update(
+                index_elements=["provider_event_id"],
+                set_={
+                    "status": values["status"],
+                    "last_attempt_at": values["last_attempt_at"],
+                    "failure_detail": values["failure_detail"],
+                },
+            )
+        )
+
+    def clear(self, provider_event_id: str) -> None:
+        self._session.execute(
+            delete(RiskProcessingFailureRecord).where(
+                RiskProcessingFailureRecord.provider_event_id == provider_event_id
+            )
+        )
 
 
 class ProbabilityEstimateRepository(
@@ -799,10 +844,16 @@ class WebhookEventRepository:
                     RiskEvaluationRecord.provider_event_id
                     == WebhookEventRecord.provider_event_id,
                 )
+                .outerjoin(
+                    RiskProcessingFailureRecord,
+                    RiskProcessingFailureRecord.provider_event_id
+                    == WebhookEventRecord.provider_event_id,
+                )
                 .where(
                     WebhookEventRecord.status == "PROCESSED",
                     NormalizedEventRecord.event_type != "ACCOUNT_CREATED",
                     RiskEvaluationRecord.provider_event_id.is_(None),
+                    RiskProcessingFailureRecord.provider_event_id.is_(None),
                 )
                 .order_by(
                     WebhookEventRecord.received_at.asc(),

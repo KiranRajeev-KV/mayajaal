@@ -73,6 +73,10 @@ class Neo4jGraphRepository:
         """Close the owned Neo4j driver connection pool."""
         self.driver.close()
 
+    def verify_connectivity(self) -> None:
+        """Fail fast when the long-lived driver cannot reach Neo4j."""
+        self.driver.verify_connectivity()  # type: ignore[reportUnknownMemberType]
+
     def ensure_schema(self) -> None:
         """Create one canonical-ID uniqueness constraint per graph label."""
         with self.driver.session(database=self.database) as session:  # type: ignore[reportUnknownMemberType]
