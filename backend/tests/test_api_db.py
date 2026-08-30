@@ -22,12 +22,13 @@ from mayajaal.api.app import (
     create_app,
     get_session,
 )
-from mayajaal.api.contracts import RiskCase
+from mayajaal.api.contracts import InvestigationJob, InvestigationJobStatus, RiskCase
 from mayajaal.api.db import (
     Base,
     DatabaseConfig,
     DatabaseRuntime,
     ImmutablePersistenceConflict,
+    InvestigationJobRepository,
     InvestigationReportRepository,
     InvestigationRequestRepository,
     InvestigationRunRepository,
@@ -39,6 +40,7 @@ from mayajaal.api.db import (
 )
 from mayajaal.api.db.base import NAMING_CONVENTION
 from mayajaal.api.db.models import ScoreObservationRecord
+from mayajaal.api.investigations import InvestigationExecutionService
 from mayajaal.api.orchestration import RuntimeLineagePersistenceService
 from mayajaal.calibration import (
     CalibrationConfig,
@@ -47,6 +49,7 @@ from mayajaal.calibration import (
     SigmoidCalibrator,
     estimate_probability,
 )
+from mayajaal.graph import GraphProjection
 from mayajaal.investigation import (
     InvestigationConfig,
     InvestigationExecution,
@@ -127,6 +130,7 @@ class DatabaseFoundationTests(unittest.TestCase):
                 "normalized_events",
                 "risk_evaluations",
                 "risk_processing_failures",
+                "investigation_jobs",
             },
         )
 
@@ -373,6 +377,117 @@ class DatabaseFoundationTests(unittest.TestCase):
             with session_scope(sessions) as session:
                 self.assertIsNone(
                     ScoreObservationRepository(session).get(score.score_id)
+                )
+        finally:
+            engine.dispose()
+
+    def test_durable_job_persists_completed_execution_and_reuses_run_id(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        score, estimate, decision, request, execution = _lineage()
+        case = _case(decision)
+
+        class Graph:
+            def feature_projection_at(self, cutoff: datetime) -> GraphProjection:
+                self.cutoff = cutoff
+                return GraphProjection(nodes=(), relationships=())
+
+        class Agent:
+            def run_execution(self, **_: object) -> InvestigationExecution:
+                return execution
+
+        graph = Graph()
+        try:
+            with session_scope(sessions) as session:
+                ScoreObservationRepository(session).persist(score)
+                ProbabilityEstimateRepository(session).persist(estimate)
+                PolicyDecisionRepository(session).persist(decision)
+                InvestigationRequestRepository(session).persist(request)
+                RiskCaseRepository(session).persist(case)
+                InvestigationJobRepository(session).enqueue(
+                    InvestigationJob(
+                        run_id="run-job-001",
+                        decision_id=decision.decision_id,
+                        case_id=case.case_id,
+                        status=InvestigationJobStatus.QUEUED,
+                        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+                    )
+                )
+            service = InvestigationExecutionService(
+                sessions,
+                cast(object, graph),  # type: ignore[arg-type]
+                cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+                cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+                execution.config,
+                agent_factory=lambda _: cast(object, Agent()),  # type: ignore[arg-type]
+            )
+            first = service.process("run-job-001")
+            second = service.process("run-job-001")
+            self.assertEqual(first.status, InvestigationJobStatus.COMPLETED)
+            self.assertTrue(second.reused)
+            self.assertEqual(graph.cutoff, request.cutoff_time)
+            with session_scope(sessions) as session:
+                self.assertIsNotNone(
+                    InvestigationRunRepository(session).get("run-job-001")
+                )
+                self.assertIsNotNone(
+                    InvestigationReportRepository(session).get_for_run("run-job-001")
+                )
+        finally:
+            engine.dispose()
+
+    def test_provider_failure_marks_job_failed_without_report(self) -> None:
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        score, estimate, decision, request, execution = _lineage()
+        case = _case(decision)
+        try:
+            with session_scope(sessions) as session:
+                ScoreObservationRepository(session).persist(score)
+                ProbabilityEstimateRepository(session).persist(estimate)
+                PolicyDecisionRepository(session).persist(decision)
+                InvestigationRequestRepository(session).persist(request)
+                RiskCaseRepository(session).persist(case)
+                InvestigationJobRepository(session).enqueue(
+                    InvestigationJob(
+                        run_id="run-job-failed",
+                        decision_id=decision.decision_id,
+                        case_id=case.case_id,
+                        status=InvestigationJobStatus.QUEUED,
+                        created_at=datetime(2026, 8, 30, tzinfo=UTC),
+                    )
+                )
+
+            def failed_agent(_: InvestigationConfig) -> object:
+                raise RuntimeError("provider unavailable")
+
+            class EmptyGraph:
+                def feature_projection_at(self, cutoff: datetime) -> GraphProjection:
+                    del cutoff
+                    return GraphProjection(nodes=(), relationships=())
+
+            service = InvestigationExecutionService(
+                sessions,
+                cast(object, EmptyGraph()),  # type: ignore[arg-type]
+                cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+                cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+                execution.config,
+                agent_factory=cast(
+                    Callable[[InvestigationConfig], object], failed_agent
+                ),  # type: ignore[arg-type]
+            )
+            self.assertEqual(
+                service.process("run-job-failed").status, InvestigationJobStatus.FAILED
+            )
+            with session_scope(sessions) as session:
+                job = InvestigationJobRepository(session).get("run-job-failed")
+                assert job is not None
+                self.assertEqual(job.status, InvestigationJobStatus.FAILED)
+                self.assertIn("provider unavailable", job.failure_detail or "")
+                self.assertIsNone(
+                    InvestigationReportRepository(session).get_for_run("run-job-failed")
                 )
         finally:
             engine.dispose()

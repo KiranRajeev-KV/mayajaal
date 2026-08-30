@@ -6,12 +6,14 @@ from pathlib import Path
 from mayajaal.calibration import ProbabilityModel, load_probability_model
 from mayajaal.evaluation import FrozenFullEvaluation, load_frozen_full_evaluation
 from mayajaal.graph import Neo4jGraphRepository
+from mayajaal.investigation import InvestigationConfig
 from mayajaal.policy import PolicyModel, load_policy_model
 from mayajaal.synthetic import profile_for_total_accounts
 from mayajaal.synthetic.config import load_generation_config
 
 from .db import DatabaseConfig, DatabaseRuntime, create_database_runtime
 from .event_processing import Neo4jRuntimeConfig, WebhookEventProcessor
+from .investigations import InvestigationExecutionService
 from .realtime_pipeline import RealtimeRiskPipelineService
 from .risk_scoring import RuntimeRiskScoringService
 
@@ -37,6 +39,7 @@ class RealtimeApplicationRuntime:
     policy_model: PolicyModel
     risk_scoring: RuntimeRiskScoringService
     pipeline: RealtimeRiskPipelineService
+    investigations: InvestigationExecutionService
     owns_database: bool = True
 
     def dispose(self) -> None:
@@ -95,6 +98,17 @@ def create_realtime_application_runtime(
         risk_scoring=scoring,
         pipeline=RealtimeRiskPipelineService(
             runtime.sessions, webhook_processor, scoring
+        ),
+        investigations=InvestigationExecutionService(
+            runtime.sessions,
+            graph,
+            frozen,
+            probability,
+            getattr(
+                config,
+                "investigation",
+                InvestigationConfig(model_name="gpt-5.6-terra"),
+            ),
         ),
         owns_database=database is None,
     )

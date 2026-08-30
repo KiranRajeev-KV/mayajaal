@@ -113,6 +113,7 @@ GET /decisions/{decision_id}
 GET /cases/{case_id}/investigations
 GET /investigations/{run_id}
 GET /investigations/{run_id}/report
+POST /cases/{case_id}/investigations
 POST /webhooks/razorpay
 GET /webhooks/events
 GET /webhooks/events/{provider_event_id}
@@ -268,6 +269,31 @@ only processing, canonical-event, pipeline state (`PROCESSING`, `SETUP`,
 calibrated-probability fields.
 Terra/investigations remain explicitly user-triggered.
 
+### Stage 12E: user-triggered Terra investigations
+
+`POST /cases/{case_id}/investigations` accepts only an immutable `decision_id`.
+It verifies that the decision belongs to the case and that score, calibrated
+probability, and policy lineage can construct the existing
+`InvestigationRequest`. It commits an `investigation_jobs` row before scheduling
+best-effort in-process work and returns `202` with its opaque `run_id`.
+
+Jobs use `QUEUED`, `RUNNING`, `COMPLETED`, and `FAILED` operational states;
+they are intentionally separate from completed provenance-bound
+`InvestigationRun` and `InvestigationReport` records. `GET /investigations/{run_id}`
+therefore works while an investigation is queued or failed. The existing case
+and report read endpoints remain the source of completed trusted results.
+`just investigation-process run_id=<run-id>` explicitly reclaims/retries a
+durable job after a process restart.
+
+At the decision cutoff, the runtime evidence factory combines the existing
+Neo4j cutoff-safe feature projection with normalized PostgreSQL facts whose
+`occurred_at` and Mayajaal receipt/knowledge time are both at or before that
+cutoff. It then passes the existing `EvidenceService` and a fresh per-run
+`InvestigationAgentService` (configured as `gpt-5.6-terra`, medium reasoning)
+to the unchanged bounded five-tool agent. Webhook and risk-pipeline execution
+never invokes it. Provider/runtime exceptions leave a bounded `FAILED` job and
+no report; grounded agent outcomes retain their existing report semantics.
+
 The fast suite skips PostgreSQL race contracts. With the local database migrated,
 run `just postgres-risk-concurrency-test` to verify same-event and same-subject
 OPEN-case convergence against PostgreSQL itself.
@@ -300,6 +326,8 @@ revision for the lineage tables: `c263e0cacd3d_persist_operational_runtime_linea
 followed by `57142160cad9_add_operational_case_investigation_runs` and
 `ce8de48b5f07_add_durable_webhook_inbox` and
 `a5b7d6e8f901_add_normalized_events`.
+Stage 12D adds `d12d00000001_add_risk_processing_failures`; Stage 12E adds
+`d12e00000001_add_investigation_jobs`.
 The shared metadata applies deterministic names for indexes and primary, unique,
 check, and foreign-key constraints before migrations are generated. Future
 schema changes should continue with

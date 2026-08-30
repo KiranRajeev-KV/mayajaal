@@ -5,6 +5,7 @@ from .config import DATABASE_URL_ENVIRONMENT_VARIABLE, DatabaseConfig
 from .engine import DatabaseRuntime, create_database_runtime, ping_database
 from .models import (
     FeatureVectorRecord,
+    InvestigationJobRecord,
     InvestigationReportRecord,
     InvestigationRequestRecord,
     InvestigationRunRecord,
@@ -21,6 +22,8 @@ from .models import (
 from .repositories import (
     FeatureVectorRepository,
     ImmutablePersistenceConflict,
+    InvestigationJobRepository,
+    InvestigationJobUnavailable,
     InvestigationReportRepository,
     InvestigationRequestRepository,
     InvestigationRunRepository,
@@ -45,6 +48,9 @@ __all__ = [
     "FeatureVectorRecord",
     "FeatureVectorRepository",
     "ImmutablePersistenceConflict",
+    "InvestigationJobRecord",
+    "InvestigationJobRepository",
+    "InvestigationJobUnavailable",
     "InvestigationReportRecord",
     "InvestigationReportRepository",
     "InvestigationRequestRecord",

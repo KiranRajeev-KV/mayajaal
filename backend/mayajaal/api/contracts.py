@@ -25,6 +25,28 @@ class RiskCaseStatus(StrEnum):
     CLOSED = "CLOSED"
 
 
+class InvestigationJobStatus(StrEnum):
+    """Durable operational state before a completed investigation exists."""
+
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class InvestigationJob(SchemaModel):
+    """Recoverable user-requested investigation work, separate from a report."""
+
+    run_id: NonEmptyId
+    decision_id: NonEmptyId
+    case_id: NonEmptyId
+    status: InvestigationJobStatus
+    created_at: AwareDatetime
+    last_attempt_at: AwareDatetime | None = None
+    claimed_at: AwareDatetime | None = None
+    failure_detail: str | None = Field(default=None, max_length=1000)
+
+
 class RiskCase(SchemaModel):
     """Operational container for a subject's risk episode, not a model output."""
 

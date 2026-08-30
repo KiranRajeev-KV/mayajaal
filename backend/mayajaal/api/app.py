@@ -6,27 +6,42 @@ from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, NoReturn, cast
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import Field
 from sqlalchemy.orm import Session
 
-from mayajaal.investigation import InvestigationPattern, InvestigationStatus
+from mayajaal.investigation import (
+    InvestigationPattern,
+    InvestigationRequest,
+    InvestigationStatus,
+)
 from mayajaal.policy import PolicyAction
 from mayajaal.schemas import Event, EventType
 from mayajaal.schemas.common import SchemaModel
 
-from .contracts import InvestigationRun, RiskCase, RiskCaseStatus
+from .contracts import (
+    InvestigationJob,
+    InvestigationJobStatus,
+    InvestigationRun,
+    RiskCase,
+    RiskCaseStatus,
+)
 from .db import (
     DatabaseRuntime,
+    InvestigationJobRepository,
     InvestigationReportRepository,
+    InvestigationRequestRepository,
     InvestigationRunRepository,
     NormalizedEventRepository,
     PolicyDecisionRepository,
+    ProbabilityEstimateRepository,
     RiskCaseRepository,
     RiskEvaluationRepository,
     RiskProcessingFailureRepository,
+    ScoreObservationRepository,
     SessionFactory,
     WebhookEventRepository,
     WebhookPayloadConflict,
@@ -154,6 +169,47 @@ class InvestigationRunListResponse(SchemaModel):
     offset: int = Field(ge=0)
 
 
+class InvestigationTriggerRequest(SchemaModel):
+    """The frontend selects immutable decision lineage, never a free-form prompt."""
+
+    decision_id: str = Field(min_length=1, max_length=64)
+
+
+class InvestigationTriggerResponse(SchemaModel):
+    run_id: str
+    case_id: str
+    decision_id: str
+    status: InvestigationJobStatus
+
+
+class InvestigationJobResponse(SchemaModel):
+    """Polling shape that remains truthful before a report exists."""
+
+    run_id: str
+    case_id: str
+    decision_id: str
+    status: InvestigationJobStatus
+    created_at: datetime
+    last_attempt_at: datetime | None
+    failure_detail: str | None
+    report_status: InvestigationStatus | None = None
+
+    @classmethod
+    def from_job(
+        cls, value: InvestigationJob, completed: InvestigationRun | None
+    ) -> "InvestigationJobResponse":
+        return cls(
+            run_id=value.run_id,
+            case_id=value.case_id,
+            decision_id=value.decision_id,
+            status=value.status,
+            created_at=value.created_at,
+            last_attempt_at=value.last_attempt_at,
+            failure_detail=value.failure_detail,
+            report_status=None if completed is None else completed.status,
+        )
+
+
 class InvestigationReportResponse(SchemaModel):
     """Read-only public projection of a verified report, excluding raw JSONB."""
 
@@ -236,6 +292,7 @@ def create_app(
         app.state.realtime_runtime = operational
         app.state.database_runtime = operational.database
         app.state.realtime_tasks = set()
+        app.state.investigation_tasks = set()
         app.state.webhook_config = (
             webhook_config
             if webhook_config is not None
@@ -247,6 +304,11 @@ def create_app(
             tasks = cast(set[asyncio.Task[None]], app.state.realtime_tasks)
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            investigation_tasks = cast(
+                set[asyncio.Task[None]], app.state.investigation_tasks
+            )
+            if investigation_tasks:
+                await asyncio.gather(*investigation_tasks, return_exceptions=True)
             if realtime_runtime is None:
                 operational.dispose()
 
@@ -318,15 +380,58 @@ def create_app(
             offset=offset,
         )
 
-    @app.get("/investigations/{run_id}", response_model=InvestigationRunResponse)
+    @app.get("/investigations/{run_id}", response_model=InvestigationJobResponse)
     def get_investigation(
         run_id: str, session: Annotated[Session, Depends(get_session)]
-    ) -> InvestigationRunResponse:
-        run = InvestigationRunRepository(session).get(run_id)
-        if run is None:
+    ) -> InvestigationJobResponse:
+        job = InvestigationJobRepository(session).get(run_id)
+        if job is None:
             _not_found("investigation")
-        assert run is not None
-        return InvestigationRunResponse.from_run(run)
+        assert job is not None
+        return InvestigationJobResponse.from_job(
+            job, InvestigationRunRepository(session).get(run_id)
+        )
+
+    @app.post(
+        "/cases/{case_id}/investigations",
+        response_model=InvestigationTriggerResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def trigger_investigation(
+        case_id: str, body: InvestigationTriggerRequest, request: Request
+    ) -> InvestigationTriggerResponse:
+        """Durably enqueue a manual investigation before any model work begins."""
+        run_id = str(uuid4())
+        try:
+            job = await run_in_threadpool(
+                _enqueue_investigation_sync,
+                _realtime_runtime_from_request(request),
+                run_id,
+                case_id,
+                body.decision_id,
+            )
+        except LookupError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+            ) from error
+        task = asyncio.create_task(
+            _run_investigation(
+                _realtime_runtime_from_request(request).investigations, run_id
+            )
+        )
+        tasks = cast(set[asyncio.Task[None]], request.app.state.investigation_tasks)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return InvestigationTriggerResponse(
+            run_id=job.run_id,
+            case_id=job.case_id,
+            decision_id=job.decision_id,
+            status=job.status,
+        )
 
     @app.get(
         "/investigations/{run_id}/report", response_model=InvestigationReportResponse
@@ -472,6 +577,7 @@ def create_app(
         get_decision,
         list_case_investigations,
         get_investigation,
+        trigger_investigation,
         get_investigation_report,
         receive_razorpay_webhook,
         list_webhook_events,
@@ -521,7 +627,37 @@ def _pipeline_from_request(
     except AttributeError:
         if required:
             raise RuntimeError("realtime pipeline is not initialized") from None
-        return None
+    return None
+
+
+def _enqueue_investigation_sync(
+    runtime: RealtimeApplicationRuntime, run_id: str, case_id: str, decision_id: str
+) -> InvestigationJob:
+    """Validate immutable lineage and commit the operational job in one scope."""
+    with runtime.database.sessions.begin() as session:
+        case_repository = RiskCaseRepository(session)
+        if case_repository.get(case_id) is None:
+            raise LookupError("case not found")
+        if not case_repository.has_decision(case_id, decision_id):
+            raise ValueError("decision does not belong to case")
+        decision = PolicyDecisionRepository(session).get(decision_id)
+        score = ScoreObservationRepository(session).get_for_decision(decision_id)
+        estimate = ProbabilityEstimateRepository(session).get_for_decision(decision_id)
+        if decision is None or score is None or estimate is None:
+            raise ValueError("decision has incomplete trusted lineage")
+        investigation_request = InvestigationRequest.from_policy_decision(
+            decision, runtime.probability_model, score, estimate
+        )
+        InvestigationRequestRepository(session).persist(investigation_request)
+        return InvestigationJobRepository(session).enqueue(
+            InvestigationJob(
+                run_id=run_id,
+                decision_id=decision_id,
+                case_id=case_id,
+                status=InvestigationJobStatus.QUEUED,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
 
 
 def _is_valid_provider_event_id(value: str | None) -> bool:
@@ -558,6 +694,18 @@ async def _run_pipeline(
         await run_in_threadpool(pipeline.process, provider_event_id)
     except Exception:
         LOGGER.exception("realtime webhook pipeline failed for %s", provider_event_id)
+
+
+async def _run_investigation(service: object, run_id: str) -> None:
+    """Best-effort post-commit manual work; durable jobs support recovery."""
+    from .investigations import InvestigationExecutionService
+
+    if not isinstance(service, InvestigationExecutionService):
+        raise TypeError("investigation runtime service is invalid")
+    try:
+        await run_in_threadpool(service.process, run_id)
+    except Exception:
+        LOGGER.exception("investigation job failed for %s", run_id)
 
 
 def _not_found(resource: str) -> NoReturn:

@@ -1,7 +1,7 @@
 """Small session-owned repositories for immutable operational lineage."""
 
 from collections.abc import Callable, Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import Select, delete, or_, select, text, update
@@ -10,6 +10,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from mayajaal.api.contracts import (
+    InvestigationJob,
+    InvestigationJobStatus,
     InvestigationRun,
     PersistedInvestigationReport,
     RiskCase,
@@ -24,6 +26,7 @@ from mayajaal.scoring.provenance import feature_vector_id
 
 from .models import (
     FeatureVectorRecord,
+    InvestigationJobRecord,
     InvestigationReportRecord,
     InvestigationRequestRecord,
     InvestigationRunRecord,
@@ -164,6 +167,10 @@ class ScoreObservationRepository(
             ),
         )
 
+    def get_for_decision(self, decision_id: str) -> ScoreObservation | None:
+        row = self._session.get(PolicyDecisionRecord, decision_id)
+        return None if row is None else self.get(row.score_id)
+
 
 class FeatureVectorRepository:
     """Persist the exact feature input independently from mutable graph state."""
@@ -303,6 +310,10 @@ class ProbabilityEstimateRepository(
             ),
         )
 
+    def get_for_decision(self, decision_id: str) -> ProbabilityEstimate | None:
+        row = self._session.get(PolicyDecisionRecord, decision_id)
+        return None if row is None else self.get(row.probability_estimate_id)
+
 
 class PolicyDecisionRepository(
     _ImmutableRepository[PolicyDecision, PolicyDecisionRecord]
@@ -389,6 +400,14 @@ class RiskCaseRepository(_ImmutableRepository[RiskCase, RiskCaseRecord]):
         key = {"case_id": case_id, "decision_id": decision_id}
         if self._session.get(RiskCaseDecisionRecord, key) is None:
             self._session.add(RiskCaseDecisionRecord(**key))
+
+    def has_decision(self, case_id: str, decision_id: str) -> bool:
+        return (
+            self._session.get(
+                RiskCaseDecisionRecord, {"case_id": case_id, "decision_id": decision_id}
+            )
+            is not None
+        )
 
     def open_for_subject(self, subject_id: str) -> RiskCase | None:
         row = self._session.scalar(
@@ -541,6 +560,110 @@ class InvestigationRunRepository(
         return tuple(
             cast(InvestigationRun, from_payload(InvestigationRun, row.payload))
             for row in self._session.scalars(statement)
+        )
+
+
+class InvestigationJobUnavailable(ValueError):
+    """A job is completed or currently owned by another executor."""
+
+
+class InvestigationJobRepository:
+    """Lease/fence mutable operational work without weakening completed lineage."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, run_id: str) -> InvestigationJob | None:
+        row = self._session.get(InvestigationJobRecord, run_id)
+        return None if row is None else self._from_record(row)
+
+    def enqueue(self, value: InvestigationJob) -> InvestigationJob:
+        values = {
+            "run_id": value.run_id,
+            "decision_id": value.decision_id,
+            "case_id": value.case_id,
+            "status": value.status.value,
+            "created_at": value.created_at,
+            "last_attempt_at": value.last_attempt_at,
+            "claimed_at": value.claimed_at,
+            "failure_detail": value.failure_detail,
+        }
+        self._session.execute(
+            _conflict_ignored_insert(self._session, InvestigationJobRecord, values)
+        )
+        stored = self.get(value.run_id)
+        if stored is None:
+            raise RuntimeError("investigation job insert did not yield a durable row")
+        if stored != value:
+            raise ImmutablePersistenceConflict("investigation job ID already exists")
+        return stored
+
+    def claim(
+        self, run_id: str, *, claimed_at: datetime, lease_timeout: timedelta
+    ) -> InvestigationJob:
+        expires_at = _lease_expires_at(claimed_at, lease_timeout)
+        result = self._session.execute(
+            update(InvestigationJobRecord)
+            .where(
+                InvestigationJobRecord.run_id == run_id,
+                or_(
+                    InvestigationJobRecord.status.in_(("QUEUED", "FAILED")),
+                    (InvestigationJobRecord.status == "RUNNING")
+                    & (InvestigationJobRecord.claimed_at < expires_at),
+                ),
+            )
+            .values(
+                status="RUNNING",
+                claimed_at=claimed_at,
+                last_attempt_at=claimed_at,
+                failure_detail=None,
+            )
+        )
+        if result.rowcount != 1:  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            raise InvestigationJobUnavailable("investigation job is not available")
+        claimed = self.get(run_id)
+        if claimed is None:
+            raise RuntimeError("claimed investigation job disappeared")
+        return claimed
+
+    def complete(self, run_id: str, *, claimed_at: datetime) -> None:
+        self._finalize(
+            run_id, claimed_at, {"status": "COMPLETED", "failure_detail": None}
+        )
+
+    def fail(self, run_id: str, *, claimed_at: datetime, detail: str) -> None:
+        self._finalize(
+            run_id, claimed_at, {"status": "FAILED", "failure_detail": detail[:1000]}
+        )
+
+    def _finalize(
+        self, run_id: str, claimed_at: datetime, values: dict[str, object]
+    ) -> None:
+        result = self._session.execute(
+            update(InvestigationJobRecord)
+            .where(
+                InvestigationJobRecord.run_id == run_id,
+                InvestigationJobRecord.status == "RUNNING",
+                InvestigationJobRecord.claimed_at == claimed_at,
+            )
+            .values(**values)
+        )
+        if result.rowcount != 1:  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            raise InvestigationJobUnavailable(
+                "investigation job claim is no longer owned"
+            )
+
+    @staticmethod
+    def _from_record(row: InvestigationJobRecord) -> InvestigationJob:
+        return InvestigationJob(
+            run_id=row.run_id,
+            decision_id=row.decision_id,
+            case_id=row.case_id,
+            status=InvestigationJobStatus(row.status),
+            created_at=_require_aware_datetime(row.created_at),
+            last_attempt_at=_aware_datetime(row.last_attempt_at),
+            claimed_at=_aware_datetime(row.claimed_at),
+            failure_detail=row.failure_detail,
         )
 
 
@@ -872,6 +995,19 @@ def _lease_expires_at(claimed_at: datetime, lease_timeout: timedelta) -> datetim
     return claimed_at - lease_timeout
 
 
+def _aware_datetime(value: datetime | None) -> datetime | None:
+    """SQLite test rows lose offsets; PostgreSQL keeps the original instant."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
+def _require_aware_datetime(value: datetime) -> datetime:
+    converted = _aware_datetime(value)
+    assert converted is not None
+    return converted
+
+
 def _claimable_webhook_condition(lease_expires_at: datetime):  # type: ignore[no-untyped-def]
     """SQL predicate shared by direct and ``SKIP LOCKED`` claim paths."""
     return or_(
@@ -923,6 +1059,28 @@ class NormalizedEventRepository:
             )
         )
         return None if record is None else Event.model_validate(record.payload)
+
+    def known_at(self, cutoff: datetime) -> tuple[Event, ...]:
+        """Return canonical facts available to Mayajaal by the fixed cutoff."""
+        return tuple(
+            Event.model_validate(row.payload)
+            for row in self._session.scalars(
+                select(NormalizedEventRecord)
+                .join(
+                    WebhookEventRecord,
+                    WebhookEventRecord.provider_event_id
+                    == NormalizedEventRecord.provider_event_id,
+                )
+                .where(
+                    NormalizedEventRecord.occurred_at <= cutoff,
+                    WebhookEventRecord.received_at <= cutoff,
+                )
+                .order_by(
+                    NormalizedEventRecord.occurred_at.asc(),
+                    NormalizedEventRecord.event_id.asc(),
+                )
+            )
+        )
 
 
 def _bounded_limit(limit: int) -> int:

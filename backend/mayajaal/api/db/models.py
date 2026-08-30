@@ -269,6 +269,30 @@ class InvestigationRunRecord(Base):
     payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
 
 
+class InvestigationJobRecord(Base):
+    """Small leased job row; completed provenance remains in investigation_runs."""
+
+    __tablename__ = "investigation_jobs"
+    __table_args__ = (
+        Index("ix_investigation_jobs_status_created_at", "status", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("investigation_requests.decision_id"), nullable=False
+    )
+    case_id: Mapped[str] = mapped_column(
+        ForeignKey("risk_cases.case_id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_detail: Mapped[str | None] = mapped_column(String(1000))
+
+
 class WebhookEventRecord(Base):
     """Durable, append-only provider delivery inbox row.
 

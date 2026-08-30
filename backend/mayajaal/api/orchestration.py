@@ -48,6 +48,7 @@ class RuntimeLineagePersistenceService:
         started_at: datetime,
         completed_at: datetime | None = None,
         risk_case: RiskCase | None = None,
+        case_id: str | None = None,
     ) -> PersistedRuntimeLineage:
         """Persist one verified execution and all of its upstream immutable parents.
 
@@ -77,7 +78,9 @@ class RuntimeLineagePersistenceService:
             execution=execution,
             started_at=started_at,
             completed_at=completed_at,
-            case_id=None if risk_case is None else risk_case.case_id,
+            case_id=case_id
+            if case_id is not None
+            else (None if risk_case is None else risk_case.case_id),
         )
         InvestigationRunRepository(self._session).persist(run)
         report = PersistedInvestigationReport.from_execution(
