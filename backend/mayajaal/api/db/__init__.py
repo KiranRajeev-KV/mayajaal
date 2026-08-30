@@ -4,6 +4,7 @@ from .base import Base
 from .config import DATABASE_URL_ENVIRONMENT_VARIABLE, DatabaseConfig
 from .engine import DatabaseRuntime, create_database_runtime, ping_database
 from .models import (
+    FeatureVectorRecord,
     InvestigationReportRecord,
     InvestigationRequestRecord,
     InvestigationRunRecord,
@@ -12,10 +13,12 @@ from .models import (
     ProbabilityEstimateRecord,
     RiskCaseDecisionRecord,
     RiskCaseRecord,
+    RiskEvaluationRecord,
     ScoreObservationRecord,
     WebhookEventRecord,
 )
 from .repositories import (
+    FeatureVectorRepository,
     ImmutablePersistenceConflict,
     InvestigationReportRepository,
     InvestigationRequestRepository,
@@ -24,6 +27,7 @@ from .repositories import (
     PolicyDecisionRepository,
     ProbabilityEstimateRepository,
     RiskCaseRepository,
+    RiskEvaluationRepository,
     ScoreObservationRepository,
     WebhookClaimUnavailable,
     WebhookEventRepository,
@@ -36,6 +40,8 @@ __all__ = [
     "Base",
     "DatabaseConfig",
     "DatabaseRuntime",
+    "FeatureVectorRecord",
+    "FeatureVectorRepository",
     "ImmutablePersistenceConflict",
     "InvestigationReportRecord",
     "InvestigationReportRepository",
@@ -52,6 +58,8 @@ __all__ = [
     "RiskCaseDecisionRecord",
     "RiskCaseRecord",
     "RiskCaseRepository",
+    "RiskEvaluationRecord",
+    "RiskEvaluationRepository",
     "ScoreObservationRecord",
     "ScoreObservationRepository",
     "SessionFactory",

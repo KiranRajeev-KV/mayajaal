@@ -52,6 +52,7 @@ class GraphRelationship:
     event_id: str
     event_type: str
     event_time: datetime
+    known_at: datetime | None = None
 
 
 @dataclass(frozen=True)

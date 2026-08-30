@@ -109,6 +109,7 @@ its only write route is the deliberately bounded durable webhook inbox:
 GET /health
 GET /cases
 GET /cases/{case_id}
+GET /decisions/{decision_id}
 GET /cases/{case_id}/investigations
 GET /investigations/{run_id}
 GET /investigations/{run_id}/report
@@ -209,10 +210,30 @@ just webhook-process event_id=<provider-id>   # normalize/project one event
 just webhook-process limit=10                 # bounded oldest-ready batch
 ```
 
-There is still deliberately no synthetic-world copy, realtime scoring,
-SSE/WebSocket delivery, authentication, workers, or generic CRUD layer.
-Stage 12C will consume `PROCESSED` facts for features, CatBoost, calibration,
-and policy.
+There is still deliberately no synthetic-world copy, SSE/WebSocket delivery,
+authentication, workers, or generic CRUD layer.
+
+### Stage 12C: cutoff-safe runtime risk scoring
+
+`just risk-process event_id=<provider-event-id>` consumes only a Stage 12B
+`PROCESSED` identity event. It reads Neo4j into the existing storage-neutral
+`GraphProjection` and invokes the existing Python `FeatureService`; Cypher only
+returns nodes and event facts, never feature formulas. The decision cutoff is
+Mayajaal knowledge time (`Event.ingested_at`, sourced from durable webhook
+receipt), not provider `occurred_at`. Every event-backed Neo4j relationship now
+stores both `event_time` and `known_at`; the read adapter filters `known_at <=
+cutoff`, so an out-of-order delivery cannot leak an older provider fact into a
+decision made before it arrived. Account creation/history gaps fail closed.
+
+Runtime loads the verified frozen CatBoost full evaluation, sigmoid calibrator,
+and policy artifact without retraining. It validates base-model and probability
+lineage before inference and keeps native CatBoost `.cbm` loading. The
+namespaced simulator payload supplies required `exposure_paise` and optional
+`context_id`; these are not canonical Event fields. The transaction persists an
+immutable feature snapshot (by trusted feature-vector ID), score, probability,
+policy decision, and a durable provider-event evaluation link. Replays reuse
+that link. `REVIEW` and `BLOCK` create or attach the subject's open RiskCase;
+`ALLOW` does not. No investigation is started by this stage.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable

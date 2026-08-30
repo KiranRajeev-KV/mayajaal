@@ -15,12 +15,15 @@ from mayajaal.api.contracts import (
     RiskCase,
 )
 from mayajaal.calibration import ProbabilityEstimate
+from mayajaal.features import FeatureSchema, FeatureVector
 from mayajaal.investigation import InvestigationReport, InvestigationRequest, report_id
 from mayajaal.policy import PolicyDecision
 from mayajaal.schemas import Event
 from mayajaal.scoring import ScoreObservation
+from mayajaal.scoring.provenance import feature_vector_id
 
 from .models import (
+    FeatureVectorRecord,
     InvestigationReportRecord,
     InvestigationRequestRecord,
     InvestigationRunRecord,
@@ -29,6 +32,7 @@ from .models import (
     ProbabilityEstimateRecord,
     RiskCaseDecisionRecord,
     RiskCaseRecord,
+    RiskEvaluationRecord,
     ScoreObservationRecord,
     WebhookEventRecord,
 )
@@ -125,6 +129,64 @@ class ScoreObservationRepository(
                 payload=payload,
             ),
         )
+
+
+class FeatureVectorRepository:
+    """Persist the exact feature input independently from mutable graph state."""
+
+    def __init__(self, session: Session, schema: FeatureSchema) -> None:
+        self._session, self._schema = session, schema
+
+    def persist(self, vector: FeatureVector) -> str:
+        vector_id = feature_vector_id(self._schema, vector)
+        payload = {
+            "account_id": vector.account_id,
+            "cutoff": vector.cutoff.isoformat(),
+            "values": vector.values,
+        }
+        existing = self._session.get(FeatureVectorRecord, vector_id)
+        if existing is None:
+            self._session.add(
+                FeatureVectorRecord(
+                    feature_vector_id=vector_id,
+                    account_id=vector.account_id,
+                    scoring_cutoff=vector.cutoff,
+                    payload=payload,
+                )
+            )
+        elif existing.payload != payload:
+            raise ImmutablePersistenceConflict(
+                f"immutable feature vector {vector_id} already exists with different payload"
+            )
+        return vector_id
+
+
+class RiskEvaluationRepository:
+    """Replay key from one processed provider delivery to immutable decision lineage."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def get(self, provider_event_id: str) -> tuple[str, str | None] | None:
+        row = self._session.get(RiskEvaluationRecord, provider_event_id)
+        return None if row is None else (row.decision_id, row.case_id)
+
+    def persist(
+        self, provider_event_id: str, decision_id: str, case_id: str | None
+    ) -> None:
+        row = self._session.get(RiskEvaluationRecord, provider_event_id)
+        if row is None:
+            self._session.add(
+                RiskEvaluationRecord(
+                    provider_event_id=provider_event_id,
+                    decision_id=decision_id,
+                    case_id=case_id,
+                )
+            )
+        elif row.decision_id != decision_id or row.case_id != case_id:
+            raise ImmutablePersistenceConflict(
+                "risk evaluation replay has different lineage"
+            )
 
 
 class ProbabilityEstimateRepository(
@@ -237,6 +299,18 @@ class RiskCaseRepository(_ImmutableRepository[RiskCase, RiskCaseRecord]):
         key = {"case_id": case_id, "decision_id": decision_id}
         if self._session.get(RiskCaseDecisionRecord, key) is None:
             self._session.add(RiskCaseDecisionRecord(**key))
+
+    def open_for_subject(self, subject_id: str) -> RiskCase | None:
+        row = self._session.scalar(
+            select(RiskCaseRecord)
+            .where(
+                RiskCaseRecord.subject_id == subject_id, RiskCaseRecord.status == "OPEN"
+            )
+            .order_by(RiskCaseRecord.opened_at.asc())
+        )
+        return (
+            None if row is None else cast(RiskCase, from_payload(RiskCase, row.payload))
+        )
 
     def close_case(self, case_id: str, closed_at: datetime) -> RiskCase:
         """Apply the sole mutable case transition: OPEN to CLOSED.

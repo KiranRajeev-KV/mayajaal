@@ -23,7 +23,7 @@ def _payload(
     event: str,
     created_at: int,
     payment_id: str,
-    mayajaal: dict[str, str] | None = None,
+    mayajaal: dict[str, object] | None = None,
 ) -> bytes:
     payload: dict[str, object] = {"payment": {"entity": "payment", "id": payment_id}}
     if mayajaal is not None:
@@ -129,6 +129,8 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
                 mayajaal={
                     "account_id": "00000000-0000-0000-0000-000000000001",
                     "device_id": "00000000-0000-0000-0000-0000000000d1",
+                    "exposure_paise": 250_000,
+                    "context_id": "graph-demo-001",
                 },
             ),
             True,
@@ -142,6 +144,8 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
                 mayajaal={
                     "account_id": "00000000-0000-0000-0000-000000000001",
                     "payment_identity_id": shared_payment,
+                    "exposure_paise": 250_000,
+                    "context_id": "graph-demo-002",
                 },
             ),
             True,
@@ -155,6 +159,8 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
                 mayajaal={
                     "account_id": "00000000-0000-0000-0000-000000000002",
                     "payment_identity_id": shared_payment,
+                    "exposure_paise": 250_000,
+                    "context_id": "graph-demo-003",
                 },
             ),
             True,

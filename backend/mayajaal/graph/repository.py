@@ -18,11 +18,13 @@ from neo4j import (
 from .cypher import (
     CLEAR_DERIVED_GRAPH,
     CONSTRAINTS,
+    NODES_FOR_FEATURES,
     RELATIONSHIPS_KNOWN_AT,
     merge_nodes_query,
     merge_relationships_query,
 )
 from .models import (
+    GraphNode,
     GraphNodeType,
     GraphProjection,
     GraphRelationship,
@@ -48,6 +50,7 @@ class TemporalGraphRelationship:
     event_id: str
     event_type: str
     event_time: datetime
+    known_at: datetime
     target_type: str
     target_canonical_id: str
 
@@ -135,11 +138,57 @@ class Neo4jGraphRepository:
                     event_id=record["event_id"],
                     event_type=record["event_type"],
                     event_time=record["event_time"].to_native(),
+                    known_at=record["known_at"].to_native(),
                     target_type=record["target_type"],
                     target_canonical_id=record["target_canonical_id"],
                 )
                 for record in result
             )
+
+    def feature_projection_at(self, cutoff: datetime) -> GraphProjection:
+        """Read a storage-neutral, knowledge-time-safe feature projection."""
+        with self.driver.session(database=self.database) as session:  # type: ignore[reportUnknownMemberType]
+            return session.execute_read(_feature_projection_at, cutoff)
+
+
+def _feature_projection_at(
+    transaction: ManagedTransaction, cutoff: datetime
+) -> GraphProjection:
+    nodes = tuple(
+        GraphNode(
+            node_type=GraphNodeType(record["node_type"]),
+            canonical_id=record["canonical_id"],
+            properties={
+                key: _native(value) for key, value in record["properties"].items()
+            },
+        )
+        for record in transaction.run(
+            NODES_FOR_FEATURES, node_types=[item.value for item in GraphNodeType]
+        )
+    )
+    relationships = tuple(
+        GraphRelationship(
+            relationship_type=GraphRelationshipType(record["relationship_type"]),
+            source_type=GraphNodeType(record["source_type"]),
+            source_canonical_id=record["source_canonical_id"],
+            target_type=GraphNodeType(record["target_type"]),
+            target_canonical_id=record["target_canonical_id"],
+            event_id=record["event_id"],
+            event_type=record["event_type"],
+            event_time=_native(record["event_time"]),
+            known_at=_native(record["known_at"]),
+        )
+        for record in transaction.run(
+            RELATIONSHIPS_KNOWN_AT,
+            cutoff=cutoff,
+            relationship_types=[item.value for item in GraphRelationshipType],
+        )
+    )
+    return GraphProjection(nodes=nodes, relationships=relationships)
+
+
+def _native(value: Any) -> Any:
+    return value.to_native() if hasattr(value, "to_native") else value
 
 
 def _relationship_row(relationship: GraphRelationship) -> dict[str, Any]:
@@ -149,6 +198,7 @@ def _relationship_row(relationship: GraphRelationship) -> dict[str, Any]:
         "event_id": relationship.event_id,
         "event_type": relationship.event_type,
         "event_time": relationship.event_time,
+        "known_at": relationship.known_at,
     }
 
 

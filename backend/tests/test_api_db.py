@@ -113,6 +113,7 @@ class DatabaseFoundationTests(unittest.TestCase):
         self.assertEqual(
             set(Base.metadata.tables),
             {
+                "feature_vectors",
                 "score_observations",
                 "probability_estimates",
                 "policy_decisions",
@@ -123,6 +124,7 @@ class DatabaseFoundationTests(unittest.TestCase):
                 "risk_case_decisions",
                 "webhook_events",
                 "normalized_events",
+                "risk_evaluations",
             },
         )
 

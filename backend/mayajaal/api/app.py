@@ -21,6 +21,7 @@ from .db import (
     DatabaseRuntime,
     InvestigationReportRepository,
     InvestigationRunRepository,
+    PolicyDecisionRepository,
     RiskCaseRepository,
     SessionFactory,
     WebhookEventRepository,
@@ -79,6 +80,38 @@ class CaseListResponse(SchemaModel):
     items: tuple[CaseResponse, ...]
     limit: int = Field(ge=1, le=MAX_PAGE_LIMIT)
     offset: int = Field(ge=0)
+
+
+class DecisionResponse(SchemaModel):
+    """Bounded frontend projection of immutable decision lineage."""
+
+    decision_id: str
+    subject_id: str
+    scoring_cutoff: datetime
+    raw_model_score: float
+    calibrated_probability: float
+    policy_action: PolicyAction
+    decision_margin_paise: float
+    decision_is_stable_across_scenarios: bool
+    context_id: str | None
+
+    @classmethod
+    def from_decision(cls, value: object) -> "DecisionResponse":
+        from mayajaal.policy import PolicyDecision
+
+        if not isinstance(value, PolicyDecision):
+            raise TypeError("decision response requires a policy decision")
+        return cls(
+            decision_id=value.decision_id,
+            subject_id=value.subject_id,
+            scoring_cutoff=value.scoring_cutoff,
+            raw_model_score=value.raw_model_score,
+            calibrated_probability=value.calibrated_fraud_probability,
+            policy_action=value.chosen_action,
+            decision_margin_paise=value.decision_margin_paise,
+            decision_is_stable_across_scenarios=value.decision_is_stable_across_scenarios,
+            context_id=value.context.context_id,
+        )
 
 
 class InvestigationRunResponse(SchemaModel):
@@ -229,6 +262,16 @@ def create_app(
         assert case is not None
         return CaseResponse.from_case(case)
 
+    @app.get("/decisions/{decision_id}", response_model=DecisionResponse)
+    def get_decision(
+        decision_id: str, session: Annotated[Session, Depends(get_session)]
+    ) -> DecisionResponse:
+        decision = PolicyDecisionRepository(session).get(decision_id)
+        if decision is None:
+            _not_found("decision")
+        assert decision is not None
+        return DecisionResponse.from_decision(decision)
+
     @app.get(
         "/cases/{case_id}/investigations",
         response_model=InvestigationRunListResponse,
@@ -360,6 +403,7 @@ def create_app(
         health,
         list_cases,
         get_case,
+        get_decision,
         list_case_investigations,
         get_investigation,
         get_investigation_report,

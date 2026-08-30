@@ -55,7 +55,11 @@ class TemporalFeatureGraph:
         )
 
     def snapshot_at(self, cutoff: datetime) -> TemporalFeatureSnapshot:
-        """Match repository cutoff semantics: include only ``event_time <= cutoff``."""
+        """Include facts both known and occurred by cutoff.
+
+        Live Neo4j adapters pre-filter knowledge time; the occurrence filter
+        retains the established offline feature semantics.
+        """
         return TemporalFeatureSnapshot(
             cutoff=cutoff,
             nodes=self._nodes,

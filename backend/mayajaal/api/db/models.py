@@ -50,6 +50,31 @@ class ScoreObservationRecord(Base):
     payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
 
 
+class FeatureVectorRecord(Base):
+    """Immutable decision-time feature input, keyed by trusted vector identity."""
+
+    __tablename__ = "feature_vectors"
+    feature_vector_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    scoring_cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    payload: Mapped[Payload] = mapped_column(JsonPayload, nullable=False)
+
+
+class RiskEvaluationRecord(Base):
+    """One durable event-to-decision linkage for replay-safe runtime scoring."""
+
+    __tablename__ = "risk_evaluations"
+    provider_event_id: Mapped[str] = mapped_column(
+        ForeignKey("webhook_events.provider_event_id"), primary_key=True
+    )
+    decision_id: Mapped[str] = mapped_column(
+        ForeignKey("policy_decisions.decision_id"), nullable=False
+    )
+    case_id: Mapped[str | None] = mapped_column(ForeignKey("risk_cases.case_id"))
+
+
 class ProbabilityEstimateRecord(Base):
     """Stored representation of one calibrated child of a score observation."""
 

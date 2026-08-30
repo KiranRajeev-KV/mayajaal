@@ -30,7 +30,8 @@ def merge_relationships_query(
         f"MERGE (source)-[relationship:{relationship_type.value} "
         "{event_id: row.event_id}]->(target) "
         "SET relationship.event_type = row.event_type, "
-        "relationship.event_time = row.event_time"
+        "relationship.event_time = row.event_time, "
+        "relationship.known_at = row.known_at"
     )
 
 
@@ -41,13 +42,23 @@ RELATIONSHIPS_KNOWN_AT = """
 MATCH (source)-[relationship]->(target)
 WHERE type(relationship) IN $relationship_types
   AND relationship.event_time <= datetime($cutoff)
+  AND relationship.known_at <= datetime($cutoff)
 RETURN labels(source)[0] AS source_type,
        source.canonical_id AS source_canonical_id,
        type(relationship) AS relationship_type,
        relationship.event_id AS event_id,
        relationship.event_type AS event_type,
        relationship.event_time AS event_time,
+       relationship.known_at AS known_at,
        labels(target)[0] AS target_type,
        target.canonical_id AS target_canonical_id
 ORDER BY relationship.event_time, relationship.event_id, relationship_type
+""".strip()
+
+NODES_FOR_FEATURES = """
+MATCH (node)
+WHERE any(label IN labels(node) WHERE label IN $node_types)
+RETURN labels(node)[0] AS node_type, node.canonical_id AS canonical_id,
+       properties(node) AS properties
+ORDER BY node_type, canonical_id
 """.strip()

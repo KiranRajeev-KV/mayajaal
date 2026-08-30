@@ -81,6 +81,7 @@ def _relationship(
     event_id: UUID,
     event_type: EventType,
     event_time: datetime,
+    known_at: datetime,
 ) -> GraphRelationship:
     return GraphRelationship(
         relationship_type=relationship_type,
@@ -91,6 +92,7 @@ def _relationship(
         event_id=str(event_id),
         event_type=event_type.value,
         event_time=event_time,
+        known_at=known_at,
     )
 
 
@@ -221,6 +223,7 @@ def build_graph_projection(
                     event.id,
                     event.event_type,
                     event.occurred_at,
+                    event.ingested_at,
                 )
             )
         elif event.event_type is EventType.IP_SEEN and event.ip_address_id is not None:
@@ -236,6 +239,7 @@ def build_graph_projection(
                     event.id,
                     event.event_type,
                     event.occurred_at,
+                    event.ingested_at,
                 )
             )
         elif (
@@ -256,6 +260,7 @@ def build_graph_projection(
                     event.id,
                     event.event_type,
                     event.occurred_at,
+                    event.ingested_at,
                 )
             )
         elif (
@@ -275,6 +280,7 @@ def build_graph_projection(
                         event.id,
                         event.event_type,
                         event.occurred_at,
+                        event.ingested_at,
                     ),
                     _relationship(
                         GraphRelationshipType.SHIPPED_TO,
@@ -287,6 +293,7 @@ def build_graph_projection(
                         event.id,
                         event.event_type,
                         event.occurred_at,
+                        event.ingested_at,
                     ),
                 )
             )
@@ -305,6 +312,7 @@ def build_graph_projection(
                     event.id,
                     event.event_type,
                     event.occurred_at,
+                    event.ingested_at,
                 )
             )
         elif (
@@ -322,6 +330,7 @@ def build_graph_projection(
                     event.id,
                     event.event_type,
                     event.occurred_at,
+                    event.ingested_at,
                 )
             )
 
@@ -389,6 +398,7 @@ def build_incremental_graph_projection(event: Event) -> GraphProjection:
                 event.id,
                 event.event_type,
                 event.occurred_at,
+                event.ingested_at,
             )
         )
 

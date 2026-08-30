@@ -83,6 +83,9 @@ neo4j-reset:
 webhook-process event_id="" limit="":
     just --justfile {{backend_justfile}} webhook-process event_id={{event_id}} limit={{limit}}
 
+risk-process event_id:
+    just --justfile {{backend_justfile}} risk-process event_id={{event_id}}
+
 features-extract config="config.toml":
     just --justfile {{backend_justfile}} features-extract {{config}}
 
