@@ -163,7 +163,9 @@ def _feature_projection_at(
             },
         )
         for record in transaction.run(
-            NODES_FOR_FEATURES, node_types=[item.value for item in GraphNodeType]
+            NODES_FOR_FEATURES,
+            cutoff=cutoff,
+            node_types=[item.value for item in GraphNodeType],
         )
     )
     relationships = tuple(

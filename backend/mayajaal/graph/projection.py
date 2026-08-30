@@ -106,6 +106,11 @@ def build_graph_projection(
     safely with ``event_time <= T``.
     """
     resolved = _canonical_id_map(resolution)
+    account_creation_known_at = {
+        event.account_id: event.ingested_at
+        for event in world.events
+        if event.event_type is EventType.ACCOUNT_CREATED
+    }
     nodes: list[GraphNode] = [
         *[
             GraphNode(
@@ -114,6 +119,7 @@ def build_graph_projection(
                 properties=_properties(
                     canonical_id=str(account.id),
                     created_at=account.created_at,
+                    created_known_at=account_creation_known_at.get(account.id),
                 ),
             )
             for account in sorted(world.accounts, key=lambda item: str(item.id))
@@ -367,6 +373,11 @@ def build_incremental_graph_projection(event: Event) -> GraphProjection:
                 canonical_id=account_id,
                 created_at=(
                     event.occurred_at
+                    if event.event_type is EventType.ACCOUNT_CREATED
+                    else None
+                ),
+                created_known_at=(
+                    event.ingested_at
                     if event.event_type is EventType.ACCOUNT_CREATED
                     else None
                 ),

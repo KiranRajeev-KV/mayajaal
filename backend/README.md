@@ -205,7 +205,7 @@ just webhook-simulate                         # normal accepted delivery
 just webhook-simulate mode=duplicate          # two successful deliveries, one row
 just webhook-simulate mode=out-of-order       # delivery order differs from provider time
 just webhook-simulate mode=invalid-signature  # rejected, no durable row
-just webhook-simulate mode=graph-demo         # device + shared-payment graph fixtures
+just webhook-simulate mode=graph-demo         # account setup, then device + shared-payment fixtures
 just webhook-process event_id=<provider-id>   # normalize/project one event
 just webhook-process limit=10                 # bounded oldest-ready batch
 ```
@@ -223,17 +223,24 @@ Mayajaal knowledge time (`Event.ingested_at`, sourced from durable webhook
 receipt), not provider `occurred_at`. Every event-backed Neo4j relationship now
 stores both `event_time` and `known_at`; the read adapter filters `known_at <=
 cutoff`, so an out-of-order delivery cannot leak an older provider fact into a
-decision made before it arrived. Account creation/history gaps fail closed.
+decision made before it arrived. Account nodes carry the same explicit
+`created_at` and `created_known_at` pair and are excluded unless both precede
+the cutoff. Account creation/history gaps fail closed. The graph demo emits
+both account setup events before its risk events; setup is processed but is not
+scored.
 
 Runtime loads the verified frozen CatBoost full evaluation, sigmoid calibrator,
-and policy artifact without retraining. It validates base-model and probability
+and policy artifact without retraining. The runtime CLI selects the verified
+policy artifact compatible with the current policy provenance contract. It validates base-model and probability
 lineage before inference and keeps native CatBoost `.cbm` loading. The
 namespaced simulator payload supplies required `exposure_paise` and optional
 `context_id`; these are not canonical Event fields. The transaction persists an
 immutable feature snapshot (by trusted feature-vector ID), score, probability,
 policy decision, and a durable provider-event evaluation link. Replays reuse
 that link. `REVIEW` and `BLOCK` create or attach the subject's open RiskCase;
-`ALLOW` does not. No investigation is started by this stage.
+a new episode is deterministically keyed by its opening decision, so a later
+decision can open a distinct case after close. `ALLOW` does not. No
+investigation is started by this stage.
 
 The synchronous stack is SQLAlchemy 2.x with the psycopg 3 driver. The only
 required application setting is the secret-bearing environment variable

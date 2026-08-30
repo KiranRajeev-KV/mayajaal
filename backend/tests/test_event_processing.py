@@ -110,6 +110,25 @@ class EventProcessingTests(TestCase):
         projection = build_incremental_graph_projection(event)
         self.assertEqual(projection.relationships[0].event_time, event.occurred_at)
 
+    def test_identity_projection_does_not_clear_account_creation_metadata(self) -> None:
+        self._accept("evt_account", "mayajaal.account.created", {"account_id": ACCOUNT})
+        self._accept(
+            "evt_device",
+            "mayajaal.device.seen",
+            {"account_id": ACCOUNT, "device_id": DEVICE},
+        )
+        with self.sessions() as session:
+            account_record = WebhookEventRepository(session).get("evt_account")
+            device_record = WebhookEventRepository(session).get("evt_device")
+        assert account_record is not None and device_record is not None
+        account = RazorpayEventNormalizer().normalize(account_record)
+        device = RazorpayEventNormalizer().normalize(device_record)
+        account_node = build_incremental_graph_projection(account).nodes[0]
+        device_node = build_incremental_graph_projection(device).nodes[0]
+        merged = {**account_node.properties, **device_node.properties}
+        self.assertEqual(merged["created_at"], account.occurred_at)
+        self.assertEqual(merged["created_known_at"], account.ingested_at)
+
     def test_processing_lease_reclaims_only_abandoned_work(self) -> None:
         self._accept(
             "evt_active",

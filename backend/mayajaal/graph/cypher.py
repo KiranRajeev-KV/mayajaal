@@ -58,6 +58,13 @@ ORDER BY relationship.event_time, relationship.event_id, relationship_type
 NODES_FOR_FEATURES = """
 MATCH (node)
 WHERE any(label IN labels(node) WHERE label IN $node_types)
+  AND (
+    NOT 'Account' IN labels(node)
+    OR (
+      node.created_at <= datetime($cutoff)
+      AND node.created_known_at <= datetime($cutoff)
+    )
+  )
 RETURN labels(node)[0] AS node_type, node.canonical_id AS canonical_id,
        properties(node) AS properties
 ORDER BY node_type, canonical_id

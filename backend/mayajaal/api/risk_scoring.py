@@ -138,7 +138,10 @@ class RuntimeRiskScoringService:
             return existing.case_id
         case = RiskCase(
             case_id=str(
-                uuid5(NAMESPACE_URL, f"mayajaal:risk-case:{decision.subject_id}")
+                uuid5(
+                    NAMESPACE_URL,
+                    f"mayajaal:risk-case:{decision.subject_id}:{decision.decision_id}",
+                )
             ),
             subject_type=InvestigationSubjectType.ACCOUNT,
             subject_id=decision.subject_id,

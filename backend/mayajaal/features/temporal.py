@@ -33,6 +33,14 @@ class TemporalFeatureSnapshot:
             raise ValueError(
                 "cannot extract features for an account not known at cutoff"
             )
+        created_known_at = node.properties.get("created_known_at")
+        if created_known_at is not None:
+            if not isinstance(created_known_at, datetime):
+                raise TypeError("Account.created_known_at must be a datetime")
+            if created_known_at > self.cutoff:
+                raise ValueError(
+                    "cannot extract features for an account not known at cutoff"
+                )
         return created_at
 
 

@@ -37,7 +37,7 @@ def main() -> int:
     parser.add_argument(
         "--policy-path",
         type=Path,
-        default=Path("artifacts/policy-standard-10k-final/policy_model.json"),
+        default=Path("artifacts/policy-decision-verified/policy_model.json"),
     )
     arguments = parser.parse_args()
     config_path = arguments.config.resolve()

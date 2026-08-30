@@ -121,7 +121,27 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
         # Namespaced fixture fields are Mayajaal demo metadata, not Razorpay claims.
         shared_payment = "00000000-0000-0000-0000-0000000000aa"
         yield (
-            "evt_mayajaal_graph_device_001",
+            "evt_mayajaal_graph_12c_account_001",
+            _payload(
+                event="mayajaal.account.created",
+                created_at=1_780_000_020,
+                payment_id="pay_demo_graph_account_001",
+                mayajaal={"account_id": "00000000-0000-0000-0000-000000000001"},
+            ),
+            True,
+        )
+        yield (
+            "evt_mayajaal_graph_12c_account_002",
+            _payload(
+                event="mayajaal.account.created",
+                created_at=1_780_000_021,
+                payment_id="pay_demo_graph_account_002",
+                mayajaal={"account_id": "00000000-0000-0000-0000-000000000002"},
+            ),
+            True,
+        )
+        yield (
+            "evt_mayajaal_graph_12c_device_001",
             _payload(
                 event="mayajaal.device.seen",
                 created_at=1_780_000_030,
@@ -136,7 +156,7 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
             True,
         )
         yield (
-            "evt_mayajaal_graph_payment_001",
+            "evt_mayajaal_graph_12c_payment_001",
             _payload(
                 event="mayajaal.payment.attached",
                 created_at=1_780_000_031,
@@ -151,7 +171,7 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
             True,
         )
         yield (
-            "evt_mayajaal_graph_payment_002",
+            "evt_mayajaal_graph_12c_payment_002",
             _payload(
                 event="mayajaal.payment.attached",
                 created_at=1_780_000_029,
