@@ -8,6 +8,7 @@ from .models import (
     GraphRelationshipType,
 )
 from .projection import (
+    RuntimeCommerceAttributes,
     RuntimeIdentityAttributes,
     build_graph_projection,
     build_incremental_graph_projection,
@@ -22,6 +23,7 @@ __all__ = [
     "GraphRelationship",
     "GraphRelationshipType",
     "Neo4jGraphRepository",
+    "RuntimeCommerceAttributes",
     "RuntimeIdentityAttributes",
     "build_graph_projection",
     "build_incremental_graph_projection",

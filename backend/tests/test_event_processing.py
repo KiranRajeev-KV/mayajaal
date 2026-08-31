@@ -31,6 +31,8 @@ from mayajaal.schemas import EventType
 ACCOUNT = "00000000-0000-0000-0000-000000000001"
 DEVICE = "00000000-0000-0000-0000-0000000000d1"
 PAYMENT = "00000000-0000-0000-0000-0000000000aa"
+ADDRESS = "00000000-0000-0000-0000-0000000000ab"
+PROMOTION = "00000000-0000-0000-0000-0000000000ac"
 
 
 class _Graph:
@@ -80,6 +82,21 @@ class EventProcessingTests(TestCase):
         self._accept("evt_bad", "payment.captured", {"account_id": ACCOUNT})
         failed = WebhookEventProcessor(self.sessions, _Graph()).process("evt_bad")
         self.assertEqual(failed.status, WebhookProcessingStatus.FAILED)
+        self._accept_payload(
+            "evt_malformed_order",
+            "order.paid",
+            ["payment", "order"],
+            {
+                "order": {"entity": {"entity": "order", "id": "order_bad"}},
+                "payment": {"entity": {"entity": "payment", "id": "pay_bad"}},
+            },
+        )
+        self.assertEqual(
+            WebhookEventProcessor(self.sessions, _Graph())
+            .process("evt_malformed_order")
+            .status,
+            WebhookProcessingStatus.FAILED,
+        )
         self._accept(
             "evt_retry",
             "mayajaal.payment.attached",
@@ -96,6 +113,109 @@ class EventProcessingTests(TestCase):
         )  # type: ignore[arg-type]
         self.assertEqual(recovered.status, WebhookProcessingStatus.PROCESSED)
         self.assertEqual(recovered.graph_relationships_written, 1)
+
+    def test_commerce_handlers_project_offline_graph_semantics_idempotently(
+        self,
+    ) -> None:
+        order_provider_id = "order_commerce_001"
+        self._accept_payload(
+            "evt_order",
+            "order.paid",
+            ["payment", "order"],
+            {
+                "order": {
+                    "entity": {
+                        "entity": "order",
+                        "id": order_provider_id,
+                        "amount": 12_500,
+                    }
+                },
+                "payment": {
+                    "entity": {
+                        "entity": "payment",
+                        "id": "pay_commerce_001",
+                        "order_id": order_provider_id,
+                    }
+                },
+                "mayajaal": {
+                    "account_id": ACCOUNT,
+                    "shipping_address_id": ADDRESS,
+                    "shipping_country_code": "in",
+                },
+            },
+        )
+        self._accept(
+            "evt_promotion",
+            "mayajaal.promotion.redeemed",
+            {
+                "account_id": ACCOUNT,
+                "order_id": "7dc33ba8-cff4-5259-a8e2-a91f6000e8ca",
+                "promotion_id": PROMOTION,
+                "promotion_code": "SAVE10",
+            },
+        )
+        for event_id, event_type in (
+            ("evt_refund_created", "refund.created"),
+            ("evt_refund_processed", "refund.processed"),
+        ):
+            self._accept_payload(
+                event_id,
+                event_type,
+                ["refund", "payment"],
+                {
+                    "refund": {
+                        "entity": {
+                            "entity": "refund",
+                            "id": "rfnd_commerce_001",
+                            "amount": 12_500,
+                        }
+                    },
+                    "payment": {
+                        "entity": {
+                            "entity": "payment",
+                            "id": "pay_commerce_001",
+                            "order_id": order_provider_id,
+                        }
+                    },
+                    "mayajaal": {"account_id": ACCOUNT},
+                },
+            )
+
+        graph = _Graph()
+        processor = WebhookEventProcessor(self.sessions, graph)  # type: ignore[arg-type]
+        results = tuple(
+            processor.process(event_id)
+            for event_id in (
+                "evt_order",
+                "evt_promotion",
+                "evt_refund_created",
+                "evt_refund_processed",
+            )
+        )
+        self.assertEqual(
+            tuple(result.canonical_event_type for result in results),
+            (
+                EventType.ORDER_PLACED,
+                EventType.PROMOTION_REDEEMED,
+                EventType.REFUND_REQUESTED,
+                EventType.REFUND_RESOLVED,
+            ),
+        )
+        order_projection = graph.projections[0]
+        self.assertEqual(order_projection.nodes[1].properties["total_paise"], 12_500)
+        self.assertEqual(order_projection.nodes[2].properties["country_code"], "IN")
+        self.assertEqual(len(order_projection.relationships), 2)
+        self.assertTrue(
+            all(
+                relationship.known_at == datetime(2026, 6, 1, tzinfo=UTC)
+                for relationship in order_projection.relationships
+            )
+        )
+        self.assertEqual(
+            processor.process("evt_order").canonical_event_id,
+            results[0].canonical_event_id,
+        )
+        self.assertEqual(graph.projections[0], graph.projections[-1])
 
     def test_incremental_projection_preserves_event_occurrence_time(self) -> None:
         self._accept(
@@ -272,6 +392,30 @@ class EventProcessingTests(TestCase):
                 "event": event_type,
                 "contains": ["payment"],
                 "payload": {"mayajaal": fixture},
+                "created_at": 1_780_000_000,
+            }
+        )
+        with self.sessions.begin() as session:
+            WebhookInboxService(session).accept(
+                provider_event_id=event_id,
+                envelope=envelope,
+                raw_body=b"fixture",
+                received_at=datetime(2026, 6, 1, tzinfo=UTC),
+            )
+
+    def _accept_payload(
+        self,
+        event_id: str,
+        event_type: str,
+        contains: list[str],
+        payload: dict[str, object],
+    ) -> None:
+        envelope = RazorpayWebhookEnvelope.model_validate(
+            {
+                "entity": "event",
+                "event": event_type,
+                "contains": contains,
+                "payload": payload,
                 "created_at": 1_780_000_000,
             }
         )

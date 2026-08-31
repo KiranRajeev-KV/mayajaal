@@ -71,7 +71,7 @@ api-run:
     just --justfile {{backend_justfile}} api-run
 
 webhook-simulate mode="normal" endpoint="http://127.0.0.1:8000":
-    just --justfile {{backend_justfile}} webhook-simulate mode={{mode}} endpoint={{endpoint}}
+    just --justfile {{backend_justfile}} webhook-simulate {{mode}} {{endpoint}}
 
 neo4j-load config="config.toml":
     just --justfile {{backend_justfile}} neo4j-load {{config}}
@@ -81,16 +81,19 @@ neo4j-reset:
     just --justfile {{backend_justfile}} neo4j-reset
 
 webhook-process event_id="" limit="":
-    just --justfile {{backend_justfile}} webhook-process event_id={{event_id}} limit={{limit}}
+    just --justfile {{backend_justfile}} webhook-process {{event_id}} {{limit}}
 
 risk-process event_id:
     just --justfile {{backend_justfile}} risk-process event_id={{event_id}}
 
 realtime-process event_id="" limit="":
-    just --justfile {{backend_justfile}} realtime-process event_id={{event_id}} limit={{limit}}
+    if [ -n "{{event_id}}" ]; then just --justfile {{backend_justfile}} realtime-process {{event_id}}; else cd backend && uv run python -m scripts.process_realtime --limit {{limit}}; fi
 
 postgres-risk-concurrency-test:
     just --justfile {{backend_justfile}} postgres-risk-concurrency-test
+
+postgres-investigation-concurrency-test:
+    just --justfile {{backend_justfile}} postgres-investigation-concurrency-test
 
 features-extract config="config.toml":
     just --justfile {{backend_justfile}} features-extract {{config}}

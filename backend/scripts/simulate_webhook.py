@@ -41,6 +41,23 @@ def _payload(
     ).encode("utf-8")
 
 
+def _commerce_payload(
+    *, event: str, created_at: int, payload: dict[str, object], contains: list[str]
+) -> bytes:
+    """Build a Razorpay-shaped commerce payload plus namespaced local bindings."""
+    return json.dumps(
+        {
+            "entity": "event",
+            "event": event,
+            "contains": contains,
+            "payload": payload,
+            "created_at": created_at,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
 def _send(
     *, endpoint: str, secret: str, provider_event_id: str, body: bytes, valid: bool
 ) -> tuple[int, str]:
@@ -69,6 +86,7 @@ def _send(
 
 
 def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
+    shared_payment = "00000000-0000-0000-0000-0000000000aa"
     if mode == "normal":
         yield (
             "evt_mayajaal_demo_normal_001",
@@ -119,7 +137,6 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
         )
     elif mode == "graph-demo":
         # Namespaced fixture fields are Mayajaal demo metadata, not Razorpay claims.
-        shared_payment = "00000000-0000-0000-0000-0000000000aa"
         yield (
             "evt_mayajaal_graph_12c_account_001",
             _payload(
@@ -130,6 +147,103 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
             ),
             True,
         )
+    elif mode == "commerce-demo":
+        # Provider resource IDs/amounts are Razorpay-shaped. Customer and
+        # shipping bindings, plus the synthetic promotion, stay namespaced.
+        account = "00000000-0000-0000-0000-000000000011"
+        address = "00000000-0000-0000-0000-000000000022"
+        order = "order_mayajaal_commerce_001"
+        fixture = {
+            "account_id": account,
+            "shipping_address_id": address,
+            "shipping_country_code": "IN",
+            "exposure_paise": 125_000,
+            "context_id": "commerce-demo-order",
+        }
+        yield (
+            "evt_mayajaal_commerce_account_001",
+            _payload(
+                event="mayajaal.account.created",
+                created_at=1_780_000_040,
+                payment_id="pay_demo_commerce_account",
+                mayajaal={"account_id": account},
+            ),
+            True,
+        )
+        yield (
+            "evt_mayajaal_commerce_order_001",
+            _commerce_payload(
+                event="order.paid",
+                created_at=1_780_000_041,
+                contains=["payment", "order"],
+                payload={
+                    "order": {
+                        "entity": {"entity": "order", "id": order, "amount": 125_000}
+                    },
+                    "payment": {
+                        "entity": {
+                            "entity": "payment",
+                            "id": "pay_mayajaal_commerce_001",
+                            "order_id": order,
+                        }
+                    },
+                    "mayajaal": fixture,
+                },
+            ),
+            True,
+        )
+        yield (
+            "evt_mayajaal_commerce_promotion_001",
+            _payload(
+                event="mayajaal.promotion.redeemed",
+                created_at=1_780_000_042,
+                payment_id="pay_demo_commerce_promo",
+                mayajaal={
+                    "account_id": account,
+                    "order_id": "1804a0cc-6786-57ba-9083-3686f59f072e",
+                    "promotion_id": "00000000-0000-0000-0000-000000000033",
+                    "promotion_code": "MAYA10",
+                    "exposure_paise": 125_000,
+                    "context_id": "commerce-demo-promotion",
+                },
+            ),
+            True,
+        )
+        for event, event_id, created_at in (
+            ("refund.created", "evt_mayajaal_commerce_refund_001", 1_780_000_043),
+            ("refund.processed", "evt_mayajaal_commerce_refund_002", 1_780_000_044),
+        ):
+            yield (
+                event_id,
+                _commerce_payload(
+                    event=event,
+                    created_at=created_at,
+                    contains=["refund", "payment"],
+                    payload={
+                        "refund": {
+                            "entity": {
+                                "entity": "refund",
+                                "id": "rfnd_mayajaal_commerce_001",
+                                "amount": 125_000,
+                            }
+                        },
+                        "payment": {
+                            "entity": {
+                                "entity": "payment",
+                                "id": "pay_mayajaal_commerce_001",
+                                "order_id": order,
+                            }
+                        },
+                        "mayajaal": {
+                            "account_id": account,
+                            "exposure_paise": 125_000,
+                            "context_id": f"commerce-demo-{event}",
+                        },
+                    },
+                ),
+                True,
+            )
+    if mode == "graph-demo":
         yield (
             "evt_mayajaal_graph_12c_account_002",
             _payload(
@@ -189,7 +303,14 @@ def _deliveries(mode: str) -> Iterable[tuple[str, bytes, bool]]:
             ),
             True,
         )
-    else:
+    if mode not in {
+        "normal",
+        "duplicate",
+        "out-of-order",
+        "invalid-signature",
+        "graph-demo",
+        "commerce-demo",
+    }:
         raise ValueError(f"unsupported mode: {mode}")
 
 
@@ -203,6 +324,7 @@ def main() -> int:
             "out-of-order",
             "invalid-signature",
             "graph-demo",
+            "commerce-demo",
         ),
         default="normal",
     )

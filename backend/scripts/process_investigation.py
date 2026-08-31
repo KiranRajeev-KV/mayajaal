@@ -2,10 +2,12 @@
 
 import argparse
 
+from mayajaal.api.env import load_environment
 from mayajaal.api.runtime import create_realtime_application_runtime
 
 
 def main() -> None:
+    load_environment()
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()

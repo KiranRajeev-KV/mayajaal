@@ -55,6 +55,20 @@ class RuntimeIdentityAttributes:
     payment_method: str | None = None
 
 
+@dataclass(frozen=True)
+class RuntimeCommerceAttributes:
+    """Truthful commerce metadata supplied alongside one runtime event.
+
+    These are graph-node properties, rather than canonical Event fields: the
+    Event remains the immutable relationship fact while adapters retain the
+    bounded provider/simulator details needed by the existing feature schema.
+    """
+
+    order_total_paise: int | None = None
+    shipping_country_code: str | None = None
+    promotion_code: str | None = None
+
+
 class _HasId(Protocol):
     @property
     def id(self) -> UUID: ...
@@ -370,6 +384,7 @@ def build_graph_projection(
 def build_incremental_graph_projection(
     event: Event,
     attributes: RuntimeIdentityAttributes | None = None,
+    commerce_attributes: RuntimeCommerceAttributes | None = None,
 ) -> GraphProjection:
     """Project one already-canonical runtime fact using the offline graph schema.
 
@@ -379,6 +394,7 @@ def build_incremental_graph_projection(
     """
     account_id = str(event.account_id)
     attributes = attributes or RuntimeIdentityAttributes()
+    commerce_attributes = commerce_attributes or RuntimeCommerceAttributes()
     nodes: list[GraphNode] = [
         GraphNode(
             node_type=GraphNodeType.ACCOUNT,
@@ -453,6 +469,120 @@ def build_incremental_graph_projection(
             event.payment_identity_id,
             GraphRelationshipType.PAID_WITH,
             _properties(method=attributes.payment_method),
+        )
+    elif (
+        event.event_type is EventType.ORDER_PLACED
+        and event.order_id is not None
+        and event.address_id is not None
+    ):
+        if commerce_attributes.order_total_paise is None:
+            raise ValueError("runtime order projection requires total_paise")
+        if commerce_attributes.shipping_country_code is None:
+            raise ValueError("runtime order projection requires shipping_country_code")
+        order_id = str(event.order_id)
+        address_id = str(event.address_id)
+        nodes.extend(
+            (
+                GraphNode(
+                    node_type=GraphNodeType.ORDER,
+                    canonical_id=order_id,
+                    properties=_properties(
+                        canonical_id=order_id,
+                        total_paise=commerce_attributes.order_total_paise,
+                    ),
+                ),
+                GraphNode(
+                    node_type=GraphNodeType.ADDRESS,
+                    canonical_id=address_id,
+                    properties=_properties(
+                        canonical_id=address_id,
+                        country_code=commerce_attributes.shipping_country_code,
+                    ),
+                ),
+            )
+        )
+        relationships.extend(
+            (
+                _relationship(
+                    GraphRelationshipType.PLACED,
+                    GraphNodeType.ACCOUNT,
+                    account_id,
+                    GraphNodeType.ORDER,
+                    order_id,
+                    event.id,
+                    event.event_type,
+                    event.occurred_at,
+                    event.ingested_at,
+                ),
+                _relationship(
+                    GraphRelationshipType.SHIPPED_TO,
+                    GraphNodeType.ORDER,
+                    order_id,
+                    GraphNodeType.ADDRESS,
+                    address_id,
+                    event.id,
+                    event.event_type,
+                    event.occurred_at,
+                    event.ingested_at,
+                ),
+            )
+        )
+    elif (
+        event.event_type is EventType.PROMOTION_REDEEMED
+        and event.order_id is not None
+        and event.promotion_id is not None
+    ):
+        if commerce_attributes.promotion_code is None:
+            raise ValueError("runtime promotion projection requires promotion_code")
+        promotion_id = str(event.promotion_id)
+        nodes.append(
+            GraphNode(
+                node_type=GraphNodeType.PROMOTION,
+                canonical_id=promotion_id,
+                properties=_properties(
+                    canonical_id=promotion_id,
+                    code=commerce_attributes.promotion_code,
+                ),
+            )
+        )
+        relationships.append(
+            _relationship(
+                GraphRelationshipType.USED_PROMO,
+                GraphNodeType.ORDER,
+                str(event.order_id),
+                GraphNodeType.PROMOTION,
+                promotion_id,
+                event.id,
+                event.event_type,
+                event.occurred_at,
+                event.ingested_at,
+            )
+        )
+    elif (
+        event.event_type in {EventType.REFUND_REQUESTED, EventType.REFUND_RESOLVED}
+        and event.order_id is not None
+        and event.refund_id is not None
+    ):
+        refund_id = str(event.refund_id)
+        nodes.append(
+            GraphNode(
+                node_type=GraphNodeType.REFUND,
+                canonical_id=refund_id,
+                properties={"canonical_id": refund_id},
+            )
+        )
+        relationships.append(
+            _relationship(
+                GraphRelationshipType.HAS_REFUND,
+                GraphNodeType.ORDER,
+                str(event.order_id),
+                GraphNodeType.REFUND,
+                refund_id,
+                event.id,
+                event.event_type,
+                event.occurred_at,
+                event.ingested_at,
+            )
         )
     else:
         if event.event_type is not EventType.ACCOUNT_CREATED:

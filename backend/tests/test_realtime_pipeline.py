@@ -31,6 +31,7 @@ from mayajaal.api.webhooks import (
     WebhookInboxService,
 )
 from mayajaal.graph import GraphLoadReport, GraphProjection
+from mayajaal.schemas import EventType
 
 ACCOUNT = "00000000-0000-0000-0000-0000000000aa"
 DEVICE = "00000000-0000-0000-0000-0000000000bb"
@@ -91,6 +92,25 @@ class RealtimePipelineTests(TestCase):
         self.assertEqual(setup.state, RealtimePipelineState.SETUP)
         self.assertEqual(failed.state, RealtimePipelineState.WEBHOOK_FAILED)
         self.assertEqual(self.scoring.calls, 0)
+
+    def test_commerce_fact_uses_existing_scoring_pipeline(self) -> None:
+        self._accept(
+            "order",
+            "mayajaal.order.placed",
+            {
+                "account_id": ACCOUNT,
+                "order_id": "00000000-0000-0000-0000-0000000000cc",
+                "address_id": "00000000-0000-0000-0000-0000000000dd",
+                "total_paise": 100,
+                "shipping_country_code": "IN",
+                "exposure_paise": 100,
+                "context_id": "order-context",
+            },
+        )
+        result = self.pipeline.process("order")
+        self.assertEqual(result.state, RealtimePipelineState.SCORED)
+        self.assertEqual(result.canonical_event_type, EventType.ORDER_PLACED)
+        self.assertEqual(self.scoring.calls, 1)
 
     def test_scoring_failure_is_durable_skipped_by_catch_up_and_explicitly_recovers(
         self,

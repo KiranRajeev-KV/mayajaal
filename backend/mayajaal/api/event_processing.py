@@ -1,5 +1,6 @@
 """Durable webhook normalization and incremental, idempotent graph projection."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from os import environ
@@ -11,6 +12,7 @@ from pydantic import Field, field_validator
 from mayajaal.graph import (
     GraphLoadReport,
     GraphProjection,
+    RuntimeCommerceAttributes,
     RuntimeIdentityAttributes,
     build_incremental_graph_projection,
 )
@@ -32,6 +34,7 @@ NEO4J_USERNAME_ENVIRONMENT_VARIABLE = "MAYAJAAL_NEO4J_USERNAME"
 NEO4J_PASSWORD_ENVIRONMENT_VARIABLE = "MAYAJAAL_NEO4J_PASSWORD"
 _EVENT_NAMESPACE = NAMESPACE_URL
 DEFAULT_PROCESSING_LEASE_TIMEOUT = timedelta(minutes=5)
+type _NormalizerHandler = Callable[[WebhookEventRecord, RazorpayWebhookEnvelope], Event]
 
 
 class Neo4jRuntimeConfig(SchemaModel):
@@ -74,46 +77,108 @@ class IncrementalGraphWriter(Protocol):
 
 
 class RazorpayEventNormalizer:
-    """Map only explicitly namespaced Mayajaal synthetic fixtures to Event facts."""
+    """Dispatch truthful provider and namespaced simulator facts to Event.
+
+    Razorpay does not provide a customer-account or shipping-address identity in
+    these webhooks.  Those local graph bindings therefore stay in
+    ``payload.mayajaal``; provider order/refund IDs and monetary amounts remain
+    sourced from the provider entity payload.  Adding a supported delivery is a
+    small handler, rather than another branch in a central conditional.
+    """
 
     _types: ClassVar[dict[str, EventType]] = {
         "mayajaal.account.created": EventType.ACCOUNT_CREATED,
         "mayajaal.device.seen": EventType.DEVICE_SEEN,
         "mayajaal.ip.seen": EventType.IP_SEEN,
         "mayajaal.payment.attached": EventType.PAYMENT_ATTACHED,
+        "mayajaal.order.placed": EventType.ORDER_PLACED,
+        "mayajaal.promotion.redeemed": EventType.PROMOTION_REDEEMED,
+        "mayajaal.refund.requested": EventType.REFUND_REQUESTED,
+        "mayajaal.refund.resolved": EventType.REFUND_RESOLVED,
+        "order.paid": EventType.ORDER_PLACED,
+        "refund.created": EventType.REFUND_REQUESTED,
+        "refund.processed": EventType.REFUND_RESOLVED,
     }
 
     def normalize(self, record: WebhookEventRecord) -> Event:
-        event_type = self._types.get(record.event_type)
-        if event_type is None:
-            raise UnsupportedProviderEvent(
-                f"unsupported synthetic provider event type: {record.event_type}"
-            )
         envelope = RazorpayWebhookEnvelope.model_validate(record.payload)
-        fixture = envelope.payload.get("mayajaal")
-        if not isinstance(fixture, dict):
+        handler = self._handlers().get(record.event_type)
+        if handler is None:
             raise UnsupportedProviderEvent(
-                "missing mayajaal synthetic fixture metadata"
+                f"unsupported provider event type: {record.event_type}"
             )
-        fixture_values = cast(dict[str, object], fixture)
-        account_id = _fixture_uuid(fixture_values, "account_id")
-        values: dict[str, object] = {
+        return handler(record, envelope)
+
+    def _normalize_synthetic(
+        self, record: WebhookEventRecord, envelope: RazorpayWebhookEnvelope
+    ) -> Event:
+        event_type = self._types[record.event_type]
+        fixture = _mayajaal_metadata(envelope)
+        values: dict[str, object] = self._event_values(record, event_type, fixture)
+        identifiers = {
+            EventType.DEVICE_SEEN: (("device_id", "device_id"),),
+            EventType.IP_SEEN: (("ip_address_id", "ip_address_id"),),
+            EventType.PAYMENT_ATTACHED: (
+                ("payment_identity_id", "payment_identity_id"),
+            ),
+            EventType.ORDER_PLACED: (
+                ("order_id", "order_id"),
+                ("address_id", "address_id"),
+            ),
+            EventType.PROMOTION_REDEEMED: (
+                ("order_id", "order_id"),
+                ("promotion_id", "promotion_id"),
+            ),
+            EventType.REFUND_REQUESTED: (
+                ("order_id", "order_id"),
+                ("refund_id", "refund_id"),
+            ),
+            EventType.REFUND_RESOLVED: (
+                ("order_id", "order_id"),
+                ("refund_id", "refund_id"),
+            ),
+        }
+        for event_key, fixture_key in identifiers.get(event_type, ()):
+            values[event_key] = _fixture_uuid(fixture, fixture_key)
+        return Event.model_validate(values)
+
+    def _normalize_order_paid(
+        self, record: WebhookEventRecord, envelope: RazorpayWebhookEnvelope
+    ) -> Event:
+        fixture = _mayajaal_metadata(envelope)
+        order = _provider_entity(envelope.payload, "order")
+        values = self._event_values(record, EventType.ORDER_PLACED, fixture)
+        values["order_id"] = _provider_uuid(order, "id", "order")
+        values["address_id"] = _fixture_uuid(fixture, "shipping_address_id")
+        return Event.model_validate(values)
+
+    def _normalize_refund(
+        self, record: WebhookEventRecord, envelope: RazorpayWebhookEnvelope
+    ) -> Event:
+        fixture = _mayajaal_metadata(envelope)
+        refund = _provider_entity(envelope.payload, "refund")
+        payment = _provider_entity(envelope.payload, "payment")
+        event_type = self._types[record.event_type]
+        values = self._event_values(record, event_type, fixture)
+        values["refund_id"] = _provider_uuid(refund, "id", "refund")
+        values["order_id"] = _provider_uuid(payment, "order_id", "order")
+        return Event.model_validate(values)
+
+    def _event_values(
+        self,
+        record: WebhookEventRecord,
+        event_type: EventType,
+        fixture: dict[str, object],
+    ) -> dict[str, object]:
+        return {
             "id": uuid5(
                 _EVENT_NAMESPACE, f"mayajaal:webhook:{record.provider_event_id}"
             ),
             "event_type": event_type,
             "occurred_at": _aware(record.provider_created_at),
             "ingested_at": _aware(record.received_at),
-            "account_id": account_id,
+            "account_id": _fixture_uuid(fixture, "account_id"),
         }
-        identity_keys = {
-            EventType.DEVICE_SEEN: ("device_id", "device_id"),
-            EventType.IP_SEEN: ("ip_address_id", "ip_address_id"),
-            EventType.PAYMENT_ATTACHED: ("payment_identity_id", "payment_identity_id"),
-        }
-        if identity := identity_keys.get(event_type):
-            values[identity[0]] = _fixture_uuid(fixture_values, identity[1])
-        return Event.model_validate(values)
 
     def runtime_identity_attributes(
         self, record: WebhookEventRecord
@@ -132,6 +197,79 @@ class RazorpayEventNormalizer:
             ),
         )
 
+    def runtime_commerce_attributes(
+        self, record: WebhookEventRecord
+    ) -> RuntimeCommerceAttributes:
+        """Read only node properties required by existing commerce extractors."""
+        envelope = RazorpayWebhookEnvelope.model_validate(record.payload)
+        fixture = _mayajaal_metadata(envelope)
+        if record.event_type == "order.paid":
+            order = _provider_entity(envelope.payload, "order")
+            return RuntimeCommerceAttributes(
+                order_total_paise=_provider_int(order, "amount"),
+                shipping_country_code=_country_code(fixture, "shipping_country_code"),
+            )
+        if record.event_type == "mayajaal.order.placed":
+            return RuntimeCommerceAttributes(
+                order_total_paise=_fixture_int(fixture, "total_paise"),
+                shipping_country_code=_country_code(fixture, "shipping_country_code"),
+            )
+        if record.event_type == "mayajaal.promotion.redeemed":
+            return RuntimeCommerceAttributes(
+                promotion_code=_fixture_string(fixture, "promotion_code")
+            )
+        return RuntimeCommerceAttributes()
+
+    def _handlers(self) -> dict[str, _NormalizerHandler]:
+        return {
+            "mayajaal.account.created": self._normalize_synthetic,
+            "mayajaal.device.seen": self._normalize_synthetic,
+            "mayajaal.ip.seen": self._normalize_synthetic,
+            "mayajaal.payment.attached": self._normalize_synthetic,
+            "mayajaal.order.placed": self._normalize_synthetic,
+            "mayajaal.promotion.redeemed": self._normalize_synthetic,
+            "mayajaal.refund.requested": self._normalize_synthetic,
+            "mayajaal.refund.resolved": self._normalize_synthetic,
+            "order.paid": self._normalize_order_paid,
+            "refund.created": self._normalize_refund,
+            "refund.processed": self._normalize_refund,
+        }
+
+
+def _mayajaal_metadata(envelope: RazorpayWebhookEnvelope) -> dict[str, object]:
+    metadata = envelope.payload.get("mayajaal")
+    if not isinstance(metadata, dict):
+        raise UnsupportedProviderEvent("missing Mayajaal mapping metadata")
+    return cast(dict[str, object], metadata)
+
+
+def _provider_entity(payload: dict[str, object], key: str) -> dict[str, object]:
+    resource = payload.get(key)
+    if not isinstance(resource, dict):
+        raise UnsupportedProviderEvent(f"missing Razorpay {key} payload")
+    resource_values = cast(dict[str, object], resource)
+    entity = resource_values.get("entity")
+    if not isinstance(entity, dict):
+        raise UnsupportedProviderEvent(f"missing Razorpay {key}.entity payload")
+    values = cast(dict[str, object], entity)
+    if values.get("entity") != key:
+        raise UnsupportedProviderEvent(f"invalid Razorpay {key}.entity type")
+    return values
+
+
+def _provider_uuid(values: dict[str, object], key: str, resource_type: str) -> UUID:
+    value = values.get(key)
+    if not isinstance(value, str) or not value:
+        raise UnsupportedProviderEvent(f"missing Razorpay {resource_type} {key}")
+    return uuid5(_EVENT_NAMESPACE, f"mayajaal:razorpay:{resource_type}:{value}")
+
+
+def _provider_int(values: dict[str, object], key: str) -> int:
+    value = values.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise UnsupportedProviderEvent(f"invalid Razorpay numeric field {key}")
+    return value
+
 
 def _fixture_uuid(values: dict[str, object], key: str) -> UUID:
     value = values.get(key)
@@ -144,6 +282,27 @@ def _fixture_uuid(values: dict[str, object], key: str) -> UUID:
         return UUID(normalize_stable_identifier(value))
     except ValueError as error:
         raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}") from error
+
+
+def _fixture_int(values: dict[str, object], key: str) -> int:
+    value = values.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}")
+    return value
+
+
+def _fixture_string(values: dict[str, object], key: str) -> str:
+    value = values.get(key)
+    if not isinstance(value, str) or not value:
+        raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}")
+    return value
+
+
+def _country_code(values: dict[str, object], key: str) -> str:
+    value = _fixture_string(values, key)
+    if len(value) != 2 or not value.isascii() or not value.isalpha():
+        raise UnsupportedProviderEvent(f"invalid synthetic fixture {key}")
+    return value.upper()
 
 
 def _optional_enum_value[EnumT: DevicePlatform | DeviceType | PaymentMethod](
@@ -224,6 +383,9 @@ class WebhookEventProcessor:
             try:
                 event = self._normalizer.normalize(record)
                 attributes = self._normalizer.runtime_identity_attributes(record)
+                commerce_attributes = self._normalizer.runtime_commerce_attributes(
+                    record
+                )
                 NormalizedEventRepository(session).persist(
                     provider_event_id=provider_event_id, event=event
                 )
@@ -237,7 +399,9 @@ class WebhookEventProcessor:
                     provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
                 )
         try:
-            projection = build_incremental_graph_projection(event, attributes)
+            projection = build_incremental_graph_projection(
+                event, attributes, commerce_attributes
+            )
             report = self._graph.load_incremental(projection)
         except Exception as error:
             with self._sessions.begin() as session:
@@ -288,7 +452,9 @@ class WebhookEventProcessor:
     ) -> ProcessedWebhookEvent:
         report = self._graph.load_incremental(
             build_incremental_graph_projection(
-                event, self._normalizer.runtime_identity_attributes(record)
+                event,
+                self._normalizer.runtime_identity_attributes(record),
+                self._normalizer.runtime_commerce_attributes(record),
             )
         )
         return _result(record.provider_event_id, event, report)
@@ -311,6 +477,9 @@ class WebhookEventProcessor:
             try:
                 event = self._normalizer.normalize(record)
                 attributes = self._normalizer.runtime_identity_attributes(record)
+                commerce_attributes = self._normalizer.runtime_commerce_attributes(
+                    record
+                )
                 NormalizedEventRepository(session).persist(
                     provider_event_id=provider_event_id, event=event
                 )
@@ -324,7 +493,9 @@ class WebhookEventProcessor:
                     provider_event_id, WebhookProcessingStatus.FAILED, None, None, 0, 0
                 )
         try:
-            projection = build_incremental_graph_projection(event, attributes)
+            projection = build_incremental_graph_projection(
+                event, attributes, commerce_attributes
+            )
             report = self._graph.load_incremental(projection)
         except Exception as error:
             with self._sessions.begin() as session:

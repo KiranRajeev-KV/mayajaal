@@ -159,12 +159,26 @@ otherwise remains synchronous SQLAlchemy.
 
 Stage 12A stops at `RECEIVED`. Stage 12B is an explicit CLI operation: it
 claims one `RECEIVED`/`FAILED` delivery (or an abandoned `PROCESSING` claim
-whose five-minute lease has expired), supports only the named synthetic
-fixtures `mayajaal.account.created`, `mayajaal.device.seen`,
-`mayajaal.ip.seen`, and `mayajaal.payment.attached`, and stores a validated
-canonical `Event` in `normalized_events`. `payload.mayajaal` contains local
-simulator metadata, not Razorpay fields; unsupported provider events fail
-closed rather than being guessed.
+whose five-minute lease has expired), normalizes a validated canonical `Event`
+in `normalized_events`, and projects it incrementally. The supported lifecycle
+is `ACCOUNT_CREATED`, `DEVICE_SEEN`, `IP_SEEN`, `PAYMENT_ATTACHED`,
+`ORDER_PLACED`, `PROMOTION_REDEEMED`, `REFUND_REQUESTED`, and
+`REFUND_RESOLVED`.
+
+The commerce mapping keeps the provider boundary explicit. Razorpay-shaped
+`order.paid` maps to `ORDER_PLACED`; its provider order ID is deterministically
+derived to the canonical order ID and its provider `order.amount` supplies the
+order total. `refund.created` and `refund.processed` map to
+`REFUND_REQUESTED` and `REFUND_RESOLVED`, respectively, using provider refund
+and payment/order IDs. Razorpay documents `payment.captured` as the same
+capture transition as `order.paid`; it is deliberately unsupported here so one
+purchase is not guessed or double-counted as a separate order-placement fact.
+Razorpay does not supply Mayajaal's customer-account or shipping-address graph
+identities, so required local bindings (`account_id`, shipping identity/country)
+remain in `payload.mayajaal`. `PROMOTION_REDEEMED` and the named
+`mayajaal.*` commerce fixtures are simulator-only metadata: Razorpay is not
+represented as emitting promotion-redemption webhooks. Unsupported or malformed
+provider input fails closed rather than being guessed.
 
 Canonical event IDs are deterministic UUIDv5 values derived from the provider
 delivery ID. Each one-event incremental projection uses the offline graph's
@@ -203,12 +217,13 @@ With the API running, send deterministic fixtures locally:
 
 ```bash
 just webhook-simulate                         # normal accepted delivery
-just webhook-simulate mode=duplicate          # two successful deliveries, one row
-just webhook-simulate mode=out-of-order       # delivery order differs from provider time
-just webhook-simulate mode=invalid-signature  # rejected, no durable row
-just webhook-simulate mode=graph-demo         # accepted then automatically processed/scored
-just realtime-process event_id=<provider-id>  # recover one durable event
-just realtime-process limit=10                # bounded webhook + score catch-up
+just webhook-simulate duplicate               # two successful deliveries, one row
+just webhook-simulate out-of-order            # delivery order differs from provider time
+just webhook-simulate invalid-signature       # rejected, no durable row
+just webhook-simulate graph-demo              # accepted then automatically processed/scored
+just webhook-simulate commerce-demo           # Razorpay-shaped order/refund + synthetic promotion facts
+just realtime-process <provider-id>           # recover one durable event
+just realtime-process '' 10                   # bounded webhook + score catch-up
 ```
 
 There is still deliberately no synthetic-world copy, SSE/WebSocket delivery,
@@ -228,7 +243,10 @@ decision made before it arrived. Account nodes carry the same explicit
 `created_at` and `created_known_at` pair and are excluded unless both precede
 the cutoff. Account creation/history gaps fail closed. The graph demo emits
 both account setup events before its risk events; setup is processed but is not
-scored. Its namespaced runtime fixtures can also supply truthful stable device
+scored. `ORDER_PLACED`, `PROMOTION_REDEEMED`, `REFUND_REQUESTED`, and
+`REFUND_RESOLVED` all run the existing Stage 12C pipeline because they change
+the existing order value/count, promotion reuse, or refund-history features;
+there is no commerce-specific scoring path. Its namespaced runtime fixtures can also supply truthful stable device
 platform/type and payment-method attributes; missing attributes intentionally
 remain missing for the existing categorical feature extractors. Inputs are
 validated through the canonical `DevicePlatform`, `DeviceType`, and
